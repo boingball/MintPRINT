@@ -92,5 +92,5 @@ printerName:
  * behaviour - a config-only or GUI-only change does not need a bump.
  */
 mp_driver_revision_marker:
-        .asciz  "MPDRVREV:22"
+        .asciz  "MPDRVREV:23"
         .even

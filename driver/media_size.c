@@ -102,6 +102,32 @@ unsigned long mp_media_target_height(const char *media,
     return target && target <= 65535UL ? target : 0;
 }
 
+unsigned long mp_media_expected_width_px(const char *media,
+                                         unsigned long page_width_px,
+                                         unsigned long page_height_px,
+                                         unsigned long dpi)
+{
+    unsigned long x, y, media_x_px, media_y_px;
+    unsigned long portrait_error, landscape_error;
+
+    if (!page_width_px || !dpi ||
+        !mp_media_dimensions_100mm(media, &x, &y))
+        return 0;
+
+    media_x_px = (x * dpi + 1270UL) / 2540UL;
+    media_y_px = (y * dpi + 1270UL) / 2540UL;
+
+    /* Match the full (width, height) pair against each orientation, not
+     * just width - see the header comment for why width alone is
+     * ambiguous for an oversized portrait page. */
+    portrait_error = mp_abs_diff(page_width_px, media_x_px) +
+                     mp_abs_diff(page_height_px, media_y_px);
+    landscape_error = mp_abs_diff(page_width_px, media_y_px) +
+                      mp_abs_diff(page_height_px, media_x_px);
+
+    return portrait_error <= landscape_error ? media_x_px : media_y_px;
+}
+
 int mp_is_tiny_auxiliary_band(unsigned long page_width,
                               unsigned long band_width)
 {

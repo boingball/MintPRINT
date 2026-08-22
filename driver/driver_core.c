@@ -37,7 +37,7 @@
  * exactly which build produced it, rather than relying on whoever's
  * reading it to separately check About or remember what they last
  * copied to DEVS:Printers/. */
-#define MP_DRIVER_REV 22
+#define MP_DRIVER_REV 23
 
 struct ExecBase *SysBase = NULL;
 struct DosLibrary *DOSBase = NULL;
@@ -592,9 +592,17 @@ static BOOL mp_job_write_row(struct PrtInfo *pi, ULONG row_number)
      * narrower-than-page content ourselves instead of trusting pi_xpos for
      * that case. A page-filling row (the common real-document case) is
      * unaffected: scaled_total >= g_page_width there, so this still falls
-     * through to pi_xpos (normally 0) exactly as before. */
-    dst_x = (g_page_width > scaled_total) ? (g_page_width - scaled_total) / 2UL
-                                           : (ULONG)pi->pi_xpos;
+     * through to pi_xpos (normally 0) exactly as before.
+     *
+     * Gated on SPECIAL_CENTER: without that check this used to fire for
+     * ANY narrower-than-page row on ANY engine (JPEG/PWG/PDF all funnel
+     * through this function), overriding a deliberately-positioned
+     * narrower image (e.g. one drawn at a specific pi_xpos offset, not
+     * centered) with a centered one instead. Only the caller that actually
+     * asked for centering should get this override. */
+    dst_x = ((g_current_special & SPECIAL_CENTER) && g_page_width > scaled_total)
+                ? (g_page_width - scaled_total) / 2UL
+                : (ULONG)pi->pi_xpos;
 
     for (src_x = 0; src_x < (ULONG)pi->pi_width && dst_x < g_page_width; ++src_x) {
         union colorEntry *pixel = &pi->pi_ColorInt[src_x];
@@ -1237,20 +1245,29 @@ LONG PRT_STDARGS Render(LONG ct, LONG x, LONG y, LONG status, ...)
              * the configured media (the common case) is left untouched. */
             if (mp_detect_engine(&g_config) == MP_ENGINE_PWG &&
                 !(g_current_special & SPECIAL_NOFORMFEED)) {
-                unsigned long media_w_100mm, media_h_100mm;
-                if (mp_media_dimensions_100mm(g_config.media,
-                                              &media_w_100mm, &media_h_100mm)) {
-                    ULONG dpi = g_config.resolution ? g_config.resolution : 300UL;
-                    ULONG media_width_px =
-                        (ULONG)((media_w_100mm * dpi + 1270UL) / 2540UL);
-                    if (media_width_px &&
-                        media_width_px < g_page_width &&
-                        (g_page_width - media_width_px) * 10UL > g_page_width) {
-                        mp_log_3("Clamping oversized PWG page width raw/media/dpi",
-                                 (LONG)g_page_width, (LONG)media_width_px,
-                                 (LONG)dpi);
-                        g_page_width = media_width_px;
-                    }
+                ULONG dpi = g_config.resolution ? g_config.resolution : 300UL;
+                /* mp_media_expected_width_px() weighs BOTH reported
+                 * dimensions, not width alone - width alone cannot tell an
+                 * oversized portrait page (this exact 3287x3508 case) apart
+                 * from a genuine landscape one (3508x2480): 3287 lands
+                 * closer to a portrait A4's landscape-width (3508) than its
+                 * portrait width (2480), so a width-only comparison reads
+                 * it as landscape and never clamps it - letting the very
+                 * oversized page this clamp exists for straight through.
+                 * Bringing g_page_height into it resolves that: the
+                 * oversized page's height (3508) still matches portrait
+                 * overall, while a real landscape page matches on both
+                 * axes at once. See media_size.c/.h and
+                 * tests/test_media_size.c for the exact regression. */
+                ULONG expected_width_px = (ULONG)mp_media_expected_width_px(
+                    g_config.media, g_page_width, g_page_height, dpi);
+                if (expected_width_px &&
+                    expected_width_px < g_page_width &&
+                    (g_page_width - expected_width_px) * 10UL > g_page_width) {
+                    mp_log_3("Clamping oversized PWG page width raw/media/dpi",
+                             (LONG)g_page_width, (LONG)expected_width_px,
+                             (LONG)dpi);
+                    g_page_width = expected_width_px;
                 }
             }
 

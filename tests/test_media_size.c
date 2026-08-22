@@ -64,6 +64,30 @@ int main(void)
            3300UL);
     assert(mp_media_target_height("unknown", 2478UL, 300UL) == 0UL);
 
+    /* mp_media_expected_width_px() must tell an oversized-but-still-portrait
+     * page apart from a genuine landscape one using BOTH reported
+     * dimensions, not width alone. A4 at 300 DPI: portrait is 2480x3508,
+     * landscape is 3508x2480. printer.device has been observed reporting a
+     * 3287x3508 page for a DUMPRPORT-scaled portrait A4 request (see
+     * driver_core.c's PWG page-width clamp) - width alone (3287) sits
+     * closer to the landscape width (3508, 221px away) than the portrait
+     * one (2480, 807px away), which would misread this as landscape and
+     * never clamp it. Bringing height into it fixes that: 3287x3508 still
+     * matches portrait overall (its height is exactly portrait's), so the
+     * expected width comes back 2480 and the clamp fires as intended. A
+     * real landscape page (3508x2480) matches landscape on both axes and
+     * must NOT be clamped. */
+    assert(mp_media_expected_width_px("iso_a4_210x297mm", 2480UL, 3508UL,
+                                      300UL) == 2480UL);
+    assert(mp_media_expected_width_px("iso_a4_210x297mm", 3287UL, 3508UL,
+                                      300UL) == 2480UL);
+    assert(mp_media_expected_width_px("iso_a4_210x297mm", 3508UL, 2480UL,
+                                      300UL) == 3508UL);
+    assert(mp_media_expected_width_px("unknown", 2480UL, 3508UL, 300UL) ==
+           0UL);
+    assert(mp_media_expected_width_px("iso_a4_210x297mm", 0UL, 3508UL,
+                                      300UL) == 0UL);
+
     assert(mp_is_tiny_auxiliary_band(2478UL, 4UL));
     assert(!mp_is_tiny_auxiliary_band(2478UL, 100UL));
     assert(!mp_is_tiny_auxiliary_band(200UL, 4UL));

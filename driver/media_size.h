@@ -16,6 +16,23 @@ unsigned long mp_media_target_height(const char *media,
                                      unsigned long width_px,
                                      unsigned long dpi);
 
+/* Infer which of the configured media's two pixel widths (portrait or
+ * landscape) a reported page actually matches, from BOTH of its reported
+ * dimensions - not width alone. Width alone is ambiguous: an oversized
+ * portrait page (e.g. printer.device reporting 3287x3508 for an A4 page
+ * that should be 2480x3508) can land closer to the media's landscape width
+ * than its portrait one, which would misread a too-wide portrait page as a
+ * legitimate landscape page and let the oversized width straight through.
+ * Comparing the full (width, height) pair against both the portrait and
+ * landscape orientation resolves that: the oversized portrait page still
+ * matches portrait orientation overall because its height is right where
+ * portrait expects it, while a genuine landscape page matches on both
+ * axes at once. Returns zero for an unknown media keyword. */
+unsigned long mp_media_expected_width_px(const char *media,
+                                         unsigned long page_width_px,
+                                         unsigned long page_height_px,
+                                         unsigned long dpi);
+
 /* Wordworth can finish a NOFORMFEED page with a four-pixel auxiliary dump.
  * It is not a new physical page and cannot be appended as horizontal rows to
  * the already-streamed full-width PWG raster. Keep the classifier narrow so
