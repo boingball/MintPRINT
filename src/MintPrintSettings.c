@@ -4603,8 +4603,17 @@ query_receive_pump_gui:
     if (window) update_scaling_dropdown(window);
     ensure_quality_defaults();
     if (window) update_quality_dropdown(window);
-    if (window) update_dpi_dropdown(window);
+    /* update_engine_dropdown() must run before update_dpi_dropdown(): it is
+     * what settles driver_engine_buffer on "pwg-raster" for a printer that
+     * advertises it (see mp_rebuild_engine_options_from_query()), and the
+     * DPI dropdown only offers the 300* compatibility entry when the engine
+     * buffer already reads "pwg-raster" at the time it is built. Building
+     * DPI first left a fresh Query showing plain "600 dpi" with no compat
+     * entry until the config was saved and the app reopened, when the
+     * cached-capabilities path (apply_cached_capabilities()) happened to
+     * call them in the correct order (issue #43). */
     if (window) update_engine_dropdown(window, TRUE);
+    if (window) update_dpi_dropdown(window);
     if (window) update_sides_dropdown(window);
 
     if (printer_make_model[0]) {
