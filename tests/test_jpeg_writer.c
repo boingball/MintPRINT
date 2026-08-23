@@ -51,6 +51,17 @@ static const unsigned char test_qtable[64] = {
     15,16,17,18,19,20,21,22
 };
 
+static const unsigned char test_qtable_chroma[64] = {
+    10,11,12,13,14,15,16,17,
+    11,12,13,14,15,16,17,18,
+    12,13,14,15,16,17,18,19,
+    13,14,15,16,17,18,19,20,
+    14,15,16,17,18,19,20,21,
+    15,16,17,18,19,20,21,22,
+    16,17,18,19,20,21,22,23,
+    17,18,19,20,21,22,23,24
+};
+
 static double mp_round_trip_max_error(const short *block)
 {
     long coeff[64];
@@ -73,6 +84,44 @@ static double mp_round_trip_max_error(const short *block)
         if (err > max_err) max_err = err;
     }
     return max_err;
+}
+
+static void test_reciprocal_quantizer_exactness(void)
+{
+    const unsigned char *tables[2];
+    unsigned long comparisons = 0;
+    int table_index;
+    int k;
+
+    tables[0] = test_qtable;
+    tables[1] = test_qtable_chroma;
+
+    for (table_index = 0; table_index < 2; ++table_index) {
+        for (k = 0; k < 64; ++k) {
+            unsigned long den = (unsigned long)tables[table_index][k] *
+                                (unsigned long)mp_fdct_aan_scale[k];
+            unsigned int reciprocal =
+                (unsigned int)(67108864UL / den);
+            long raw;
+
+            /* The integer AAN transform is comfortably inside signed 16-bit
+             * coefficient magnitude for 8-bit source samples. Sweep the
+             * entire signed-16 range anyway: both JPEG tables, all 64 AAN
+             * scales, positive/negative values and rounding boundaries. */
+            for (raw = -32768L; raw <= 32767L; ++raw) {
+                int reference = mp_quantize_aan(raw,
+                                                (int)tables[table_index][k],
+                                                mp_fdct_aan_scale[k]);
+                int reciprocal_result =
+                    mp_quantize_aan_recip(raw, den, reciprocal);
+                assert(reference == reciprocal_result);
+                ++comparisons;
+            }
+        }
+    }
+
+    printf("reciprocal quantizer: %lu exact coefficient comparisons\n",
+           comparisons);
 }
 
 static void fill_flat(short *block, int value)
@@ -143,8 +192,6 @@ static void test_flat_encoder_fast_path(void)
         assert(mp_jpeg_write_scanline(&enc, row));
     assert(mp_jpeg_finish(&enc));
 
-    /* One 16x16 4:2:0 MCU = four Y blocks + one Cb + one Cr. Pure white
-     * makes all six blocks constant, so every one must take the shortcut. */
     assert(enc.blocks_total == 6UL);
     assert(enc.blocks_constant == 6UL);
     assert(sink.bytes > 0UL);
@@ -188,6 +235,8 @@ int main(void)
     int trial;
     double max_seen = 0.0;
 
+    test_reciprocal_quantizer_exactness();
+
     fill_flat(block, 0);
     err = mp_round_trip_max_error(block);
     printf("flat 0: max error %.3f\n", err);
@@ -225,6 +274,6 @@ int main(void)
     test_flat_encoder_fast_path();
     test_nonflat_encoder_still_uses_dct();
 
-    puts("jpeg AAN/JPEG Turbo tests passed");
+    puts("jpeg reciprocal quantizer/JPEG Turbo tests passed");
     return 0;
 }
