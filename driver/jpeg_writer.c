@@ -222,6 +222,82 @@ int mp_quantize_aan(long raw, int q, long aan_scale)
     return (int)((num + den / 2) / den);
 }
 
+/* Reciprocal quantisation for the hot JPEG coefficient path.
+ *
+ * mp_quantize_aan() above is intentionally kept as the simple reference
+ * implementation for tests and for the very unlikely out-of-range fallback.
+ * On a classic 68k, its 32-bit / 32-bit division is expensive enough to
+ * dominate JPEG encoding once the flat-block shortcut has removed most of
+ * the easy work.
+ *
+ * For a divisor den, mp_jpeg_begin() precomputes:
+ *
+ *     reciprocal = floor(2^26 / den)
+ *
+ * The rounded positive numerator is below 2^26 for every coefficient the
+ * current integer AAN FDCT can produce from 8-bit samples.  Shift it by 10
+ * first, leaving a 16-bit value, then a single small multiply gives a Q26
+ * quotient estimate:
+ *
+ *     q0 = ((rounded >> 10) * reciprocal) >> 16
+ *
+ * Both truncations are downward, so q0 never overshoots.  A short exact
+ * multiply/compare correction closes the at-most-tiny gap without division.
+ * If a future transform ever hands us a numerator outside the proven Q26
+ * range, fall back to ordinary division rather than risk changing output. */
+#define MP_QUANT_RECIP_ONE 67108864UL /* 1 << 26 */
+
+static unsigned long mp_mul_u16_u32(unsigned int small, unsigned long value)
+{
+    unsigned long lo;
+    unsigned long hi;
+
+    /* small is at most a few thousand in this use.  Split the 32-bit
+     * divisor so an m68k compiler can use cheap 16x16 multiplies rather
+     * than a general 32x32 helper. */
+    lo = (unsigned long)(unsigned short)small *
+         (unsigned long)(unsigned short)(value & 0xffffUL);
+    hi = (unsigned long)(unsigned short)small *
+         (unsigned long)(unsigned short)(value >> 16);
+    return lo + (hi << 16);
+}
+
+int mp_quantize_aan_recip(long raw, unsigned long den,
+                          unsigned int reciprocal)
+{
+    unsigned long magnitude;
+    unsigned long rounded;
+    unsigned long quotient;
+    unsigned long threshold;
+    int negative = raw < 0;
+
+    if (!den) return 0;
+    if (negative)
+        magnitude = (unsigned long)(-(raw + 1L)) + 1UL;
+    else
+        magnitude = (unsigned long)raw;
+
+    rounded = magnitude * 2048UL + den / 2UL;
+
+    if (!reciprocal || rounded >= MP_QUANT_RECIP_ONE) {
+        quotient = rounded / den;
+    } else {
+        unsigned int scaled = (unsigned int)(rounded >> 10);
+        quotient = ((unsigned long)scaled * (unsigned long)reciprocal) >> 16;
+
+        /* The reciprocal estimate is deliberately low.  Normally this loop
+         * runs zero or one time; keeping it as a loop makes the exactness
+         * self-correcting if a boundary lands two steps low. */
+        threshold = mp_mul_u16_u32((unsigned int)(quotient + 1UL), den);
+        while (threshold <= rounded) {
+            ++quotient;
+            threshold = mp_mul_u16_u32((unsigned int)(quotient + 1UL), den);
+        }
+    }
+
+    return negative ? -(int)quotient : (int)quotient;
+}
+
 static int mp_emit_dc(MPJpegEncoder *e, int diff)
 {
     int size = mp_category(diff);
@@ -257,7 +333,9 @@ static int mp_block_constant(const short *samples, short *value_out)
 }
 
 static int mp_encode_block(MPJpegEncoder *e, const short *samples,
-                           const unsigned char *qtable, int *dc_pred)
+                           const unsigned long *qden,
+                           const unsigned short *qrecip,
+                           int *dc_pred)
 {
     long coeff[64];
     int qcoeff[64];
@@ -270,13 +348,13 @@ static int mp_encode_block(MPJpegEncoder *e, const short *samples,
     /* A constant 8x8 block has one DC coefficient and 63 exact zero AC
      * coefficients.  Printing spends a lot of time on white page margins
      * and flat colour areas, so avoid the complete AAN transform plus 64
-     * quantisation divisions for those blocks.  Calling the existing DC
-     * quantiser with the mathematically exact raw AAN DC (64 * sample)
-     * preserves the current bitstream maths and leaves only one divide. */
+     * quantisation work for those blocks.  Feeding the mathematically exact
+     * raw AAN DC (64 * sample) through the reciprocal quantiser preserves the
+     * current bitstream maths without reintroducing a hot 32-bit divide. */
     if (mp_block_constant(samples, &constant_value)) {
         ++e->blocks_constant;
-        dc = mp_quantize_aan((long)constant_value * 64L,
-                             (int)qtable[0], mp_fdct_aan_scale[0]);
+        dc = mp_quantize_aan_recip((long)constant_value * 64L,
+                                   qden[0], (unsigned int)qrecip[0]);
         diff = dc - *dc_pred;
         *dc_pred = dc;
         if (!mp_emit_dc(e, diff)) return 0;
@@ -285,8 +363,8 @@ static int mp_encode_block(MPJpegEncoder *e, const short *samples,
 
     mp_fdct(samples, coeff);
     for (k = 0; k < 64; ++k)
-        qcoeff[k] = mp_quantize_aan(coeff[k], (int)qtable[k],
-                                    mp_fdct_aan_scale[k]);
+        qcoeff[k] = mp_quantize_aan_recip(coeff[k], qden[k],
+                                          (unsigned int)qrecip[k]);
 
     dc = qcoeff[0];
     diff = dc - *dc_pred;
@@ -368,7 +446,9 @@ static int mp_encode_mcu_row(MPJpegEncoder *e)
                         block[yy * 8 + xx] = mp_y_from_rgb(r, g, b);
                     }
                 }
-                if (!mp_encode_block(e, block, mp_q_luma, &e->dc_y))
+                if (!mp_encode_block(e, block,
+                                     e->qden_luma, e->qrecip_luma,
+                                     &e->dc_y))
                     return 0;
             }
         }
@@ -400,8 +480,12 @@ static int mp_encode_mcu_row(MPJpegEncoder *e)
                 cr_block[idx] = mp_cr_from_rgb(r, g, b);
             }
         }
-        if (!mp_encode_block(e, cb_block, mp_q_chroma, &e->dc_cb)) return 0;
-        if (!mp_encode_block(e, cr_block, mp_q_chroma, &e->dc_cr)) return 0;
+        if (!mp_encode_block(e, cb_block,
+                             e->qden_chroma, e->qrecip_chroma,
+                             &e->dc_cb)) return 0;
+        if (!mp_encode_block(e, cr_block,
+                             e->qden_chroma, e->qrecip_chroma,
+                             &e->dc_cr)) return 0;
     }
     ++e->mcu_rows_done;
     return 1;
@@ -494,6 +578,18 @@ int mp_jpeg_begin(MPJpegEncoder *e, unsigned long width, unsigned long height,
     e->mcu_rows_done = 0;
     e->blocks_total = 0;
     e->blocks_constant = 0;
+    for (i = 0; i < 64UL; ++i) {
+        unsigned long den_luma =
+            (unsigned long)mp_q_luma[i] * (unsigned long)mp_fdct_aan_scale[i];
+        unsigned long den_chroma =
+            (unsigned long)mp_q_chroma[i] * (unsigned long)mp_fdct_aan_scale[i];
+        e->qden_luma[i] = den_luma;
+        e->qden_chroma[i] = den_chroma;
+        e->qrecip_luma[i] =
+            (unsigned short)(MP_QUANT_RECIP_ONE / den_luma);
+        e->qrecip_chroma[i] =
+            (unsigned short)(MP_QUANT_RECIP_ONE / den_chroma);
+    }
     e->scratch = scratch;
     e->scratch_size = scratch_size;
     e->write_fn = write_fn;
