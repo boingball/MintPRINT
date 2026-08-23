@@ -1,6 +1,7 @@
 #include "postscript_writer.h"
 
-#define MP_PS_ASCII85_LINE 75U
+#define MP_PS_ASCIIHEX_LINE 76U
+#define MP_PS_HEX_CHUNK 64U
 
 #define MP_PS_SCALE_AUTO 0
 #define MP_PS_SCALE_FIT  1
@@ -105,69 +106,54 @@ static int mp_ps_int(MPPostScriptEncoder *e, long value)
     return mp_ps_uint(e, magnitude);
 }
 
-static int mp_ps_ascii85_chars(MPPostScriptEncoder *e,
-                               const char *chars, unsigned int count)
-{
-    unsigned int pos = 0;
-
-    while (pos < count) {
-        unsigned int room;
-        unsigned int chunk;
-
-        if (e->ascii85_column >= MP_PS_ASCII85_LINE) {
-            if (!mp_ps_lit(e, "\n")) return 0;
-            e->ascii85_column = 0;
-        }
-
-        room = MP_PS_ASCII85_LINE - e->ascii85_column;
-        chunk = count - pos;
-        if (chunk > room) chunk = room;
-        if (!mp_ps_raw(e, (const unsigned char *)(chars + pos), chunk))
-            return 0;
-        e->ascii85_column += chunk;
-        pos += chunk;
-    }
-
-    return 1;
-}
-
-static int mp_ps_ascii85_tuple(MPPostScriptEncoder *e, unsigned int input_count)
-{
-    unsigned long value;
-    char out[5];
-    int i;
-
-    value = ((unsigned long)e->ascii85_tuple[0] << 24) |
-            ((unsigned long)e->ascii85_tuple[1] << 16) |
-            ((unsigned long)e->ascii85_tuple[2] << 8) |
-            (unsigned long)e->ascii85_tuple[3];
-
-    if (input_count == 4U && value == 0UL)
-        return mp_ps_ascii85_chars(e, "z", 1U);
-
-    for (i = 4; i >= 0; --i) {
-        out[i] = (char)((value % 85UL) + 33UL);
-        value /= 85UL;
-    }
-
-    return mp_ps_ascii85_chars(e, out, input_count + 1U);
-}
-
+/* ASCII85 made the PostScript payload compact, but converting every four
+ * JPEG bytes required five 32-bit /85 and %85 operations. Those are costly
+ * on classic 68k. ASCIIHex doubles the compressed JPEG bytes on the wire,
+ * but encoding becomes two table lookups per byte and no general division.
+ * Ethernet bandwidth is cheap compared with 68030/040/060 integer division. */
 static long mp_ps_jpeg_write_fn(void *ctx,
                                 const unsigned char *data,
                                 unsigned long len)
 {
+    static const char hex[] = "0123456789ABCDEF";
     MPPostScriptEncoder *e = (MPPostScriptEncoder *)ctx;
-    unsigned long i;
+    unsigned long pos = 0;
+    char out[MP_PS_HEX_CHUNK * 2U];
 
     if (!e || e->failed) return -1;
 
-    for (i = 0; i < len; ++i) {
-        e->ascii85_tuple[e->ascii85_count++] = data[i];
-        if (e->ascii85_count == 4U) {
-            if (!mp_ps_ascii85_tuple(e, 4U)) return -1;
-            e->ascii85_count = 0;
+    while (pos < len) {
+        unsigned int room_chars;
+        unsigned long input_room;
+        unsigned long chunk;
+        unsigned long i;
+
+        if (e->asciihex_column >= MP_PS_ASCIIHEX_LINE) {
+            if (!mp_ps_lit(e, "\n")) return -1;
+            e->asciihex_column = 0;
         }
+
+        room_chars = MP_PS_ASCIIHEX_LINE - e->asciihex_column;
+        input_room = (unsigned long)(room_chars / 2U);
+        if (!input_room) {
+            if (!mp_ps_lit(e, "\n")) return -1;
+            e->asciihex_column = 0;
+            continue;
+        }
+
+        chunk = len - pos;
+        if (chunk > input_room) chunk = input_room;
+        if (chunk > MP_PS_HEX_CHUNK) chunk = MP_PS_HEX_CHUNK;
+
+        for (i = 0; i < chunk; ++i) {
+            unsigned int b = data[pos + i];
+            out[i * 2UL] = hex[(b >> 4) & 15U];
+            out[i * 2UL + 1UL] = hex[b & 15U];
+        }
+        if (!mp_ps_raw(e, (const unsigned char *)out, chunk * 2UL))
+            return -1;
+        e->asciihex_column += (unsigned int)(chunk * 2UL);
+        pos += chunk;
     }
 
     return (long)len;
@@ -203,8 +189,7 @@ int mp_postscript_begin(MPPostScriptEncoder *e,
     e->height = height;
     e->write_fn = write_fn;
     e->write_ctx = write_ctx;
-    e->ascii85_count = 0;
-    e->ascii85_column = 0;
+    e->asciihex_column = 0;
     e->out_used = 0;
     e->output_bytes = 0;
     e->write_calls = 0;
@@ -218,20 +203,6 @@ int mp_postscript_begin(MPPostScriptEncoder *e,
     page_w = page_width_points ? page_width_points : image_w;
     page_h = page_height_points ? page_height_points : image_h;
 
-    /*
-     * Keep the rev27 placement policy for auto/auto-fit/none: preserve the
-     * printer.device raster's physical DPI size when it already fits, and
-     * only reduce oversized content so it cannot run off the selected sheet.
-     *
-     * Explicit fit/fill are different.  printer.device can intentionally
-     * deliver a lower-resolution raster to keep classic-Amiga CPU/memory use
-     * reasonable (the built-in PostScript test page is 4.2 x 5.94 inches at
-     * 300 DPI), while /PageSize still describes the real A4/Letter sheet.
-     * Once that raster is embedded in a full-size PostScript page, an IPP
-     * print-scaling attribute can no longer enlarge the image itself.  Apply
-     * those two user-selected modes here, changing only PostScript geometry;
-     * the JPEG stream, raster dimensions and transfer size stay unchanged.
-     */
     draw_w = image_w;
     draw_h = image_h;
 
@@ -305,7 +276,7 @@ int mp_postscript_begin(MPPostScriptEncoder *e,
         !mp_ps_uint(e, height)) return 0;
     if (!mp_ps_lit(e,
             "]\n"
-            "   /DataSource currentfile /ASCII85Decode filter"
+            "   /DataSource currentfile /ASCIIHexDecode filter"
             " /DCTDecode filter\n"
             ">> image\n")) return 0;
 
@@ -331,23 +302,14 @@ int mp_postscript_write_scanline(MPPostScriptEncoder *e,
 
 int mp_postscript_finish(MPPostScriptEncoder *e)
 {
-    unsigned int i;
-
     if (!e || e->failed) return 0;
     if (!mp_jpeg_finish(&e->jpeg)) {
         e->failed = 1;
         return 0;
     }
 
-    if (e->ascii85_count) {
-        unsigned int count = e->ascii85_count;
-        for (i = count; i < 4U; ++i) e->ascii85_tuple[i] = 0;
-        if (!mp_ps_ascii85_tuple(e, count)) return 0;
-        e->ascii85_count = 0;
-    }
-
-    if (e->ascii85_column && !mp_ps_lit(e, "\n")) return 0;
-    if (!mp_ps_lit(e, "~>\n"
+    if (e->asciihex_column && !mp_ps_lit(e, "\n")) return 0;
+    if (!mp_ps_lit(e, ">\n"
                        "grestore\n"
                        "showpage\n"
                        "%%PageTrailer\n"
@@ -356,6 +318,5 @@ int mp_postscript_finish(MPPostScriptEncoder *e)
                        "%%EOF\n")) return 0;
 
     if (!mp_ps_flush(e)) return 0;
-
     return !e->failed;
 }
