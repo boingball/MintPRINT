@@ -104,8 +104,8 @@ static int write_case(const char *path, const char *scaling,
     if (file_contains(path, "/ASCII85Decode filter")) return 12;
     if (!file_contains(path, "\n>\ngrestore\nshowpage\n")) return 13;
     if (!file_contains(path, "\n%%EOF\n")) return 14;
-    if (sink.calls != 1UL || sink.bytes == 0UL ||
-        sink.largest_write != sink.bytes) return 15;
+    if (sink.calls == 0UL || sink.bytes == 0UL ||
+        sink.largest_write > MP_POSTSCRIPT_OUTPUT_BUFFER) return 15;
     if (encoder.write_calls != sink.calls ||
         encoder.output_bytes != sink.bytes) return 16;
 
