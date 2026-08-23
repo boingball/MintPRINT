@@ -100,13 +100,14 @@ static int write_case(const char *path, const char *scaling,
     if (!file_contains(path, "%%BoundingBox: 0 0 595 842\n")) return 8;
     if (!file_contains(path, "<< /PageSize [595 842] >> setpagedevice\n")) return 9;
     if (!file_contains(path, expected_placement)) return 10;
-    if (!file_contains(path, "/ASCII85Decode filter /DCTDecode filter")) return 11;
-    if (!file_contains(path, "\n~>\ngrestore\nshowpage\n")) return 12;
-    if (!file_contains(path, "\n%%EOF\n")) return 13;
+    if (!file_contains(path, "/ASCIIHexDecode filter /DCTDecode filter")) return 11;
+    if (file_contains(path, "/ASCII85Decode filter")) return 12;
+    if (!file_contains(path, "\n>\ngrestore\nshowpage\n")) return 13;
+    if (!file_contains(path, "\n%%EOF\n")) return 14;
     if (sink.calls != 1UL || sink.bytes == 0UL ||
-        sink.largest_write != sink.bytes) return 14;
+        sink.largest_write != sink.bytes) return 15;
     if (encoder.write_calls != sink.calls ||
-        encoder.output_bytes != sink.bytes) return 15;
+        encoder.output_bytes != sink.bytes) return 16;
 
     return 0;
 }
@@ -124,19 +125,12 @@ int main(int argc, char **argv)
     sprintf(fill_path, "%s.fill", path);
     sprintf(none_path, "%s.none", path);
 
-    /* rev27 compatibility: auto/auto-fit/none keep a smaller raster at its
-     * native physical size and centre it on the selected media. */
     rc = write_case(path, "auto-fit", "293 418 translate\n8 6 scale\n");
     if (rc) return 20 + rc;
     rc = write_case(none_path, "none", "293 418 translate\n8 6 scale\n");
     if (rc) return 40 + rc;
-
-    /* Fit enlarges proportionally until one page edge is reached. */
     rc = write_case(fit_path, "fit", "0 198 translate\n595 446 scale\n");
     if (rc) return 60 + rc;
-
-    /* Fill enlarges proportionally until the sheet is covered, with the
-     * overflow centred so PostScript clips equal amounts from both sides. */
     rc = write_case(fill_path, "fill", "-264 0 translate\n1123 842 scale\n");
     if (rc) return 80 + rc;
 
