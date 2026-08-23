@@ -10,6 +10,12 @@ typedef struct MPJpegEncoder {
     unsigned long mcu_rows_done;
     unsigned long blocks_total;
     unsigned long blocks_constant;
+    /* Quantiser divisors/reciprocals are built once per JPEG job.  The hot
+     * coefficient path then avoids software 32-bit division on classic 68k. */
+    unsigned long qden_luma[64];
+    unsigned long qden_chroma[64];
+    unsigned short qrecip_luma[64];
+    unsigned short qrecip_chroma[64];
     unsigned char *scratch;
     unsigned long scratch_size;
     MPJpegWriteFn write_fn;
@@ -39,6 +45,8 @@ int mp_jpeg_finish(MPJpegEncoder *enc);
  * test. */
 void mp_fdct(const short *block, long *out);
 int mp_quantize_aan(long raw, int q, long aan_scale);
+int mp_quantize_aan_recip(long raw, unsigned long den,
+                          unsigned int reciprocal);
 extern const long mp_fdct_aan_scale[64];
 
 #endif
