@@ -8,10 +8,10 @@
  *
  * The existing JPEG encoder supplies the compressed image data, but the
  * printer receives a real application/postscript document rather than a
- * direct image/jpeg job.  JPEG bytes are ASCII85-wrapped and consumed by
- * PostScript's standard ASCII85Decode and DCTDecode filters.  This keeps the
- * same bounded, one-row-at-a-time memory use as the JPEG/PDF paths while
- * avoiding binary-clean transport assumptions in older PostScript devices.
+ * direct image/jpeg job. JPEG bytes are ASCIIHex-wrapped and consumed by
+ * PostScript's standard ASCIIHexDecode and DCTDecode filters. ASCIIHex is
+ * larger on the wire than ASCII85, but its encoding is only two nibble
+ * lookups per byte - deliberately trading LAN bytes for much less 68k CPU.
  */
 
 typedef long (*MPPostScriptWriteFn)(void *ctx,
@@ -26,9 +26,7 @@ typedef struct MPPostScriptEncoder {
     MPPostScriptWriteFn write_fn;
     void *write_ctx;
     MPJpegEncoder jpeg;
-    unsigned char ascii85_tuple[4];
-    unsigned int ascii85_count;
-    unsigned int ascii85_column;
+    unsigned int asciihex_column;
     unsigned char outbuf[MP_POSTSCRIPT_OUTPUT_BUFFER];
     unsigned long out_used;
     unsigned long output_bytes;
@@ -37,7 +35,7 @@ typedef struct MPPostScriptEncoder {
 } MPPostScriptEncoder;
 
 /*
- * Sets the PostScript placement policy used by subsequent jobs.  The driver
+ * Sets the PostScript placement policy used by subsequent jobs. The driver
  * updates this from Unit0's SCALING= value when configuration is loaded.
  * Unknown/empty values fall back to the historical auto-fit behaviour.
  */
