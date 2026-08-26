@@ -3256,60 +3256,40 @@ static BOOL mp_load_sides_hint_image(int index) {
     return TRUE;
 }
 
-static LONG mp_sides_hint_pen(struct MPSidesHintPen *pens, int *count,
-                              UBYTE r, UBYTE g, UBYTE b) {
+static UBYTE mp_sides_hint_nearest_pen(const ULONG *palette,
+                                         int pen_count,
+                                         UBYTE r, UBYTE g, UBYTE b) {
     int i;
-    int best = -1;
+    int best = 0;
     ULONG best_distance = 0xffffffffUL;
 
-    /* Quantise first so a true-colour source icon does not exhaust pens on
-     * a classic Workbench screen. graphics.library then picks the nearest
-     * available screen pen for each cached colour. */
-    r = (UBYTE)(r & 0xe0);
-    g = (UBYTE)(g & 0xe0);
-    b = (UBYTE)(b & 0xe0);
-
-    for (i = 0; i < *count; ++i) {
-        if (pens[i].r == r && pens[i].g == g && pens[i].b == b)
-            return pens[i].pen;
-    }
-
-    if (*count < MP_SIDES_HINT_MAX_PENS) {
-        LONG pen = (LONG)ObtainBestPenA(screen->ViewPort.ColorMap,
-                                       (ULONG)r << 24,
-                                       (ULONG)g << 24,
-                                       (ULONG)b << 24,
-                                       NULL);
-        if (pen >= 0) {
-            pens[*count].r = r;
-            pens[*count].g = g;
-            pens[*count].b = b;
-            pens[*count].pen = pen;
-            ++(*count);
-            return pen;
-        }
-    }
-
-    for (i = 0; i < *count; ++i) {
-        LONG dr = (LONG)r - (LONG)pens[i].r;
-        LONG dg = (LONG)g - (LONG)pens[i].g;
-        LONG db = (LONG)b - (LONG)pens[i].b;
+    for (i = 0; i < pen_count; ++i) {
+        LONG pr = (LONG)(palette[i * 3 + 0] >> 24);
+        LONG pg = (LONG)(palette[i * 3 + 1] >> 24);
+        LONG pb = (LONG)(palette[i * 3 + 2] >> 24);
+        LONG dr = (LONG)r - pr;
+        LONG dg = (LONG)g - pg;
+        LONG db = (LONG)b - pb;
         ULONG distance = (ULONG)(dr * dr + dg * dg + db * db);
-        if (best < 0 || distance < best_distance) {
+
+        if (distance < best_distance) {
             best = i;
             best_distance = distance;
+            if (distance == 0)
+                break;
         }
     }
 
-    return best >= 0 ? pens[best].pen : 1;
+    return (UBYTE)best;
 }
 
 static void mp_draw_sides_hint(void) {
     struct MPSidesHintImage *image;
-    struct MPSidesHintPen pens[MP_SIDES_HINT_MAX_PENS];
+    ULONG screen_palette[3 * 256];
+    struct ColorMap *cm;
     struct RastPort *rp;
     int index;
-    int pen_count = 0;
+    int screen_pen_count;
     int draw_w, draw_h;
     int x, y;
     int left = MP_SIDES_HINT_LEFT;
@@ -3319,6 +3299,14 @@ static void mp_draw_sides_hint(void) {
         return;
 
     rp = window->RPort;
+    cm = screen->ViewPort.ColorMap;
+    if (!cm || cm->Count == 0)
+        return;
+
+    screen_pen_count = (int)cm->Count;
+    if (screen_pen_count > 256)
+        screen_pen_count = 256;
+    GetRGB32(cm, 0, (ULONG)screen_pen_count, screen_palette);
 
     SetDrMd(rp, JAM1);
     SetAPen(rp, 0);
@@ -3351,18 +3339,18 @@ static void mp_draw_sides_hint(void) {
             UBYTE r = image->rgb[pixel * 3 + 0];
             UBYTE g = image->rgb[pixel * 3 + 1];
             UBYTE b = image->rgb[pixel * 3 + 2];
-            LONG pen = mp_sides_hint_pen(pens, &pen_count, r, g, b);
+            UBYTE pen = mp_sides_hint_nearest_pen(screen_palette,
+                                                   screen_pen_count,
+                                                   r, g, b);
 
-            if (pen != last_pen) {
-                SetAPen(rp, (UBYTE)pen);
-                last_pen = pen;
+            if ((LONG)pen != last_pen) {
+                SetAPen(rp, pen);
+                last_pen = (LONG)pen;
             }
             WritePixel(rp, left + x, top + y);
         }
     }
 
-    for (x = 0; x < pen_count; ++x)
-        ReleasePen(screen->ViewPort.ColorMap, (ULONG)pens[x].pen);
 }
 
 static void mp_free_sides_hint_images(void) {
