@@ -12,7 +12,7 @@
 
 [![Aminet](https://img.shields.io/badge/Download-Aminet-005CA9)](https://aminet.net/package/driver/print/MintPRINT)
 [![Support](https://img.shields.io/badge/Support-Buy%20Me%20a%20Coffee-FFDD00?logo=buymeacoffee&logoColor=000000)](https://buymeacoffee.com/boingball)
-![Uploading MintPrintControlPanel.png…]()
+
 
 ![GitHub stars](https://img.shields.io/github/stars/boingball/MintPRINT)
 ![GitHub last commit](https://img.shields.io/github/last-commit/boingball/MintPRINT)
