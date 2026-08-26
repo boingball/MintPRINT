@@ -133,7 +133,7 @@ static struct MPTestPrintJob test_print_job;
 // switchable GUI-side profiles (e.g. for a second/third network printer).
 #define MAX_UNITS 8
 
-#define OUTPUT_TOP     265 // Below Test Print / Save / Exit row
+#define OUTPUT_TOP     228 // Below Test Print / Save / Exit row
 #define OUTPUT_LEFT    10
 #define OUTPUT_RIGHT   (window->Width - 20)
 
@@ -2895,8 +2895,8 @@ void custom_printf(const char *format, ...) {
  * hence ObtainBestPenA() per strip below rather than one of the four
  * pens (SetAPen 0-3) everything else in this window already uses. */
 #define MP_MARKER_AREA_LEFT     320
-#define MP_MARKER_AREA_TOP       65
-#define MP_MARKER_AREA_BOTTOM   123
+#define MP_MARKER_AREA_TOP       57
+#define MP_MARKER_AREA_BOTTOM   115
 #define MP_MARKER_COLS            2
 #define MP_MARKER_COL_GAP          6
 #define MP_MARKER_ROW_H           14
@@ -5786,7 +5786,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // with; switching here reloads the rest of the form from that unit's
     // saved file.
     ng.ng_LeftEdge = 64;
-    ng.ng_TopEdge = 5 + topborder;
+    ng.ng_TopEdge = 3 + topborder;
     ng.ng_Width = 328;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"Unit:";
@@ -5806,7 +5806,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     ng.ng_LeftEdge = 400;
     ng.ng_Width = 92;
     ng.ng_Height = 12;
-    ng.ng_TopEdge = 5 + topborder;
+    ng.ng_TopEdge = 3 + topborder;
     ng.ng_GadgetText = (STRPTR)"_Activate";
     ng.ng_GadgetID = GAD_SET_ACTIVE_BUTTON;
     ng.ng_Flags = 0;
@@ -5821,8 +5821,8 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
     // IP string gadget
     ng.ng_LeftEdge = 144;
-    ng.ng_TopEdge = 25 + topborder;
-    ng.ng_Width = 144;
+    ng.ng_TopEdge = 21 + topborder;
+    ng.ng_Width = 248;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"_Printer IP/Host:";
     ng.ng_GadgetID = GAD_IP_STRING;
@@ -5844,7 +5844,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     ng.ng_LeftEdge = 400;
     ng.ng_Width = 92;
     ng.ng_Height = 12;
-    ng.ng_TopEdge = 45 + topborder;
+    ng.ng_TopEdge = 39 + topborder;
     ng.ng_GadgetText = (STRPTR)"_Query";
     ng.ng_GadgetID = GAD_QUERY_BUTTON;
     ng.ng_Flags = 0;
@@ -5860,7 +5860,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // from the last successful Query for this unit. Not user-editable;
     // persisted via MODEL= in the unit's own config file on Save.
     ng.ng_LeftEdge = 128;
-    ng.ng_TopEdge = 45 + topborder;
+    ng.ng_TopEdge = 39 + topborder;
     ng.ng_Width = 264;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"Printer Model:";
@@ -5876,7 +5876,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
     // Driver IPP path
     ng.ng_LeftEdge = 130;
-    ng.ng_TopEdge = 65 + topborder;
+    ng.ng_TopEdge = 57 + topborder;
     ng.ng_Width = 104;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"IPP _Path:";
@@ -5899,7 +5899,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     {
         UWORD row2_top = ng.ng_TopEdge;
         ng.ng_LeftEdge = 400;
-        ng.ng_TopEdge = 25 + topborder;
+        ng.ng_TopEdge = 21 + topborder;
         ng.ng_Width = 92;
         ng.ng_Height = 12;
         ng.ng_GadgetText = (STRPTR)"_Discover";
@@ -5920,7 +5920,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // Printer Engine has the longest label in the left column; x=132 keeps
     // a small left margin while leaving the compact ink panel free at x=320.
     ng.ng_LeftEdge = 132;
-    ng.ng_TopEdge = 88 + topborder;
+    ng.ng_TopEdge = 78 + topborder;
     ng.ng_Width = 180;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"Printer Engine:";
@@ -5936,7 +5936,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
     // Enable/disable diagnostic logs and retained rendered jobs
     ng.ng_LeftEdge = 130;
-    ng.ng_TopEdge = 105 + topborder;
+    ng.ng_TopEdge = 95 + topborder;
     ng.ng_Width = 180;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"Debug:";
@@ -5952,7 +5952,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
     // Media dropdown
     ng.ng_LeftEdge = 130;
-    ng.ng_TopEdge = 125 + topborder;
+    ng.ng_TopEdge = 117 + topborder;
     ng.ng_Width = 280;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"Media (Tray):";
@@ -5971,7 +5971,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
     // Scaling dropdown
     ng.ng_LeftEdge = 130;
-    ng.ng_TopEdge = 145 + topborder;
+    ng.ng_TopEdge = 135 + topborder;
     ng.ng_Width = 150;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"Scaling:";
@@ -5984,7 +5984,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
     // Quality dropdown
     ng.ng_LeftEdge = 130;
-    ng.ng_TopEdge = 165 + topborder;
+    ng.ng_TopEdge = 153 + topborder;
     ng.ng_Width = 150;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"Quality:";
@@ -6000,7 +6000,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     ng.ng_LeftEdge = 348;
     ng.ng_Width = 100;
     ng.ng_Height = 12;
-    ng.ng_TopEdge = 165 + topborder;
+    ng.ng_TopEdge = 153 + topborder;
     ng.ng_GadgetText = (STRPTR)"DPI:";
     ng.ng_GadgetID = GAD_RESOLUTION;
     gad = CreateGadget(CYCLE_KIND, gad, &ng,
@@ -6015,7 +6015,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
     // Print Mode radio buttons
     ng.ng_LeftEdge = 130;
-    ng.ng_TopEdge = 185 + topborder;
+    ng.ng_TopEdge = 171 + topborder;
     ng.ng_Width = 150;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"Print Mode:";
@@ -6036,7 +6036,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     ng.ng_LeftEdge = 350;
     ng.ng_Width = 150;
     ng.ng_Height = 12;
-    ng.ng_TopEdge = 185 + topborder;
+    ng.ng_TopEdge = 171 + topborder;
     ng.ng_GadgetText = (STRPTR)"Sides:";
     ng.ng_GadgetID = GAD_SIDES;
     gad = CreateGadget(CYCLE_KIND, gad, &ng,
@@ -6051,7 +6051,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
     // Test Print button
     ng.ng_LeftEdge = 10;
-    ng.ng_TopEdge = 215 + topborder;
+    ng.ng_TopEdge = 198 + topborder;
     ng.ng_Width = 110;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"_Test Print";
@@ -6068,7 +6068,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // Save button - same action as File -> Save Driver Settings.
     ng.ng_LeftEdge = 304;
     ng.ng_Width = 90;
-    ng.ng_TopEdge = 215 + topborder;
+    ng.ng_TopEdge = 198 + topborder;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"_Save";
     ng.ng_GadgetID = GAD_SAVE_BUTTON;
@@ -6083,7 +6083,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // Exit button
     ng.ng_LeftEdge = 408;
     ng.ng_Width = 90;
-    ng.ng_TopEdge = 215 + topborder;
+    ng.ng_TopEdge = 198 + topborder;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"_Exit";
     ng.ng_GadgetID = GAD_EXIT_BUTTON;
@@ -6613,8 +6613,8 @@ int main(void) {
         WA_AutoAdjust, TRUE,
         WA_Width, 520,
         WA_MinWidth, 520,
-        WA_InnerHeight, 350,
-        WA_MinHeight, 350,
+        WA_InnerHeight, 312,
+        WA_MinHeight, 312,
         WA_DragBar, TRUE,
         WA_DepthGadget, TRUE,
         WA_Activate, TRUE,
