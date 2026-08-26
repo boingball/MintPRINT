@@ -1,0 +1,58 @@
+name: PR63 engine alignment
+
+on:
+  push:
+    branches:
+      - claude/ink-toner-status-panel
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ github.actor != 'github-actions[bot]' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: claude/ink-toner-status-panel
+          fetch-depth: 0
+
+      - name: Align Printer Engine gadget
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('src/MintPrintSettings.c')
+          s = p.read_text(encoding='utf-8')
+          old = '''    // Printer document engine: JPEG, PostScript, PWG Raster, PDF, or
+    // Apple Raster (URF).
+    // Printer Engine has the longest label in the left column; x=132 keeps
+    // a small left margin while leaving the compact ink panel free at x=320.
+    ng.ng_LeftEdge = 132;
+'''
+          new = '''    // Printer document engine: JPEG, PostScript, PWG Raster, PDF, or
+    // Apple Raster (URF).
+    // Align the gadget body with Debug/Media/Scaling/Quality/Print Mode.
+    ng.ng_LeftEdge = 130;
+'''
+          if old not in s:
+              raise SystemExit('Printer Engine geometry anchor not found')
+          if s.count(old) != 1:
+              raise SystemExit('Printer Engine geometry anchor is not unique')
+          p.write_text(s.replace(old, new, 1), encoding='utf-8')
+          PY
+
+          grep -A4 -B2 'Align the gadget body' src/MintPrintSettings.c
+          git diff --check
+
+      - name: Commit alignment
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/MintPrintSettings.c
+          git commit -m 'Align Printer Engine gadget with settings column'
+          git push origin HEAD:claude/ink-toner-status-panel
