@@ -35,8 +35,8 @@ _start:
          * this driver uses, not a MintPRINT project number. Revision is
          * unused by this project (there is no reliable fixed byte offset
          * to read it back at from the raw file on disk - see
-         * MP_DRIVER_REV_MARKER below for why, and for this project's own
-         * build-counter marker). */
+         * mp_driver_version_marker below for why, and for this project's
+         * own version/revision marker). */
         .word   44
         .word   1
 
@@ -75,8 +75,9 @@ printerName:
         .even
 
 /*
- * This project's own driver build-counter, for MintPrint Settings' own
- * update-detection - NOT read by printer.device.
+ * This project's own driver build version, for MintPrint Settings' own
+ * update-detection and for AmigaOS's own "Version" command / Workbench
+ * Information requester - NOT read by printer.device itself.
  *
  * The compiled driver FILE on disk is a standard AmigaDOS hunk-format load
  * module (HUNK_HEADER followed by HUNK_CODE/HUNK_DATA/... hunks, same as
@@ -85,14 +86,19 @@ printerName:
  * raw blob starting at _start. There is no reliable FIXED BYTE OFFSET for
  * anything in that raw file: the hunk header's own size varies (resident
  * library name list, hunk count/sizes), so a byte offset that happens to
- * land on this revision word in one build can land somewhere else
+ * land on this version word in one build can land somewhere else
  * entirely in the next. A scannable ASCII marker sidesteps that
- * completely - it only needs to appear ANYWHERE in the file's bytes, the
- * same approach AmigaOS's own "Version" command uses for "$VER:" strings.
- * Bump the trailing number whenever a driver rebuild actually changes
- * behaviour - a config-only or GUI-only change does not need a bump.
+ * completely - a standard "$VER:" string is exactly that trick, so this
+ * doubles as both the update-detection marker (previously the ad-hoc
+ * "MPDRVREV:" prefix) and something real Amiga tooling already knows how
+ * to read.
  *
+ * version.revision, not a flat build counter - see driver_core.c's
+ * MP_DRIVER_REV (version) / MP_DRIVER_SUBREV (revision) for what each
+ * half means and when to bump which. Never a bare number on its own, so
+ * it can't be misread as printer.device's own fixed V44 PrinterSegment
+ * ABI marker above.
  */
-mp_driver_revision_marker:
-        .asciz  "MPDRVREV:41"
+mp_driver_version_marker:
+        .asciz  "$VER: MintPRINT 41.1 (26.08.2026)"
         .even

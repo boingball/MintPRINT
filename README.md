@@ -6,7 +6,7 @@
 ![AmigaOS](https://img.shields.io/badge/AmigaOS-3.0%2B-orange)
 ![CPU](https://img.shields.io/badge/CPU-m68k-blue)
 ![Printing](https://img.shields.io/badge/Printing-IPP%20%2F%20AirPrint-0078D4)
-![Formats](https://img.shields.io/badge/Formats-PWG%20%7C%20UDF%20%7C%20JPEG%20%7C%20PDF%20%7C%20PostScript-purple)
+![Formats](https://img.shields.io/badge/Formats-PWG%20%7C%20URF%20%7C%20JPEG%20%7C%20PDF%20%7C%20PostScript-purple)
 ![Discovery](https://img.shields.io/badge/Discovery-mDNS%20%2B%20SSDP-green)
 ![License](https://img.shields.io/badge/License-MIT-lightgrey)
 
@@ -27,6 +27,28 @@ IPP/AirPrint printing for classic AmigaOS - print to modern network
 printers (JPEG, PostScript, PWG Raster, or PDF; no driver-specific software
 on the printer side) straight from Amiga applications, via a real `DEVS:Printers/`
 printer.device driver plus a GUI setup tool.
+
+## What's new in 1.2.2
+
+MintPRINT 1.2.2 switches driver version tracking to a real AmigaOS `$VER:`
+string, **driver revision 41.1** - no driver behaviour change, so no
+version-number bump for the driver's own build count.
+
+- **Real `$VER:` driver versioning.** `DEVS:Printers/MintPRINT` now embeds
+  a standard `$VER: MintPRINT 41.1 (dd.mm.yyyy)` string, readable by
+  AmigaOS's own `Version` command and Workbench's Information requester -
+  the same convention MintPrint Settings' own `$VER:` line already used.
+  This replaces the earlier ad-hoc `MPDRVREV:<n>` marker, which existed
+  only for MintPrint Settings' own bundled-vs-installed update check and
+  wasn't understood by anything else. The driver's own version now has two
+  parts, matching real Amiga version.revision pairs (e.g. Workbench 3.9's
+  `47.102`): a version number (`MP_DRIVER_REV` in `driver_core.c`, continuing
+  the existing build count) and a revision within it (`MP_DRIVER_SUBREV`,
+  bumped for a fix that doesn't need a new version number) - so "driver
+  revision" is never just a bare integer that could be misread as
+  printer.device's own fixed V44 PrinterSegment ABI marker in the same file.
+  MintPrint Settings' update-detection and About/Test Print version display
+  now parse and compare the real `$VER:` string instead.
 
 ## What's new in 1.2.1
 
@@ -226,8 +248,8 @@ be added with its AmigaOS version, TCP/IP stack, engine and exact print options.
 
 ## Status
 
-MintPRINT is now a real, working app: version **1.2.1** GUI with **driver
-revision 41**, with multiple printers confirmed fully working over IPP/AirPrint
+MintPRINT is now a real, working app: version **1.2.2** GUI with **driver
+revision 41.1**, with multiple printers confirmed fully working over IPP/AirPrint
 from real Amiga hardware. It's still actively developed and not every printer
 is confirmed yet, so check the
 [printer compatibility page](docs/PRINTER_COMPATIBILITY.md) for your specific

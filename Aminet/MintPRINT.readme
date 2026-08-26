@@ -2,7 +2,7 @@ Short:        IPP/AirPrint driver and setup tool
 Author:       Darren Banfi (boingball)
 Uploader:     boingball@gmail.com
 Type:         driver/print
-Version:      1.2.1
+Version:      1.2.2
 Requires:     68000+; AmigaOS 3.0+; TCP/IP stack providing bsdsocket.library
 Architecture: m68k-amigaos >= 3.0.0
 
@@ -189,6 +189,29 @@ from Anthropic Claude.
 
 History
 -------
+
+1.2.2  Real AmigaOS $VER: driver versioning, driver revision 41.1.
+
+       - DEVS:Printers/MintPRINT now embeds a standard
+         "$VER: MintPRINT 41.1 (dd.mm.yyyy)" string, readable by AmigaOS's
+         own Version command and Workbench's Information requester - the
+         same convention MintPrint Settings' own $VER: line already used.
+         Replaces the earlier ad-hoc "MPDRVREV:<n>" marker, which existed
+         only for MintPrint Settings' own bundled-vs-installed update
+         check and wasn't understood by anything else
+       - The driver's own version now has two parts, matching real Amiga
+         version.revision pairs (e.g. Workbench 3.9's 47.102): a version
+         number (continuing the existing build count) and a revision
+         within it, bumped for a fix that doesn't need a new version
+         number - so "driver revision" is never just a bare integer that
+         could be misread as printer.device's own fixed V44 PrinterSegment
+         ABI marker in the same file
+       - MintPrint Settings' update-detection and About/Test Print version
+         display now parse and compare the real $VER: string instead of
+         the old single-integer marker
+       - No driver behaviour change, so no version-number bump for the
+         driver's own build count - only the versioning scheme itself
+         changed
 
 1.2.1  Added Apple Raster (URF) engine and duplex, driver revision 41.
 
