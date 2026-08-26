@@ -84,15 +84,22 @@ codebase (see `driver/driver_core.c`'s single-band engine handling) - no
 duplex, no strip-printing accumulation - always writing a page count of 1.
 Duplex printing still requires `ENGINE=pwg-raster`, as before.
 
-## Status: implemented, not yet physically test-printed
+## Status: confirmed physically printing
 
 The byte layout was written and cross-checked against the CUPS reference
 implementation field-by-field, and the row compression is the identical,
-already-proven algorithm `pwg_writer.c` uses. That gives good confidence
-the *bytes on the wire* are shaped correctly. It has not yet been confirmed
-against a real printer with actual paper coming out the other end - see
-[issue #60](https://github.com/boingball/MintPRINT/issues/60) (OKI B412)
-for the report that motivated this engine.
+already-proven algorithm `pwg_writer.c` uses. Driver revision 30 has since
+printed a full A4 (2480x3508 @ 300dpi) test page correctly on a **Brother
+MFC-J6930DW** (`ENGINE=urf` is not that printer's default - it also
+advertises PWG Raster - but was selected explicitly to exercise this
+engine); the driver log showed `URF end rows/expected/failed 3508 3508 0`
+and `IPP result error/http/status 0 200 0`, and the retained
+`T:MintPRINT-job.urf` decodes byte-for-byte to the expected header fields
+and 3508 valid rows with no corruption. See
+[issue #60](https://github.com/boingball/MintPRINT/issues/60) for the
+**OKI B412** report that motivated this engine - that printer's own
+confirmation is still pending, since it wasn't the hardware used for the
+test above.
 
 If a URF test print comes out wrong (garbled image, printer error, rejected
 job), the most useful next artifact is `T:MintPRINT-job.urf` (kept when

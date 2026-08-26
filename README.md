@@ -36,8 +36,9 @@ MintPRINT 1.2.1 bumps to **driver revision 30**, adding a new engine:
   advertise `image/urf` but none of MintPRINT's other formats (JPEG,
   PostScript, PWG Raster, PDF) - reported for the OKI B412 in
   [issue #60](https://github.com/boingball/MintPRINT/issues/60). See
-  `docs/URF_ENGINE.md`. Implemented and unit-tested, not yet physically
-  test-printed.
+  `docs/URF_ENGINE.md`. Confirmed physically printing (Brother
+  MFC-J6930DW, driver rev 30); the OKI B412 report that motivated it is
+  still pending its own confirmation.
 
 ## What's new in 1.2.0
 

@@ -5,7 +5,7 @@ version, TCP/IP stack, document engine and the settings needed to reproduce a
 working print. It deliberately distinguishes physical output from an IPP job
 that merely reports success.
 
-Last reviewed: **22 August 2026**
+Last reviewed: **26 August 2026**
 
 ## Status key
 
@@ -24,7 +24,7 @@ accepts a job and silently discards it.
 
 | Printer and machine | Status | AmigaOS | TCP/IP stack | Confirmed engine/result | Required or known settings |
 |---|---|---|---|---|---|
-| **Brother MFC-J6930DW** | ✅ Working | 3.2.3 | Roadshow | PWG Raster | Port `631`; path `/ipp/print`; `300 dpi`; A4; tray `auto`; scaling `auto`; quality `draft`; colour |
+| **Brother MFC-J6930DW** | ✅ Working | 3.2.3 | Roadshow | PWG Raster; URF also confirmed (driver rev 30) | Port `631`; path `/ipp/print`; `300 dpi`; A4; tray `auto`; scaling `auto`; quality `draft`; colour |
 | **Brother HL-L2350DW** on A500 PiStorm, Wi-Fi | ✅ Working | 3.2.3 | Roadshow | Original Aminet release reported as working perfectly; exact engine was not recorded | No printer-specific override reported |
 | **Brother HL-L2350DW** on A4000, CSMkII 060/50 and Ariadne-II, wired | ✅ Working | 3.2.3 | Roadshow | Multi-page printing fully fixed - confirmed in issue #8 after a beta build, and fully in released 1.1.0 | 1.1.0; scaling `auto` |
 | **Canon TS8360** (IPP identifies it as **TS8300 series**) | ✅ Working | 3.2.3 | Not reported | PWG Raster text and colour pictures physically confirmed; JPEG pictures also work | Port `631`; path `/ipp/print`; PWG Raster; **`300* dpi` compatibility mode**; A4; source `auto`; scaling as required. Printer advertises only 600 DPI but accepts 300 DPI |
@@ -57,6 +57,18 @@ Print mode:  color
 The recorded driver run completed the PWG document and received a successful
 HTTP/IPP response. The AmigaOS release and TCP/IP stack were not written into
 the test record and still need adding.
+
+**URF (Apple Raster) also confirmed**, driver revision 30: this printer
+advertises both `image/pwg-raster` and `image/urf`, so it doubled as the
+first real-hardware confirmation for the new `ENGINE=urf` backend
+(`docs/URF_ENGINE.md`), added for the OKI B412 report
+([issue #60](https://github.com/boingball/MintPRINT/issues/60)). A full
+A4 (2480x3508 @ 300dpi) test page printed correctly with `ENGINE=urf`
+explicitly selected; the driver log showed `URF end rows/expected/failed
+3508 3508 0` and a successful IPP result, and the retained
+`T:MintPRINT-job.urf` decodes cleanly to the expected header and all 3508
+rows. `pwg-sheet-back=rotated`; scaling `auto`; quality `high`; color;
+source `auto`.
 
 ### Brother HL-L2350DW
 
@@ -215,11 +227,14 @@ compression already proven by the PWG Raster backend rather than requiring a
 new page-description language. See `docs/URF_ENGINE.md` for the resulting
 `ENGINE=urf` backend, added specifically for this report.
 
-Not yet physically test-printed; the printer also advertises duplex sides
-(`two-sided-long-edge`, `two-sided-short-edge`), but MintPRINT duplex still
-requires `ENGINE=pwg-raster` (see `docs/DUPLEX_PRINTING.md`), which this
-printer does not advertise - so duplex is not expected to work here even
-once one-sided URF printing is confirmed.
+The `ENGINE=urf` backend itself is now confirmed physically printing (see
+the Brother MFC-J6930DW entry above), but not yet on this specific
+printer - still needs an OKI B412 test report to close out issue #60. The
+printer also advertises duplex sides (`two-sided-long-edge`,
+`two-sided-short-edge`), but MintPRINT duplex still requires
+`ENGINE=pwg-raster` (see `docs/DUPLEX_PRINTING.md`), which this printer
+does not advertise - so duplex is not expected to work here even once
+this printer's own one-sided URF printing is confirmed.
 
 ## AmigaOS and TCP/IP stack status
 

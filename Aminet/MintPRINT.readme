@@ -200,8 +200,9 @@ History
          up front rather than per page
        - Driver build revision is now 30 so MintPrint Settings can detect
          and offer the updated driver automatically
-       - Implemented and unit-tested; not yet confirmed against real
-         printer hardware
+       - Confirmed physically printing on a Brother MFC-J6930DW; the OKI
+         B412 report that motivated this engine is still pending its own
+         confirmation
 
 1.2.0  Faster JPEG, PRT: text printing, and PostScript compatibility fixes.
 
