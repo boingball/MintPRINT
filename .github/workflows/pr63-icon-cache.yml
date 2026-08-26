@@ -1,0 +1,45 @@
+name: PR63 printer artwork cache
+
+on:
+  push:
+    branches:
+      - claude/ink-toner-status-panel
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ github.actor != 'github-actions[bot]' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: claude/ink-toner-status-panel
+          fetch-depth: 0
+
+      - name: Apply processed printer artwork cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/pr63_icon_cache_patch.py
+
+          grep -q 'ENV:MintPRINT/Art' src/MintPrintSettings.c
+          grep -q 'MPIC' src/MintPrintSettings.c
+          grep -q 'mp_load_printer_icon_cache(TRUE)' src/MintPrintSettings.c
+          grep -A1 'Printer Engine aligns' src/MintPrintSettings.c | grep -q 'ng.ng_LeftEdge = 130;'
+          git diff --check
+
+      - name: Commit patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/MintPrintSettings.c
+          if git diff --cached --quiet; then
+            echo 'No source changes to commit'
+            exit 0
+          fi
+          git commit -m 'Cache processed printer artwork per Unit'
+          git push origin HEAD:claude/ink-toner-status-panel
