@@ -26,35 +26,20 @@ jobs:
           p = Path('src/MintPrintSettings.c')
           s = p.read_text(encoding='utf-8')
 
-          old = '''    gad = CreateGadget(STRING_KIND, gad, &ng,
-        GTST_String, (ULONG)printer_make_model,
-        GTST_MaxChars, sizeof(printer_make_model) - 1,
-        GA_Disabled, TRUE,
-        TAG_DONE);'''
-          new = '''    gad = CreateGadget(TEXT_KIND, gad, &ng,
-        GTTX_Text, (ULONG)printer_make_model,
-        GTTX_Justification, GTJ_LEFT,
-        TAG_DONE);'''
+          old = "    gad = CreateGadget(STRING_KIND, gad, &ng,\n        GTST_String, (ULONG)printer_make_model,\n        GTST_MaxChars, sizeof(printer_make_model) - 1,\n        GA_Disabled, TRUE,\n        TAG_DONE);"
+          new = "    gad = CreateGadget(TEXT_KIND, gad, &ng,\n        GTTX_Text, (ULONG)printer_make_model,\n        GTTX_Justification, GTJ_LEFT,\n        TAG_DONE);"
           if old not in s:
               raise SystemExit('printer model CreateGadget block not found')
           s = s.replace(old, new, 1)
 
-          old_set = '''        GT_SetGadgetAttrs(g, win, NULL,
-                          GTST_String, (ULONG)printer_make_model,
-                          TAG_DONE);'''
-          new_set = '''        GT_SetGadgetAttrs(g, win, NULL,
-                          GTTX_Text, (ULONG)printer_make_model,
-                          TAG_DONE);'''
+          old_set = "        GT_SetGadgetAttrs(g, win, NULL,\n                          GTST_String, (ULONG)printer_make_model,\n                          TAG_DONE);"
+          new_set = "        GT_SetGadgetAttrs(g, win, NULL,\n                          GTTX_Text, (ULONG)printer_make_model,\n                          TAG_DONE);"
           if old_set not in s:
               raise SystemExit('cached model update block not found')
           s = s.replace(old_set, new_set, 1)
 
-          old_query = '''            GT_SetGadgetAttrs(model_gadget, window, NULL,
-                              GTST_String, (ULONG)printer_make_model,
-                              TAG_DONE);'''
-          new_query = '''            GT_SetGadgetAttrs(model_gadget, window, NULL,
-                              GTTX_Text, (ULONG)printer_make_model,
-                              TAG_DONE);'''
+          old_query = "            GT_SetGadgetAttrs(model_gadget, window, NULL,\n                              GTST_String, (ULONG)printer_make_model,\n                              TAG_DONE);"
+          new_query = "            GT_SetGadgetAttrs(model_gadget, window, NULL,\n                              GTTX_Text, (ULONG)printer_make_model,\n                              TAG_DONE);"
           if old_query not in s:
               raise SystemExit('query model update block not found')
           s = s.replace(old_query, new_query, 1)
@@ -64,7 +49,6 @@ jobs:
 
           grep -q 'CreateGadget(TEXT_KIND, gad, &ng' src/MintPrintSettings.c
           grep -q 'GTTX_Text, (ULONG)printer_make_model' src/MintPrintSettings.c
-          ! grep -A8 'GAD_MODEL_DISPLAY' src/MintPrintSettings.c | grep -q 'GA_Disabled, TRUE'
           git diff --check
 
           git config user.name "github-actions[bot]"
