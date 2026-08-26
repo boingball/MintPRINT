@@ -126,9 +126,30 @@ strip-printed physical page into dozens of bogus single-band "duplex
 pages" queued into one file - confirmed on a real Brother MFC-J6930DW
 duplex test, where 62 pages got queued instead of the true handful, and
 the printer rejected the job (`server-error-job-canceled`). Driver
-revision 32 fixes this by extending the same accumulator PWG Raster
+revision 32 fixed this by extending the same accumulator PWG Raster
 already had to also cover URF - see `mp_engine_supports_strip_accumulation()`
 in `driver_core.c`.
+
+**A second, related bug surfaced immediately after** (same Brother test,
+driver revision 32): the accumulator now correctly built two real pages,
+but they came out different heights - the front page's real content
+naturally overshot the media-derived target (its bands didn't divide
+evenly into it), while the back page fell short and only got padded up to
+the plain target, leaving front and back at different heights. A physical
+duplex sheet's two sides have to share one height, and the printer
+rejected the job again for it (confirmed by decoding the retained
+`T:MintPRINT-job.urf`: page 1 = 3562 rows, page 2 = 3505 rows, both
+otherwise byte-perfect). Driver revision 33 fixes this with
+`g_duplex_max_page_height` - the tallest page any duplex job has
+finalized at so far, used as an extra floor on every later page's target
+alongside the media-derived one. This only ever raises a page's padding,
+never truncates real content, and is a no-op whenever pages already
+matched - see the comment at its declaration in `driver_core.c`. It
+converges same-sized pages within a duplex job onto one consistent
+height; a document whose page sizes actively grow through the job (a
+later page genuinely needing more content than any page before it) can
+still end up with a final mismatched pair, since an earlier, already-
+queued page can never be enlarged after the fact once submitted.
 
 ## Status: confirmed physically printing
 
@@ -148,12 +169,13 @@ confirmation is still pending, since it wasn't the hardware used for the
 test above.
 
 That confirmed test was one-sided. Duplex support (see above) is new; its
-first real test (Brother MFC-J6930DW, driver revision 31) surfaced the
-strip-printing accumulation gap described above rather than confirming
-duplex itself - the document was strip-printed, so the missing accumulator
-turned it into dozens of bogus single-band "duplex pages" and the printer
-canceled the job before any paper came out. That gap is now fixed (driver
-revision 32); duplex itself - including the "no backside row reversal"
+first two real tests (Brother MFC-J6930DW) surfaced the two bugs described
+above rather than confirming duplex itself - both times the printer
+canceled the job before any paper came out: first the missing
+strip-printing accumulator (driver revision 31, fixed in 32), then the
+front/back page-height mismatch it exposed once fixed (driver revision 32,
+fixed in 33). Both are now fixed, but duplex itself - including whether a
+job actually completes and prints, and the "no backside row reversal"
 assumption - is still not yet physically confirmed. A backside page that
 prints upside-down or mirrored, while the front side, page count and
 overall page geometry are otherwise correct, points there first.

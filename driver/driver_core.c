@@ -42,7 +42,7 @@
  * exactly which build produced it, rather than relying on whoever's
  * reading it to separately check About or remember what they last
  * copied to DEVS:Printers/. */
-#define MP_DRIVER_REV 32
+#define MP_DRIVER_REV 33
 
 struct ExecBase *SysBase = NULL;
 struct DosLibrary *DOSBase = NULL;
@@ -171,6 +171,18 @@ static struct MPConfig g_config;
 static LONG g_config_source = MP_CONFIG_SOURCE_DEFAULTS;
 static BOOL g_duplex_job_failed = FALSE;
 static ULONG g_duplex_page_count = 0;
+/* Tallest REAL accumulated height any strip-printed page in this duplex
+ * job has finalized at so far (mp_page_finalize(), below). A physical
+ * duplex sheet's front and back must share one height - real strip-printed
+ * content can legitimately land above the media-derived target on one
+ * side (its bands just don't divide evenly into the target) while another
+ * side falls short and gets padded to only the target, producing a
+ * front/back mismatch a real duplex unit can reject outright. Using this
+ * as an extra floor alongside the media target for every later page keeps
+ * the whole job converging on one consistent height without ever
+ * truncating real content - see the strip-target computation in
+ * Render()'s case 0. Reset per job in DriverOpen(); never decreases. */
+static ULONG g_duplex_max_page_height = 0;
 static ULONG g_job_file_bytes = 0;
 static ULONG g_pwg_page_header_offset = 0;
 /* Byte offset of the URF file header's page-count placeholder, patched
@@ -1170,6 +1182,8 @@ static BOOL mp_page_finalize(void)
         if (mp_duplex_requested()) g_duplex_job_failed = TRUE;
         return FALSE;
     }
+    if (mp_duplex_requested() && g_accum_height > g_duplex_max_page_height)
+        g_duplex_max_page_height = g_accum_height;
     return mp_page_submit_and_track(g_accum_height) == 0;
 }
 
@@ -1280,6 +1294,7 @@ int PRT_STDARGS DriverOpen(struct IORequest *ior)
     g_page_target_height = 0;
     g_duplex_job_failed = FALSE;
     g_duplex_page_count = 0;
+    g_duplex_max_page_height = 0;
     g_job_file_bytes = 0;
     g_pwg_page_header_offset = 0;
     g_urf_file_header_offset = 0;
@@ -1551,6 +1566,20 @@ LONG PRT_STDARGS Render(LONG ct, LONG x, LONG y, LONG status, ...)
                 (g_current_special & SPECIAL_NOFORMFEED)) {
                 media_height = mp_media_target_height(
                     g_config.media, g_page_width, g_config.resolution);
+                /* A physical duplex sheet's two sides must share one
+                 * height. Real strip-printed content can legitimately
+                 * overshoot the media-derived target on one side (its
+                 * bands just don't divide evenly into it) while another
+                 * side falls short and only gets padded to the plain
+                 * target - a front/back mismatch a real duplex unit can
+                 * reject outright. Flooring every page's target at the
+                 * tallest page this duplex job has finalized so far keeps
+                 * the whole job converging on one height without ever
+                 * truncating real content - see g_duplex_max_page_height. */
+                if (mp_duplex_requested() &&
+                    g_duplex_max_page_height > media_height) {
+                    media_height = g_duplex_max_page_height;
+                }
                 if (media_height > encoder_height) {
                     encoder_height = media_height;
                     mp_log_3("Strip target width/bandHeight/pageHeight",

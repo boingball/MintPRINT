@@ -71,19 +71,36 @@ rows. `pwg-sheet-back=rotated`; scaling `auto`; quality `high`; color;
 source `auto`.
 
 This printer also advertises `two-sided-long-edge`/`two-sided-short-edge`,
-making it the printer that first tested URF duplex. The first attempt
-(driver revision 31) failed: the test document was strip-printed
-(`SPECIAL_NOFORMFEED`), and URF's duplex implementation at that revision had
-no strip-printing accumulator (PWG-only at the time), so every small band
-became its own bogus single-band "duplex page" - the driver log showed 62
-pages queued for what should have been a handful, and the printer rejected
-the job (`IPP duplex Print-Job error/http/status -16 200 1288`,
-`server-error-job-canceled`). Fixed in driver revision 32 by extending the
-same strip-printing accumulator PWG Raster already had to also cover URF -
-see `docs/URF_ENGINE.md`. Not yet re-tested; still also unconfirmed once
-retested is whether Apple Raster's lack of a backside-transform mechanism
-(unlike PWG's `pwg-sheet-back=rotated` above) produces a correctly-oriented
-backside on this specific printer's duplex unit.
+making it the printer that first tested URF duplex - so far across two
+attempts, both rejected by the printer before any paper came out, each
+exposing a different real bug:
+
+1. **Driver revision 31.** The test document was strip-printed
+   (`SPECIAL_NOFORMFEED`), and URF's duplex implementation at that revision
+   had no strip-printing accumulator (PWG-only at the time), so every small
+   band became its own bogus single-band "duplex page" - the driver log
+   showed 62 pages queued for what should have been a handful. Rejected
+   with `IPP duplex Print-Job error/http/status -16 200 1288`
+   (`server-error-job-canceled`). Fixed in driver revision 32 by extending
+   the same strip-printing accumulator PWG Raster already had to also
+   cover URF.
+2. **Driver revision 32.** The accumulator now correctly built two real
+   pages, but decoding the retained `T:MintPRINT-job.urf` showed them at
+   different heights - page 1 (front) 3562 rows, page 2 (back) 3505 rows,
+   both otherwise byte-perfect - and the printer rejected the job again
+   with the identical IPP status. A physical duplex sheet's two sides have
+   to share one height; real strip-printed content naturally overshot the
+   media-derived target on the front while the back only got padded to
+   the plain target. Fixed in driver revision 33 by flooring every later
+   page's target at the tallest page the duplex job has finalized so far
+   (`g_duplex_max_page_height`), converging same-sized pages onto one
+   height without ever truncating real content.
+
+See `docs/URF_ENGINE.md` for both fixes in detail. Not yet re-tested;
+still also unconfirmed once retested is whether Apple Raster's lack of a
+backside-transform mechanism (unlike PWG's `pwg-sheet-back=rotated` above)
+produces a correctly-oriented backside on this specific printer's duplex
+unit.
 
 ### Brother HL-L2350DW
 
@@ -249,7 +266,7 @@ printer - still needs an OKI B412 test report to close out issue #60.
 This printer also advertises duplex sides (`two-sided-long-edge`,
 `two-sided-short-edge`). MintPRINT duplex originally required
 `ENGINE=pwg-raster`, which this printer does not advertise - but `ENGINE=urf`
-now supports duplex too (driver revision 32, see `docs/DUPLEX_PRINTING.md`
+now supports duplex too (driver revision 33, see `docs/DUPLEX_PRINTING.md`
 and `docs/URF_ENGINE.md`), so duplex is expected to be reachable here once
 this printer's own URF printing is confirmed, one-sided first.
 
