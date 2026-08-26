@@ -1869,7 +1869,7 @@ static void apply_driver_config_to_gadgets(struct Window *win) {
     g = find_gadget_by_id(GAD_MODEL_DISPLAY);
     if (g)
         GT_SetGadgetAttrs(g, win, NULL,
-                          GTST_String, (ULONG)printer_make_model,
+                          GTTX_Text, (ULONG)printer_make_model,
                           TAG_DONE);
 
     GT_RefreshWindow(win, NULL);
@@ -5108,7 +5108,7 @@ query_receive_pump_gui:
         struct Gadget *model_gadget = find_gadget_by_id(GAD_MODEL_DISPLAY);
         if (model_gadget) {
             GT_SetGadgetAttrs(model_gadget, window, NULL,
-                              GTST_String, (ULONG)printer_make_model,
+                              GTTX_Text, (ULONG)printer_make_model,
                               TAG_DONE);
         }
         /* Preview the freshly-queried (not yet saved) model in the Unit
@@ -5865,10 +5865,9 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"Printer Model:";
     ng.ng_GadgetID = GAD_MODEL_DISPLAY;
-    gad = CreateGadget(STRING_KIND, gad, &ng,
-        GTST_String, (ULONG)printer_make_model,
-        GTST_MaxChars, sizeof(printer_make_model) - 1,
-        GA_Disabled, TRUE,
+    gad = CreateGadget(TEXT_KIND, gad, &ng,
+        GTTX_Text, (ULONG)printer_make_model,
+        GTTX_Justification, GTJ_LEFT,
         TAG_DONE);
     if (!gad) {
         printf("Failed to create model display\n");
