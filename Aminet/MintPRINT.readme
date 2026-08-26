@@ -2,7 +2,7 @@ Short:        IPP/AirPrint driver and setup tool
 Author:       Darren Banfi (boingball)
 Uploader:     boingball@gmail.com
 Type:         driver/print
-Version:      1.2.0
+Version:      1.2.1
 Requires:     68000+; AmigaOS 3.0+; TCP/IP stack providing bsdsocket.library
 Architecture: m68k-amigaos >= 3.0.0
 
@@ -183,12 +183,25 @@ commercially, provided the copyright notice is kept.
 Credits
 -------
 
-Driver, GUI, IPP client, and the JPEG/PostScript/PWG Raster/PDF document encoders
-by Darren Banfi (boingball), developed with assistance from Anthropic
-Claude.
+Driver, GUI, IPP client, and the JPEG/PostScript/PWG Raster/PDF/Apple Raster
+document encoders by Darren Banfi (boingball), developed with assistance
+from Anthropic Claude.
 
 History
 -------
+
+1.2.1  Added Apple Raster (URF) engine, driver revision 30.
+
+       - Added a fifth output engine, Apple Raster (ENGINE=urf, image/urf),
+         for printers that advertise none of MintPRINT's other formats
+         (JPEG, PostScript, PWG Raster, PDF) - reported for the OKI B412 in
+         issue #60. Reuses the PWG Raster encoder's proven row compression;
+         single-page only, since Apple Raster declares its total page count
+         up front rather than per page
+       - Driver build revision is now 30 so MintPrint Settings can detect
+         and offer the updated driver automatically
+       - Implemented and unit-tested; not yet confirmed against real
+         printer hardware
 
 1.2.0  Faster JPEG, PRT: text printing, and PostScript compatibility fixes.
 

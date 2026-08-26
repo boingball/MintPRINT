@@ -28,6 +28,17 @@ printers (JPEG, PostScript, PWG Raster, or PDF; no driver-specific software
 on the printer side) straight from Amiga applications, via a real `DEVS:Printers/`
 printer.device driver plus a GUI setup tool.
 
+## What's new in 1.2.1
+
+MintPRINT 1.2.1 bumps to **driver revision 30**, adding a new engine:
+
+- **Apple Raster (`ENGINE=urf`) engine.** A new backend for printers that
+  advertise `image/urf` but none of MintPRINT's other formats (JPEG,
+  PostScript, PWG Raster, PDF) - reported for the OKI B412 in
+  [issue #60](https://github.com/boingball/MintPRINT/issues/60). See
+  `docs/URF_ENGINE.md`. Implemented and unit-tested, not yet physically
+  test-printed.
+
 ## What's new in 1.2.0
 
 MintPRINT 1.2.0 is a substantial driver update, with **driver revision 29**.
@@ -138,8 +149,8 @@ be added with its AmigaOS version, TCP/IP stack, engine and exact print options.
 
 ## Status
 
-MintPRINT is now a real, working app: version **1.2.0** GUI with **driver
-revision 29**, with multiple printers confirmed fully working over IPP/AirPrint
+MintPRINT is now a real, working app: version **1.2.1** GUI with **driver
+revision 30**, with multiple printers confirmed fully working over IPP/AirPrint
 from real Amiga hardware. It's still actively developed and not every printer
 is confirmed yet, so check the
 [printer compatibility page](docs/PRINTER_COMPATIBILITY.md) for your specific
