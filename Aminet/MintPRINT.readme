@@ -213,6 +213,21 @@ History
        - Added an Install script (classic AmigaDOS Installer format) as an
          alternative to running MintPrintSettings first, offering the same
          auto-detected driver choice with a chance to override it
+       - Fixed the ink/toner level bars sometimes showing the wrong colour
+         on a screen with few free colour registers (e.g. a default
+         32-colour Workbench): ObtainBestPenA() only reuses whatever
+         existing pen was closest to the requested colour, and with no
+         true cyan/magenta already on screen, several markers could snap
+         onto the same wrong pen (seen turning both cyan and magenta bars
+         yellow). The panel now tries ObtainPen() first, which only
+         succeeds by setting a genuinely free pen to the exact requested
+         colour, falling back to the old best-match behaviour only if the
+         screen truly has no free pens left
+       - Shortened the OS-detection text in the driver install/update and
+         About requesters: EasyRequest sizes its window to the single
+         widest line with no wrapping, and the full detected-AmigaOS/
+         driver-path text on one line could push the requester wider than
+         a default low-resolution AmigaOS screen
 
 1.2.3  Printer ink/toner status is back on Query, driver revision 41.1
        (no driver change).

@@ -3123,11 +3123,30 @@ static void mp_draw_marker_strips(void) {
         RectFill(rp, bar_right, bar_top, bar_right, bar_bottom);
 
         have_rgb = mp_marker_rgb(marker_colors[i], &r, &g, &b);
-        pen = have_rgb
-            ? (LONG)ObtainBestPenA(screen->ViewPort.ColorMap,
-                                  (ULONG)r << 24, (ULONG)g << 24,
-                                  (ULONG)b << 24, NULL)
-            : -1;
+        pen = -1;
+        if (have_rgb) {
+            /* This is a shared PUBLIC screen (LockPubScreen(NULL) below),
+             * so on a constrained low-colour Workbench (e.g. 32 colours)
+             * most pens are usually already in use by Workbench or other
+             * apps. ObtainBestPenA() only ever reuses an EXISTING pen's
+             * colour, and with no true cyan/magenta already on screen it
+             * silently snapped several different requested marker colours
+             * onto whichever single existing pen happened to be closest
+             * (observed: cyan and magenta both landing on the same
+             * yellow-ish pen). Try ObtainPen() first - it only succeeds
+             * when it can set a genuinely free pen to this exact RGB - and
+             * fall back to the old best-match behaviour only if the
+             * screen really has no free pens left. Both allocators are
+             * released the same way (ReleasePen()) below. */
+            pen = ObtainPen(screen->ViewPort.ColorMap, -1,
+                             (ULONG)r << 24, (ULONG)g << 24,
+                             (ULONG)b << 24, 0);
+            if (pen < 0) {
+                pen = (LONG)ObtainBestPenA(screen->ViewPort.ColorMap,
+                                          (ULONG)r << 24, (ULONG)g << 24,
+                                          (ULONG)b << 24, NULL);
+            }
+        }
 
         if (level >= 0) {
             int inside_width;

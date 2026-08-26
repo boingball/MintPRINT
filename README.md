@@ -30,9 +30,10 @@ printer.device driver plus a GUI setup tool.
 
 ## What's new in 1.2.4
 
-MintPRINT 1.2.4 is a packaging/build change: one distributable drawer
-instead of two, with automatic AmigaOS-version detection choosing the
-right driver. Driver behaviour is unchanged (still driver revision 41.1).
+MintPRINT 1.2.4 is mainly a packaging/build change: one distributable
+drawer instead of two, with automatic AmigaOS-version detection choosing
+the right driver, plus a real-hardware ink/toner colour fix found while
+testing it. Driver behaviour is unchanged (still driver revision 41.1).
 
 - **One MintPRINT drawer for every supported AmigaOS release.** The
   separate `MintPRINT` / `MintPRINT-OS31` release bundles are merged into a
@@ -54,6 +55,15 @@ right driver. Driver behaviour is unchanged (still driver revision 41.1).
   "what AmigaOS/printer.device generation is this?" with the detected
   answer pre-selected) for anyone who prefers that install path over
   running MintPrintSettings first.
+- **Ink/toner bars now use the printer's actual reported colour.** On a
+  screen with few free colour registers (e.g. a default 32-colour
+  Workbench), `ObtainBestPenA()` only reuses whatever pen already on
+  screen was closest to the requested colour - with no true cyan/magenta
+  already present, several markers could snap to the same wrong pen (seen
+  turning both cyan and magenta bars yellow). The ink/toner panel now
+  tries `ObtainPen()` first, which only succeeds by setting a genuinely
+  free pen to the exact requested RGB, and only falls back to the old
+  best-match behaviour if the screen truly has no free pens left.
 - `make release` now builds both drivers and stages the single combined
   bundle in one step; the old separate `make release31`/`make release-all`
   targets are gone since there is only one bundle to build.
