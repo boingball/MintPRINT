@@ -2966,7 +2966,7 @@ static void mp_marker_short_name(int index, char out[3]) {
     const char *name;
     const char *color;
 
-    out[0] = ' ';
+    out[0] = '\0';
 
     if (index < 0 || index >= MAX_MARKERS)
         return;
@@ -2977,8 +2977,8 @@ static void mp_marker_short_name(int index, char out[3]) {
     /* Keep already-compact printer names such as C/M/Y/K. */
     if (name && name[0] && strlen(name) <= 2) {
         out[0] = name[0];
-        out[1] = name[1] ? name[1] : ' ';
-        out[2] = ' ';
+        out[1] = name[1] ? name[1] : '\0';
+        out[2] = '\0';
         return;
     }
 
@@ -2997,8 +2997,8 @@ static void mp_marker_short_name(int index, char out[3]) {
     /* Last resort: first two characters of the reported marker name. */
     if (name && name[0]) {
         out[0] = (char)toupper((unsigned char)name[0]);
-        out[1] = name[1] ? (char)toupper((unsigned char)name[1]) : ' ';
-        out[2] = ' ';
+        out[1] = name[1] ? (char)toupper((unsigned char)name[1]) : '\0';
+        out[2] = '\0';
     }
 }
 
@@ -5840,7 +5840,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
 
 
-    // Query button - kept beside the printer address field.
+    // Query button - shares the Printer Model row in the compact layout.
     ng.ng_LeftEdge = 400;
     ng.ng_Width = 92;
     ng.ng_Height = 14;
@@ -5894,10 +5894,9 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
         return NULL;
     }
 
-    // Discover button - sits below Query, searches the LAN for printers.
-    // Nudged a few px below the shared IPP Path row so its bevel has
-    // clear space from Query's above it, then restored so it doesn't
-    // shift every row below.
+    // Discover button - shares the Printer IP/Host row in the compact layout.
+    // Preserve the previous TopEdge afterwards so this isolated button does
+    // not affect the state used by later gadget setup.
     {
         UWORD row2_top = ng.ng_TopEdge;
         ng.ng_LeftEdge = 400;
@@ -5919,10 +5918,8 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
     // Printer document engine: JPEG, PostScript, PWG Raster, PDF, or
     // Apple Raster (URF).
-    // LeftEdge is nudged right of the other rows' shared 130 - this is the
-    // longest label at this column ("Printer Engine:", 15 chars) and at 130
-    // it renders with no left margin at all, clipping against the window
-    // edge.
+    // Printer Engine has the longest label in the left column; x=132 keeps
+    // a small left margin while leaving the compact ink panel free at x=320.
     ng.ng_LeftEdge = 132;
     ng.ng_TopEdge = 88 + topborder;
     ng.ng_Width = 180;
