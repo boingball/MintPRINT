@@ -94,5 +94,5 @@ printerName:
  *
  */
 mp_driver_revision_marker:
-        .asciz  "MPDRVREV:34"
+        .asciz  "MPDRVREV:35"
         .even

@@ -217,6 +217,48 @@ chase further on the Brother; if it names something else (an unexpected
 attribute, a media/resolution mismatch), that reopens the search with an
 actual reason to go on instead of a bare status code.
 
+**A fifth, unrelated-to-duplex bug was found testing PWG Raster on the same
+Brother printer** (driver revision 34): a genuine two-page Wordworth
+document (real letter text, graphics, its own 0.5in top / 1.0in bottom
+margins) printed one-sided with no IPP error at all, but came out visibly
+corrupted - decoding and rendering the retained job file to PNG showed a
+character graphic cut off at the very top of the second physical page, and
+the same graphic's fragments recurring further down. The physical page
+boundary MintPRINT chose had landed in the middle of real content instead
+of at Wordworth's own page break.
+
+Root cause: this accumulator only checks whether the target page height has
+been *reached* once a whole `SPECIAL_NOFORMFEED` band has already been
+accepted and written - never whether accepting that band would *overshoot*
+it. When the page was already close to, but under, target and the next
+~100-row band arrived, the accumulator took the entire band anyway, letting
+the page run up to ~100 rows past its true boundary. Since Wordworth streams
+its *entire* multi-page document as one unbroken sequence of same-width
+NOFORMFEED bands with no other page-break signal, those overshoot rows are
+never spare padding - they are always the start of whatever comes next
+(here, the next page's own top margin and content), silently welded onto
+the bottom of the page that just filled up. This affects PWG Raster and URF
+identically, strip-printed one-sided or duplex - it long predates this URF
+duplex work (unchanged accumulator logic; see the driver rev 32 fix above,
+which only extended the same pre-existing behaviour to URF) and simply
+hadn't surfaced on a document whose real per-page content didn't divide
+evenly into the target height.
+
+Driver revision 35 fixes this: a continuation band that would overshoot
+`g_page_target_height` now only has its first `g_split_at_row` rows applied
+to the page being finished (closing it out at exactly the target, so no
+padding is needed either); the remaining rows start a fresh page instead,
+via `mp_begin_split_page()` (mirrors `Render()` case 0's own "begin new
+page" path). Rows already arrive one at a time through `Render()` case 1
+(`mp_job_write_row()`), so the split happens mid-band, at the exact row the
+target is reached, before that row is written to either encoder - no row is
+ever dropped or duplicated. Not yet re-tested on real hardware; validated
+so far only by manual review (no cross-compiler in this environment) and by
+hand-tracing the exact band sequence from the real driver log that exposed
+the bug, which the fix reproduces cleanly: page 1 finalizes at exactly 3505
+rows (the target, not 3562) and the 57 previously-stolen rows correctly
+become page 2's own leading content instead.
+
 ## Status: confirmed physically printing
 
 The byte layout was written and cross-checked against the CUPS reference
@@ -248,9 +290,12 @@ section for why this now points at a possible printer-side "no duplex
 over `image/urf`" limitation rather than a remaining MintPRINT bug, and
 the `windows_ipp_probe.py --print-file --sides` diagnostic added to get
 the printer's own error text instead of guessing further from a bare
-status code. Whether URF duplex can complete and print at all - and,
+status code. Whether URF duplex specifically can complete and print - and,
 separately, whether the "no backside row reversal" assumption holds - is
-still not physically confirmed on any printer.
+still not physically confirmed on any printer; PWG Raster duplex, by
+contrast, *has* since been confirmed working on this same Brother printer
+(`IPP duplex Print-Job error/http/status 0 200 0`), while testing turned up
+the fifth, accumulator-overshoot bug described above (driver revision 35).
 
 If a URF test print comes out wrong (garbled image, printer error, rejected
 job), the most useful next artifact is `T:MintPRINT-job.urf` (kept when

@@ -42,7 +42,7 @@
  * exactly which build produced it, rather than relying on whoever's
  * reading it to separately check About or remember what they last
  * copied to DEVS:Printers/. */
-#define MP_DRIVER_REV 34
+#define MP_DRIVER_REV 35
 
 struct ExecBase *SysBase = NULL;
 struct DosLibrary *DOSBase = NULL;
@@ -132,6 +132,14 @@ static ULONG g_aux_height = 0;
  * width band arrives, materialise the pending height as white PWG rows. */
 static ULONG g_leading_aux_height = 0;
 static ULONG g_page_target_height = 0;
+/* Set by case 0 when a continuation band would push the accumulating page
+ * past g_page_target_height: only the first g_split_at_row of that band's
+ * rows belong to the page being finished, the rest start a fresh one. See
+ * the case-1 split point and mp_begin_split_page() - without this, the
+ * overshooting rows (and any of the next page's own leading margin caught
+ * up in them) silently landed on the wrong physical page. */
+static BOOL g_split_pending = FALSE;
+static ULONG g_split_at_row = 0;
 static BOOL g_runaway_tripped = FALSE;
 static BOOL g_page_had_noformfeed = FALSE;
 static BOOL g_discard_aux_band = FALSE;
@@ -1187,6 +1195,47 @@ static BOOL mp_page_finalize(void)
     return mp_page_submit_and_track(g_accum_height) == 0;
 }
 
+/* Starts the page that holds a split band's overshoot rows - the part of a
+ * SPECIAL_NOFORMFEED band that didn't fit on the page mp_page_finalize()
+ * just closed (see the case-1 split point in Render()). Mirrors case 0's
+ * own "begin new page" path (media/duplex-floor target, mp_job_begin(),
+ * the g_page_pending/g_accum_*/g_page_target_height reset), minus the
+ * leading-whitespace and tiny-auxiliary-band handling that never applies
+ * here - a split page always starts with real content rows already in
+ * hand, never a leading blank band still to be discovered. */
+static BOOL mp_begin_split_page(ULONG width, ULONG remaining_height)
+{
+    ULONG encoder_height = remaining_height;
+    ULONG media_height = 0;
+
+    g_page_width = width;
+    g_page_height = remaining_height;
+    g_recenter_clamped_page = FALSE;
+
+    if (mp_detect_engine(&g_config) == MP_ENGINE_PWG ||
+        mp_detect_engine(&g_config) == MP_ENGINE_URF) {
+        media_height = mp_media_target_height(g_config.media, width,
+                                              g_config.resolution);
+        if (mp_duplex_requested() && g_duplex_max_page_height > media_height)
+            media_height = g_duplex_max_page_height;
+        if (media_height > encoder_height)
+            encoder_height = media_height;
+    }
+
+    if (!mp_job_begin(width, encoder_height)) {
+        if (mp_duplex_requested()) g_duplex_job_failed = TRUE;
+        return FALSE;
+    }
+
+    g_page_pending = TRUE;
+    g_accum_width = width;
+    g_accum_height = remaining_height;
+    g_aux_height = 0;
+    g_page_target_height = media_height;
+    g_page_had_noformfeed = TRUE;
+    return TRUE;
+}
+
 static void mp_log_row(struct PrtInfo *pi, ULONG row)
 {
     ULONG i;
@@ -1292,6 +1341,8 @@ int PRT_STDARGS DriverOpen(struct IORequest *ior)
     g_aux_height = 0;
     g_leading_aux_height = 0;
     g_page_target_height = 0;
+    g_split_pending = FALSE;
+    g_split_at_row = 0;
     g_duplex_job_failed = FALSE;
     g_duplex_page_count = 0;
     g_duplex_max_page_height = 0;
@@ -1493,11 +1544,32 @@ LONG PRT_STDARGS Render(LONG ct, LONG x, LONG y, LONG status, ...)
             }
 
             if (continuation) {
+                ULONG new_total = g_accum_height + (ULONG)y;
                 g_page_width = (ULONG)x;
                 g_page_height = (ULONG)y;
-                if (!mp_job_reserve_page(g_accum_height + (ULONG)y))
+                /* A band that would carry the page past its target isn't
+                 * wholly this page's - accepting all of it (the previous
+                 * behaviour) silently stole however many rows overshot,
+                 * including any of the NEXT page's own leading margin
+                 * caught up in the same band, and welded them onto the
+                 * bottom of this one. Only reserve up to target here; the
+                 * remainder starts a fresh page at the case-1 split point
+                 * below once this band's rows actually arrive. */
+                if (g_page_target_height &&
+                    g_accum_height < g_page_target_height &&
+                    new_total > g_page_target_height) {
+                    g_split_pending = TRUE;
+                    g_split_at_row = g_page_target_height - g_accum_height;
+                    if (!mp_job_reserve_page(g_page_target_height))
+                        return PDERR_BUFFERMEMORY;
+                    mp_log_3("Strip band will split at row/bandHeight/target",
+                             (LONG)g_split_at_row, y,
+                             (LONG)g_page_target_height);
+                    return PDERR_NOERR;
+                }
+                if (!mp_job_reserve_page(new_total))
                     return PDERR_BUFFERMEMORY;
-                g_accum_height += (ULONG)y;
+                g_accum_height = new_total;
                 mp_log_3("Strip band appended width/thisHeight/accumHeight",
                          x, y, (LONG)g_accum_height);
                 return PDERR_NOERR;
@@ -1639,6 +1711,32 @@ LONG PRT_STDARGS Render(LONG ct, LONG x, LONG y, LONG status, ...)
             if (g_discard_aux_band) {
                 if (mp_row_has_ink(pi)) g_discard_aux_band_has_ink = TRUE;
                 return PDERR_NOERR;
+            }
+
+            /* The split point case 0 flagged when this band was announced:
+             * row g_split_at_row is the first one that belongs on a new
+             * page, not this one. Close the current page out at exactly
+             * its target height (no overshoot, so no padding needed
+             * either), then start the new page before writing this row -
+             * mp_job_write_row() below always writes into whichever
+             * encoder is current. */
+            if (g_split_pending && (ULONG)y == g_split_at_row) {
+                ULONG split_width = g_accum_width;
+                ULONG remaining = g_page_height - g_split_at_row;
+
+                g_split_pending = FALSE;
+                g_accum_height = g_page_target_height;
+                if (g_job_failed || g_job_rows_written != g_accum_height ||
+                    !mp_page_finalize()) {
+                    g_job_failed = TRUE;
+                    if (mp_duplex_requested()) g_duplex_job_failed = TRUE;
+                    return PDERR_CANCEL;
+                }
+                if (!mp_begin_split_page(split_width, remaining))
+                    return PDERR_CANCEL;
+                mp_log_3("Strip page split rows/newPageHeight/target",
+                         (LONG)g_split_at_row, (LONG)remaining,
+                         (LONG)g_page_target_height);
             }
 
             if (!g_job_failed && !mp_job_write_row(pi, (ULONG)y))

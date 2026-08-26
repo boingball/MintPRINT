@@ -114,6 +114,32 @@ backside-transform mechanism (unlike PWG's `pwg-sheet-back=rotated` above)
 produces a correctly-oriented backside on this specific printer's duplex
 unit.
 
+**A fourth, separate bug was found testing PWG Raster on this same
+printer** (driver revision 34), unrelated to duplex or to URF specifically:
+a genuine two-page Wordworth document (real letter text and graphics, with
+its own 0.5in top / 1.0in bottom page margins) printed one-sided with no
+IPP error at all, but the output was visibly corrupted - decoding the
+retained job file to an image showed a graphic cut off at the very top of
+the second physical sheet, with fragments of it recurring further down.
+`IPP duplex Print-Job error/http/status 0 200 0` on a retest confirmed PWG
+Raster duplex itself now works end to end on this printer, but reproduced
+the identical visible corruption on both sides. Root cause: the
+strip-printing accumulator only checked whether a page had *reached* its
+target height after accepting a whole `SPECIAL_NOFORMFEED` band, never
+whether accepting that band would *overshoot* it - so up to ~100 rows that
+belonged to the next page (including, in this case, its own top margin)
+were silently welded onto the bottom of the page that had just filled up.
+This affects PWG Raster and URF identically, one-sided or duplex, and
+predates this URF duplex work entirely (the accumulator logic itself was
+unchanged; URF only inherited it in driver revision 32 above). Fixed in
+driver revision 35 by splitting an overshooting band mid-stream at the
+exact row the target is reached, closing the current page out there and
+starting a fresh one with the remainder - see `docs/URF_ENGINE.md`'s
+"Duplex and strip-printing accumulation" section for the full mechanism.
+Not yet re-tested; no cross-compiler was available to build this fix, so
+it has only been validated by manual code review and by hand-tracing the
+exact band sequence from the driver log that exposed the bug.
+
 ### Brother HL-L2350DW
 
 Two systems were reported against the same printer in

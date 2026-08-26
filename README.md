@@ -30,7 +30,7 @@ printer.device driver plus a GUI setup tool.
 
 ## What's new in 1.2.1
 
-MintPRINT 1.2.1 bumps to **driver revision 34**, adding a new engine:
+MintPRINT 1.2.1 bumps to **driver revision 35**, adding a new engine:
 
 - **Apple Raster (`ENGINE=urf`) engine.** A new backend for printers that
   advertise `image/urf` but none of MintPRINT's other formats (JPEG,
@@ -61,6 +61,21 @@ MintPRINT 1.2.1 bumps to **driver revision 34**, adding a new engine:
   correct 0/1/2, caught by cross-checking a second, independent real-world
   URF reverse-engineering against an HP DesignJet T230) - fixed in rev 34.
   Not yet re-tested.
+- **Strip-printing accumulator overshoot fix** (driver rev 35). Found
+  testing PWG Raster one-sided on the same printer, not URF or duplex
+  specifically: a two-page Wordworth document printed with no IPP error at
+  all, but visibly corrupted - the page boundary the accumulator chose fell
+  in the middle of real content (confirmed by decoding and rendering the
+  job file: a character cut off at the top of the second sheet). The
+  accumulator only checked whether a page had reached its target height
+  after accepting a whole band, never whether accepting it would *overshoot*
+  the target - so up to ~100 rows belonging to the next page (including its
+  own top margin) got silently welded onto the page that just filled up.
+  Affects PWG Raster and URF identically, one-sided or duplex. Fixed by
+  splitting an overshooting band mid-stream at the exact row the target is
+  reached. Not yet re-tested; no cross-compiler was available to build this
+  fix, so it's validated only by manual review and by hand-tracing the real
+  band sequence that exposed the bug.
 
 ## What's new in 1.2.0
 
@@ -173,7 +188,7 @@ be added with its AmigaOS version, TCP/IP stack, engine and exact print options.
 ## Status
 
 MintPRINT is now a real, working app: version **1.2.1** GUI with **driver
-revision 34**, with multiple printers confirmed fully working over IPP/AirPrint
+revision 35**, with multiple printers confirmed fully working over IPP/AirPrint
 from real Amiga hardware. It's still actively developed and not every printer
 is confirmed yet, so check the
 [printer compatibility page](docs/PRINTER_COMPATIBILITY.md) for your specific
