@@ -71,9 +71,9 @@ rows. `pwg-sheet-back=rotated`; scaling `auto`; quality `high`; color;
 source `auto`.
 
 This printer also advertises `two-sided-long-edge`/`two-sided-short-edge`,
-making it the printer that first tested URF duplex - so far across two
-attempts, both rejected by the printer before any paper came out, each
-exposing a different real bug:
+making it the printer that first tested URF duplex - so far across three
+attempts, every one rejected by the printer before any paper came out,
+each exposing a different real bug:
 
 1. **Driver revision 31.** The test document was strip-printed
    (`SPECIAL_NOFORMFEED`), and URF's duplex implementation at that revision
@@ -95,8 +95,20 @@ exposing a different real bug:
    page's target at the tallest page the duplex job has finalized so far
    (`g_duplex_max_page_height`), converging same-sized pages onto one
    height without ever truncating real content.
+3. **Driver revision 33.** Both pages now came out byte-perfect and an
+   exactly matching 3562 rows each - and the printer *still* rejected the
+   job with the identical IPP status, immediately and synchronously. The
+   cause was the duplex/tumble byte itself (page header offset 2): the
+   original CUPS-source-derived implementation used 1/2/3 for no-duplex/
+   short-side/long-side; cross-checking against a second, independent,
+   real-world URF reverse-engineering (against an HP DesignJet T230) found
+   the correct values are 0/1/2 - meaning this printer was being sent byte
+   value 3 for a `two-sided-long-edge` job, which isn't a defined value in
+   that second source at all. Fixed in driver revision 34 - see
+   `docs/URF_ENGINE.md`'s "Format layout" section for the corrected table
+   and citation.
 
-See `docs/URF_ENGINE.md` for both fixes in detail. Not yet re-tested;
+See `docs/URF_ENGINE.md` for all three fixes in detail. Not yet re-tested;
 still also unconfirmed once retested is whether Apple Raster's lack of a
 backside-transform mechanism (unlike PWG's `pwg-sheet-back=rotated` above)
 produces a correctly-oriented backside on this specific printer's duplex
@@ -266,7 +278,7 @@ printer - still needs an OKI B412 test report to close out issue #60.
 This printer also advertises duplex sides (`two-sided-long-edge`,
 `two-sided-short-edge`). MintPRINT duplex originally required
 `ENGINE=pwg-raster`, which this printer does not advertise - but `ENGINE=urf`
-now supports duplex too (driver revision 33, see `docs/DUPLEX_PRINTING.md`
+now supports duplex too (driver revision 34, see `docs/DUPLEX_PRINTING.md`
 and `docs/URF_ENGINE.md`), so duplex is expected to be reachable here once
 this printer's own URF printing is confirmed, one-sided first.
 

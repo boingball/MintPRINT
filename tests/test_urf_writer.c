@@ -78,7 +78,7 @@ static int test_single_page(void)
     p = out_buf + 12; /* page header */
     if (p[0] != 24) { free(scratch); return 15; }  /* cupsBitsPerPixel */
     if (p[1] != 1) { free(scratch); return 16; }    /* colorspace: sRGB */
-    if (p[2] != 1) { free(scratch); return 17; }    /* duplex: simplex */
+    if (p[2] != 0) { free(scratch); return 17; }    /* duplex: no duplex */
     if (p[3] != 0 || p[4] != 0 || p[5] != 0) { free(scratch); return 18; }
     { /* bytes 6-11: reserved, zero */
         int i;
@@ -176,7 +176,7 @@ static int test_duplex(void)
     row[3] = 5; row[4] = 6; row[5] = 7;
 
     /* Page 1 (front): write_file_header=1, duplex=1, tumble=0 -
-     * two-sided-long-edge -> duplex byte 3. */
+     * two-sided-long-edge -> duplex byte 2. */
     if (!mp_urf_begin_page(&enc, width, height, 300, 1, 1, 0,
                            scratch, scratch_size, sink_write, &sink)) {
         free(scratch); return 10;
@@ -188,7 +188,7 @@ static int test_duplex(void)
     if (be32(out_buf + MP_URF_PAGECOUNT_FIELD_OFFSET) != 0xffffffffUL) {
         free(scratch); return 13;
     }
-    if (out_buf[12 + 2] != 3) { free(scratch); return 14; } /* duplex-no-tumble */
+    if (out_buf[12 + 2] != 2) { free(scratch); return 14; } /* duplex, long side */
     if (!mp_urf_write_scanline(&enc, row)) { free(scratch); return 15; }
     if (!mp_urf_finish(&enc)) { free(scratch); return 16; }
     page1_end = sink.size;
@@ -202,7 +202,7 @@ static int test_duplex(void)
     page2_header_off = page1_end;
     if (sink.size != page1_end + 32UL) { free(scratch); return 21; }
     p = out_buf + page2_header_off;
-    if (p[2] != 3) { free(scratch); return 22; } /* duplex-no-tumble again */
+    if (p[2] != 2) { free(scratch); return 22; } /* duplex, long side, again */
     if (be32(p + 12) != width || be32(p + 16) != height) {
         free(scratch); return 23;
     }
@@ -225,8 +225,8 @@ static int test_duplex(void)
     return 0;
 }
 
-/* Tumble byte value: two-sided-short-edge -> duplex-tumble (2), not
- * duplex-no-tumble (3) - confirms tumble is wired through, not just
+/* Tumble byte value: two-sided-short-edge -> duplex, short side (1), not
+ * duplex, long side (2) - confirms tumble is wired through, not just
  * hardcoded to one value. */
 static int test_tumble_byte(void)
 {
@@ -247,7 +247,7 @@ static int test_tumble_byte(void)
                            scratch, scratch_size, sink_write, &sink)) {
         free(scratch); return 10;
     }
-    if (out_buf[12 + 2] != 2) { free(scratch); return 11; }
+    if (out_buf[12 + 2] != 1) { free(scratch); return 11; }
 
     free(scratch);
     return 0;

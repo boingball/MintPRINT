@@ -48,8 +48,8 @@ Page header (32 bytes), all multi-byte fields big-endian:
 ```text
 byte 0:      cupsBitsPerPixel   (24 - 8-bit sRGB, chunked RGB)
 byte 1:      colorspace         (1 - sRGB)
-byte 2:      duplex/tumble mode (1 = simplex, 2 = duplex-tumble
-             [two-sided-short-edge], 3 = duplex-no-tumble [two-sided-long-edge])
+byte 2:      duplex/tumble mode (0 = no duplex, 1 = duplex, short side
+             [two-sided-short-edge], 2 = duplex, long side [two-sided-long-edge])
 byte 3:      print quality      (0 - unspecified)
 byte 4:      media type         (0 - unspecified)
 byte 5:      media position     (0 - auto)
@@ -59,6 +59,14 @@ bytes 16-19: height in pixels
 bytes 20-23: resolution (dpi - one figure used for both axes)
 bytes 24-31: reserved, zero
 ```
+
+The byte 2 (duplex/tumble) values above were corrected after real-hardware
+testing (see "Duplex and strip-printing accumulation" below) - the
+original CUPS-source-derived implementation used 1/2/3 instead of 0/1/2,
+which was independently caught against a second, unrelated source: a
+published from-scratch reverse-engineering of the on-the-wire format
+against a real HP DesignJet T230. Every other field's offset and size in
+this table was confirmed correct against that same source.
 
 Unlike PWG Raster's page header, Apple Raster's compact 32-byte header has
 no CrossFeedTransform/FeedTransform-equivalent fields for describing a
@@ -151,6 +159,28 @@ later page genuinely needing more content than any page before it) can
 still end up with a final mismatched pair, since an earlier, already-
 queued page can never be enlarged after the fact once submitted.
 
+**A third bug was found once the first two were fixed** (same Brother
+test, driver revision 33): with the accumulator and page-height matching
+both now correct - two pages, byte-perfect, both exactly 3562 rows - the
+printer *still* rejected the job with the identical
+`server-error-job-canceled`, immediately and synchronously (confirmed via
+`ipp_client.c`'s `rc=-16` path, which only fires when the printer's own
+IPP response to the submission itself carries an error status - this
+isn't a later async rasterization failure). The cause was the duplex/tumble
+byte values themselves: the original implementation, derived from a CUPS
+source paraphrase, used 1 = no duplex, 2 = short side, 3 = long side.
+Cross-checking against a second, independent, real-world source (see
+"Format layout" above) showed the actual on-the-wire values are 0 = no
+duplex, 1 = short side, 2 = long side - so a `two-sided-long-edge` job was
+sending byte value 3, which isn't a defined value in that second source at
+all. Driver revision 34 fixes the enum in `mp_urf_write_page_header()`.
+Notably, the one-sided test that confirmed URF's row/header layout back at
+driver revision 30 used the old scheme's "simplex" value (1), which under
+the corrected enum actually means "duplex, short side" - it likely worked
+anyway because that job's IPP-level `sides=one-sided` never told the
+printer's duplexer to engage at all, so the page-embedded hint went
+unchecked; the stricter duplex path evidently does check it.
+
 ## Status: confirmed physically printing
 
 The byte layout was written and cross-checked against the CUPS reference
@@ -169,16 +199,19 @@ confirmation is still pending, since it wasn't the hardware used for the
 test above.
 
 That confirmed test was one-sided. Duplex support (see above) is new; its
-first two real tests (Brother MFC-J6930DW) surfaced the two bugs described
-above rather than confirming duplex itself - both times the printer
-canceled the job before any paper came out: first the missing
-strip-printing accumulator (driver revision 31, fixed in 32), then the
-front/back page-height mismatch it exposed once fixed (driver revision 32,
-fixed in 33). Both are now fixed, but duplex itself - including whether a
-job actually completes and prints, and the "no backside row reversal"
-assumption - is still not yet physically confirmed. A backside page that
-prints upside-down or mirrored, while the front side, page count and
-overall page geometry are otherwise correct, points there first.
+first three real tests (Brother MFC-J6930DW) each surfaced a real bug
+rather than confirming duplex itself - every time the printer canceled the
+job before any paper came out: first the missing strip-printing
+accumulator (driver revision 31, fixed in 32), then the front/back
+page-height mismatch it exposed once fixed (driver revision 32, fixed in
+33), then the duplex/tumble byte enum itself being wrong (driver revision
+33, fixed in 34 - see "Format layout" and "Duplex and strip-printing
+accumulation" above). All three are now fixed, but duplex itself -
+including whether a job actually completes and prints, and the "no
+backside row reversal" assumption - is still not yet physically confirmed.
+A backside page that prints upside-down or mirrored, while the front side,
+page count and overall page geometry are otherwise correct, points there
+first.
 
 If a URF test print comes out wrong (garbled image, printer error, rejected
 job), the most useful next artifact is `T:MintPRINT-job.urf` (kept when

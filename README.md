@@ -30,7 +30,7 @@ printer.device driver plus a GUI setup tool.
 
 ## What's new in 1.2.1
 
-MintPRINT 1.2.1 bumps to **driver revision 33**, adding a new engine:
+MintPRINT 1.2.1 bumps to **driver revision 34**, adding a new engine:
 
 - **Apple Raster (`ENGINE=urf`) engine.** A new backend for printers that
   advertise `image/urf` but none of MintPRINT's other formats (JPEG,
@@ -39,24 +39,28 @@ MintPRINT 1.2.1 bumps to **driver revision 33**, adding a new engine:
   `docs/URF_ENGINE.md`. One-sided printing confirmed physically (Brother
   MFC-J6930DW, driver rev 30); the OKI B412 report that motivated it is
   still pending its own confirmation.
-- **URF duplex** (driver rev 31, two bugs found and fixed by rev 33).
+- **URF duplex** (driver rev 31, three bugs found and fixed by rev 34).
   `ENGINE=urf` now supports two-sided printing the same way PWG Raster
   does - one multi-page stream, submitted once from `DriverClose()` -
   using Apple Raster's own duplex/tumble page header byte. Unlike PWG
   Raster, no backside row/column reversal is performed (Apple Raster's
   page header has no equivalent transform fields); see
-  `docs/DUPLEX_PRINTING.md`. Its first two real tests (Brother
+  `docs/DUPLEX_PRINTING.md`. Its first three real tests (Brother
   MFC-J6930DW) each hit a real bug rather than confirming duplex itself,
-  both rejected by the printer before any paper came out: first, URF had
-  no strip-printing band accumulator, so a strip-printed document turned
-  into dozens of bogus single-band "duplex pages" (62 instead of a
+  every one rejected by the printer before any paper came out: first, URF
+  had no strip-printing band accumulator, so a strip-printed document
+  turned into dozens of bogus single-band "duplex pages" (62 instead of a
   handful) - fixed in rev 32 by extending PWG Raster's own accumulator to
   cover URF; then, once fixed, the two resulting real pages came out at
   different heights (front content naturally overshot the media-derived
-  target while the back only got padded to it) - a physical duplex sheet
-  needs matching front/back geometry, so rev 33 floors every later page's
-  target at the tallest page the job has finalized so far. Not yet
-  re-tested.
+  target while the back only got padded to it) - fixed in rev 33 by
+  flooring every later page's target at the tallest page the job has
+  finalized so far; then, with both pages byte-perfect and an exactly
+  matching height, the printer still rejected the job - the duplex/tumble
+  byte itself was wrong (1/2/3 for no-duplex/short/long instead of the
+  correct 0/1/2, caught by cross-checking a second, independent real-world
+  URF reverse-engineering against an HP DesignJet T230) - fixed in rev 34.
+  Not yet re-tested.
 
 ## What's new in 1.2.0
 
@@ -169,7 +173,7 @@ be added with its AmigaOS version, TCP/IP stack, engine and exact print options.
 ## Status
 
 MintPRINT is now a real, working app: version **1.2.1** GUI with **driver
-revision 33**, with multiple printers confirmed fully working over IPP/AirPrint
+revision 34**, with multiple printers confirmed fully working over IPP/AirPrint
 from real Amiga hardware. It's still actively developed and not every printer
 is confirmed yet, so check the
 [printer compatibility page](docs/PRINTER_COMPATIBILITY.md) for your specific

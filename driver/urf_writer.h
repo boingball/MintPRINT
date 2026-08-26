@@ -81,9 +81,9 @@ int mp_urf_begin(MPUrfEncoder *enc, unsigned long width, unsigned long height,
  * must be true for the first page and false for every later page (see the
  * file comment above - the 12-byte file header, including the page count
  * placeholder, is written exactly once). duplex/tumble set the page
- * header's duplex byte: simplex (both false), duplex-tumble (duplex &&
- * tumble - matches IPP sides=two-sided-short-edge), or duplex-no-tumble
- * (duplex && !tumble - two-sided-long-edge). */
+ * header's duplex byte: no duplex (both false, 0), duplex short side
+ * (duplex && tumble, 1 - matches IPP sides=two-sided-short-edge), or
+ * duplex long side (duplex && !tumble, 2 - two-sided-long-edge). */
 int mp_urf_begin_page(MPUrfEncoder *enc,
                       unsigned long width, unsigned long height,
                       unsigned long dpi, int write_file_header,
