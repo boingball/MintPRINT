@@ -3516,27 +3516,33 @@ static BOOL mp_needs_os31_driver(void) {
     return SysBase->LibNode.lib_Version < MP_EXEC_VERSION_V44;
 }
 
-/* Friendly label for the About box and install prompts. The exec.library
- * numbers below are the ones real AmigaOS 3.x releases shipped with; any
- * exec.library version outside this list (older or a future release) is
- * still reported by its raw version number rather than guessed at. */
+/* Short friendly label for EasyRequest prompts and the About box - kept
+ * deliberately brief (no exec.library version number) because EasyRequest
+ * sizes its window to the single longest \n-delimited line with no
+ * wrapping, and a long line here easily pushes the whole requester off a
+ * low-resolution AmigaOS screen. The exec.library numbers below are the
+ * ones real AmigaOS 3.x releases shipped with; any version outside this
+ * list (older or a future release) still gets a short label rather than
+ * being left blank - see printf() callers for the exec.library number
+ * itself, logged separately to the on-screen output box where a longer
+ * line just wraps instead of resizing a window. */
 static void mp_describe_amiga_os(char *buf, size_t bufsize) {
     UWORD ver = SysBase->LibNode.lib_Version;
     const char *label;
 
     switch (ver) {
-        case 39: label = "3.0";      break;
-        case 40: label = "3.1";      break;
-        case 44: label = "3.5";      break;
-        case 45: label = "3.9";      break;
-        case 47: label = "3.2+";     break;
-        default: label = NULL;       break;
+        case 39: label = "3.0";  break;
+        case 40: label = "3.1";  break;
+        case 44: label = "3.5";  break;
+        case 45: label = "3.9";  break;
+        case 47: label = "3.2+"; break;
+        default: label = NULL;   break;
     }
 
     if (label) {
-        snprintf(buf, bufsize, "AmigaOS %s (exec.library v%u)", label, (unsigned)ver);
+        snprintf(buf, bufsize, "AmigaOS %s", label);
     } else {
-        snprintf(buf, bufsize, "exec.library v%u", (unsigned)ver);
+        snprintf(buf, bufsize, "AmigaOS (exec v%u)", (unsigned)ver);
     }
 }
 
@@ -3715,13 +3721,13 @@ static BOOL mp_driver_version_newer(const struct MPDriverVersion *a,
 
 static void show_about(struct Window *win) {
     struct EasyStruct es;
-    char msg[640];
+    char msg[512];
     char installed_str[32];
     char bundled_str[32];
     char os_desc[64];
     struct MPDriverVersion installed_ver, bundled_ver;
     CONST_STRPTR src_path = MINTPRINT_DRIVER_SRC;
-    CONST_STRPTR variant_name = mp_needs_os31_driver() ? "OS3.0/3.1 classic" : "V44+";
+    CONST_STRPTR variant_name = mp_needs_os31_driver() ? "OS3.0/3.1" : "V44+";
 
     mp_describe_amiga_os(os_desc, sizeof(os_desc));
 
@@ -3729,7 +3735,7 @@ static void show_about(struct Window *win) {
         snprintf(installed_str, sizeof(installed_str), "v%u.%u",
                  (unsigned)installed_ver.version, (unsigned)installed_ver.revision);
     } else {
-        strcpy(installed_str, "not installed / unknown");
+        strcpy(installed_str, "not installed");
     }
     if (mp_read_driver_version(src_path, &bundled_ver)) {
         snprintf(bundled_str, sizeof(bundled_str), "v%u.%u",
@@ -3738,19 +3744,24 @@ static void show_about(struct Window *win) {
         strcpy(bundled_str, "not found");
     }
 
+    /* Deliberately short lines, and no PROGDIR: path shown here - see the
+     * comment on mp_describe_amiga_os() above for why: EasyRequest sizes
+     * its window to the single widest line with no wrapping, and this
+     * requester's own longest line was pushing the window off-screen on a
+     * default low-resolution AmigaOS display. */
     snprintf(msg, sizeof(msg),
         "MintPRINT v" MINTPRINT_SETTINGS_VERSION
         " - IPP/AirPrint printing for AmigaOS\n\n"
         "Detected: %s\n"
-        "Selected driver: %s (%s)\n\n"
-        "Installed driver (DEVS:Printers/MintPRINT): %s\n"
-        "Bundled driver (%s): %s\n\n"
+        "Driver build: %s\n\n"
+        "Installed driver: %s\n"
+        "Bundled driver: %s\n\n"
         "Bug reports and source:\n"
         "github.com/boingball/MintPRINT\n\n"
         "If this saved you a trip to the printer shop:\n"
         "buymeacoffee.com/boingball",
-        os_desc, variant_name, src_path,
-        installed_str, src_path, bundled_str);
+        os_desc, variant_name,
+        installed_str, bundled_str);
 
     es.es_StructSize = sizeof(struct EasyStruct);
     es.es_Flags = 0;
@@ -3767,10 +3778,11 @@ static void check_and_offer_driver_install(struct Window *win) {
     struct MPDriverVersion src_ver, dest_ver;
     BOOL have_src_ver, have_dest_ver;
     CONST_STRPTR src_path = MINTPRINT_DRIVER_SRC;
-    CONST_STRPTR variant_name = mp_needs_os31_driver() ? "OS3.0/3.1 classic" : "V44+";
+    CONST_STRPTR variant_name = mp_needs_os31_driver() ? "OS3.0/3.1" : "V44+";
 
     mp_describe_amiga_os(os_desc, sizeof(os_desc));
-    printf("Detected %s - using the %s driver (%s).\n", os_desc, variant_name, src_path);
+    printf("Detected %s (exec.library v%u) - using the %s driver (%s).\n",
+           os_desc, (unsigned)SysBase->LibNode.lib_Version, variant_name, src_path);
 
     if (!mp_file_exists(src_path)) {
         printf("Bundled driver not found at %s; skipping install check.\n", src_path);
@@ -3804,13 +3816,19 @@ static void check_and_offer_driver_install(struct Window *win) {
 
         if (have_dest_ver) {
             snprintf(msg, sizeof(msg),
-                     "A newer MintPRINT driver is available\n(installed: v%u.%u, bundled: v%u.%u).\n\nDetected %s: using the %s driver.\nUpdate DEVS:Printers/MintPRINT now?",
+                     "A newer MintPRINT driver is available.\n"
+                     "Installed: v%u.%u  Bundled: v%u.%u\n\n"
+                     "Detected: %s (%s driver)\n\n"
+                     "Update DEVS:Printers/MintPRINT now?",
                      (unsigned)dest_ver.version, (unsigned)dest_ver.revision,
                      (unsigned)src_ver.version, (unsigned)src_ver.revision,
                      os_desc, variant_name);
         } else {
             snprintf(msg, sizeof(msg),
-                     "A newer MintPRINT driver is available\n(installed driver predates version tracking, bundled: v%u.%u).\n\nDetected %s: using the %s driver.\nUpdate DEVS:Printers/MintPRINT now?",
+                     "A newer MintPRINT driver is available.\n"
+                     "Installed: pre-versioning  Bundled: v%u.%u\n\n"
+                     "Detected: %s (%s driver)\n\n"
+                     "Update DEVS:Printers/MintPRINT now?",
                      (unsigned)src_ver.version, (unsigned)src_ver.revision,
                      os_desc, variant_name);
         }
@@ -3836,7 +3854,10 @@ static void check_and_offer_driver_install(struct Window *win) {
     }
 
     snprintf(msg, sizeof(msg),
-             "The MintPRINT printer driver is not installed in\nDEVS:Printers/.\n\nDetected %s: install the %s driver now?",
+             "The MintPRINT driver is not installed in\n"
+             "DEVS:Printers/.\n\n"
+             "Detected: %s (%s driver)\n\n"
+             "Install it now?",
              os_desc, variant_name);
     es.es_TextFormat = (UBYTE *)msg;
     es.es_GadgetFormat = (UBYTE *)"Install|Cancel";
