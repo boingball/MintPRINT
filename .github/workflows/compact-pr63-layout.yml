@@ -1,4 +1,4 @@
-name: Apply compact PR63 layout
+name: Validate compact PR63 source
 
 on:
   push:
@@ -9,8 +9,8 @@ permissions:
   contents: write
 
 jobs:
-  patch-layout:
-    if: ${{ github.actor != 'github-actions[bot]' && !contains(github.event.head_commit.message, '[compact-layout-applied]') }}
+  validate-and-fix:
+    if: ${{ github.actor != 'github-actions[bot]' && !contains(github.event.head_commit.message, '[nul-fix-applied]') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,359 +18,89 @@ jobs:
           ref: claude/ink-toner-status-panel
           fetch-depth: 0
 
-      - name: Patch compact GUI and ink panel
+      - name: Fix escaped C NULs and validate layout
         shell: bash
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          import re
 
           path = Path('src/MintPrintSettings.c')
-          s = path.read_text(encoding='utf-8')
+          data = path.read_bytes()
+          nul_count = data.count(b'\x00')
+          print(f'NUL bytes before fix: {nul_count}')
+          if nul_count:
+              data = data.replace(b'\x00', b'\\0')
+              path.write_bytes(data)
 
-          def replace_once(old, new, label):
-              global s
-              count = s.count(old)
-              if count != 1:
-                  raise SystemExit(f'{label}: expected 1 occurrence, found {count}')
-              s = s.replace(old, new, 1)
-
-          # Restore the original compact window/output-width description.
-          old_comment = '''/* The debug output box is OUTPUT_LEFT..OUTPUT_RIGHT wide - at the main
-           * window's 660px width (widened in 1.2.3 to fit the ink-status panel,
-           * see MP_MARKER_AREA_LEFT) that's ~630px, or ~78 chars of Topaz80
-           * (8px/char). 62 stays under that with room to spare; it only needs to
-           * stay above the 54 chars a real message like "Unit%d has no saved
-           * settings yet - nothing to activate." needs. Re-check this against
-           * OUTPUT_LEFT/OUTPUT_RIGHT if the window width changes again. */'''
-          new_comment = '''/* The debug output box is OUTPUT_LEFT..OUTPUT_RIGHT wide - at the main
-           * window's 520px width that's ~490px, or ~61 chars of Topaz80 (8px/char).
-           * MAX_OUTPUT_LINE_LENGTH includes the terminating NUL, so 62 stores at
-           * most 61 visible characters. Re-check this against OUTPUT_LEFT/
-           * OUTPUT_RIGHT if the window width changes again. */'''
-          replace_once(old_comment, new_comment, 'output-width comment')
-
-          # Compact marker-panel constants: use the spare area between the
-          # IPP/Engine/Debug controls and the Media row instead of widening.
-          old_consts = '''#define MP_MARKER_AREA_LEFT   510
-          #define MP_MARKER_STRIP_H     26
-          #define MP_MARKER_BAR_H       10
-          #define MP_MARKER_MAX_STRIPS  6'''
-          new_consts = '''#define MP_MARKER_AREA_LEFT     320
-          #define MP_MARKER_AREA_TOP       65
-          #define MP_MARKER_AREA_BOTTOM   123
-          #define MP_MARKER_COLS            2
-          #define MP_MARKER_COL_GAP          6
-          #define MP_MARKER_ROW_H           14
-          #define MP_MARKER_BAR_H            7
-          #define MP_MARKER_MAX_STRIPS       6'''
-          replace_once(old_consts, new_consts, 'marker constants')
-
-          # Replace the wide one-column strip renderer with a compact 2x3 grid.
-          marker_func_re = re.compile(
-              r'static void mp_draw_marker_strips\(void\) \{.*?\n\}\n\nint load_ilbm_to_rgb',
-              re.S,
-          )
-          marker_replacement = r'''static void mp_marker_short_name(int index, char out[3]) {
-              const char *name;
-              const char *color;
-
-              out[0] = '\0';
-
-              if (index < 0 || index >= MAX_MARKERS)
-                  return;
-
-              name = marker_names[index];
-              color = marker_colors[index];
-
-              /* Keep already-compact printer names such as C/M/Y/K. */
-              if (name && name[0] && strlen(name) <= 2) {
-                  out[0] = name[0];
-                  out[1] = name[1] ? name[1] : '\0';
-                  out[2] = '\0';
-                  return;
-              }
-
-              /* Otherwise derive a predictable short label from marker colour. */
-              if (color && color[0]) {
-                  if (strcasecmp(color, "cyan") == 0)          { strcpy(out, "C");  return; }
-                  if (strcasecmp(color, "magenta") == 0)       { strcpy(out, "M");  return; }
-                  if (strcasecmp(color, "yellow") == 0)        { strcpy(out, "Y");  return; }
-                  if (strcasecmp(color, "black") == 0)         { strcpy(out, "BK"); return; }
-                  if (strcasecmp(color, "light-cyan") == 0)    { strcpy(out, "LC"); return; }
-                  if (strcasecmp(color, "light-magenta") == 0) { strcpy(out, "LM"); return; }
-                  if (strcasecmp(color, "photo-black") == 0)   { strcpy(out, "PK"); return; }
-                  if (strcasecmp(color, "matte-black") == 0)   { strcpy(out, "MK"); return; }
-              }
-
-              /* Last resort: first two characters of the reported marker name. */
-              if (name && name[0]) {
-                  out[0] = (char)toupper((unsigned char)name[0]);
-                  out[1] = name[1] ? (char)toupper((unsigned char)name[1]) : '\0';
-                  out[2] = '\0';
-              }
+          text = path.read_text(encoding='utf-8')
+          checks = {
+              'compact window': '        WA_Width, 520,',
+              'compact min window': '        WA_MinWidth, 520,',
+              'marker left': '#define MP_MARKER_AREA_LEFT     320',
+              'marker bottom': '#define MP_MARKER_AREA_BOTTOM   123',
+              'two marker columns': '#define MP_MARKER_COLS            2',
+              'unit layout': 'ng.ng_LeftEdge = 48;',
+              'unit top': 'ng.ng_TopEdge = 4 + topborder;',
+              'media top': 'ng.ng_TopEdge = 125 + topborder;',
+              'dpi top': 'ng.ng_TopEdge = 168 + topborder;',
+              'sides top': 'ng.ng_TopEdge = 185 + topborder;',
+              'test print top': 'ng.ng_TopEdge = 215 + topborder;',
+              'short marker helper': 'static void mp_marker_short_name',
+              'escaped nul': "out[0] = '\\0';",
           }
+          missing = [name for name, needle in checks.items() if needle not in text]
+          if missing:
+              raise SystemExit('Missing compact-layout checks: ' + ', '.join(missing))
+          if '\x00' in text:
+              raise SystemExit('Source still contains an embedded NUL')
+          if 'WA_Width, 660,' in text or '#define MP_MARKER_AREA_LEFT   510' in text:
+              raise SystemExit('Wide-layout remnants remain')
 
-          static void mp_draw_marker_strips(void) {
-              struct RastPort *rp;
-              int area_left, area_right, area_top, area_bottom;
-              int grid_top, cell_width, count, i;
-
-              if (!window || !screen || !font) return;
-
-              rp = window->RPort;
-              SetFont(rp, font);
-              SetDrMd(rp, JAM2);
-
-              area_left = MP_MARKER_AREA_LEFT;
-              area_right = window->Width - 20;
-              area_top = g_topborder + MP_MARKER_AREA_TOP;
-              area_bottom = g_topborder + MP_MARKER_AREA_BOTTOM;
-              if (area_right <= area_left || area_bottom <= area_top) return;
-
-              /* Clear only the compact panel; this rectangle contains no gadgets. */
-              SetAPen(rp, 0);
-              RectFill(rp, area_left, area_top, area_right, area_bottom);
-
-              SetAPen(rp, 1);
-              Move(rp, area_left, area_top + font->tf_Baseline);
-              Text(rp, "Ink/Toner:", 10);
-
-              count = mp_marker_count();
-              if (count <= 0) {
-                  Move(rp,
-                       area_left,
-                       area_top + font->tf_YSize + 3 + font->tf_Baseline);
-                  Text(rp, "(Query for levels)", 18);
-                  return;
-              }
-
-              cell_width =
-                  (area_right - area_left - MP_MARKER_COL_GAP) / MP_MARKER_COLS;
-              grid_top = area_top + font->tf_YSize + 3;
-
-              for (i = 0; i < count; i++) {
-                  int col = i % MP_MARKER_COLS;
-                  int row = i / MP_MARKER_COLS;
-                  int cell_left = area_left +
-                      col * (cell_width + MP_MARKER_COL_GAP);
-                  int cell_right = cell_left + cell_width - 1;
-                  int row_top = grid_top + row * MP_MARKER_ROW_H;
-                  int text_y = row_top + font->tf_Baseline;
-                  int level = (i < num_marker_levels) ? marker_levels[i] : -1;
-                  int display_level;
-                  char namebuf[3];
-                  char pct[8];
-                  int pct_len, pct_x;
-                  int bar_left, bar_right, bar_top, bar_bottom;
-                  UBYTE r, g, b;
-                  BOOL have_rgb;
-                  LONG pen;
-
-                  if (row_top + MP_MARKER_ROW_H > area_bottom)
-                      break;
-
-                  mp_marker_short_name(i, namebuf);
-
-                  SetAPen(rp, 1);
-                  Move(rp, cell_left, text_y);
-                  Text(rp, namebuf, strlen(namebuf));
-
-                  if (level >= 0) {
-                      display_level = level;
-                      if (display_level > 100) display_level = 100;
-                      snprintf(pct, sizeof(pct), "%d%%", display_level);
-                  } else {
-                      strcpy(pct, "--");
-                  }
-
-                  pct_len = strlen(pct);
-                  pct_x = cell_right - (pct_len * 8);
-                  Move(rp, pct_x, text_y);
-                  Text(rp, pct, pct_len);
-
-                  /* Thin level bar between the short marker name and percentage. */
-                  bar_left = cell_left + 20;
-                  bar_right = pct_x - 4;
-                  bar_top = row_top + 1;
-                  bar_bottom = bar_top + MP_MARKER_BAR_H;
-                  if (bar_right <= bar_left)
-                      continue;
-
-                  SetAPen(rp, 1);
-                  RectFill(rp, bar_left, bar_top, bar_right, bar_top);
-                  RectFill(rp, bar_left, bar_bottom, bar_right, bar_bottom);
-                  RectFill(rp, bar_left, bar_top, bar_left, bar_bottom);
-                  RectFill(rp, bar_right, bar_top, bar_right, bar_bottom);
-
-                  have_rgb = mp_marker_rgb(marker_colors[i], &r, &g, &b);
-                  pen = have_rgb
-                      ? (LONG)ObtainBestPenA(screen->ViewPort.ColorMap,
-                                            (ULONG)r << 24, (ULONG)g << 24,
-                                            (ULONG)b << 24, NULL)
-                      : -1;
-
-                  if (level >= 0) {
-                      int inside_width;
-                      int fill_width;
-                      int fill_right;
-
-                      display_level = level;
-                      if (display_level > 100) display_level = 100;
-                      if (display_level < 0) display_level = 0;
-
-                      inside_width = bar_right - bar_left - 1;
-                      fill_width = (inside_width * display_level) / 100;
-                      fill_right = bar_left + fill_width;
-
-                      if (fill_width > 0) {
-                          SetAPen(rp, pen >= 0 ? (UBYTE)pen : 1);
-                          RectFill(rp,
-                                   bar_left + 1, bar_top + 1,
-                                   fill_right, bar_bottom - 1);
-                      }
-
-                      if (fill_right < bar_right - 1) {
-                          SetAPen(rp, 0);
-                          RectFill(rp,
-                                   fill_right + 1, bar_top + 1,
-                                   bar_right - 1, bar_bottom - 1);
-                      }
-                  }
-
-                  if (pen >= 0)
-                      ReleasePen(screen->ViewPort.ColorMap, (ULONG)pen);
-              }
-          }
-
-          int load_ilbm_to_rgb'''
-
-          s, n = marker_func_re.subn(marker_replacement, s, count=1)
-          if n != 1:
-              raise SystemExit(f'marker draw function: expected 1 replacement, found {n}')
-
-          # Geometry from the visual mock-up.  Patch each gadget independently;
-          # some GadTools blocks intentionally inherited TopEdge/Height before,
-          # so insert an explicit assignment when the current block lacks one.
-          geometry = {
-              'GAD_UNIT_DROPDOWN':      (48,  '4 + topborder',   344, 16),
-              'GAD_SET_ACTIVE_BUTTON':  (400, '5 + topborder',    92, 14),
-              'GAD_IP_STRING':          (128, '24 + topborder',  128, 16),
-              'GAD_DISCOVER_BUTTON':    (400, '24 + topborder',   92, 14),
-              'GAD_MODEL_DISPLAY':      (128, '44 + topborder',  264, 12),
-              'GAD_QUERY_BUTTON':       (400, '44 + topborder',   92, 14),
-              'GAD_IPP_PATH':           (130, '65 + topborder',  104, 12),
-              'GAD_ENGINE':             (132, '88 + topborder',  180, 12),
-              'GAD_DEBUG':              (130, '105 + topborder', 180, 12),
-              'GAD_MEDIA_DROPDOWN':     (130, '125 + topborder', 280, 12),
-              'GAD_SCALING_MODE':       (130, '145 + topborder', 150, 12),
-              'GAD_QUALITY_MODE':       (130, '165 + topborder', 150, 12),
-              'GAD_RESOLUTION':         (348, '168 + topborder', 100, 12),
-              'GAD_PRINT_MODE':         (130, '185 + topborder', 150, 12),
-              'GAD_SIDES':              (350, '185 + topborder', 150, 12),
-              'GAD_PRINT_BUTTON':       (10,  '215 + topborder', 110, 12),
-              'GAD_SAVE_BUTTON':        (304, '216 + topborder',  90, 12),
-              'GAD_EXIT_BUTTON':        (408, '216 + topborder',  90, 12),
-          }
-
-          def patch_geometry(text, gid, left, top, width, height):
-              marker = f'ng.ng_GadgetID = {gid};'
-              id_pos = text.find(marker)
-              if id_pos < 0:
-                  raise SystemExit(f'{gid}: gadget ID assignment not found')
-
-              prev_create = text.rfind('gad = CreateGadget(', 0, id_pos)
-              if prev_create < 0:
-                  prev_create = max(0, id_pos - 2500)
-
-              text_pos = text.rfind('ng.ng_GadgetText', prev_create, id_pos)
-              if text_pos < 0:
-                  raise SystemExit(f'{gid}: GadgetText assignment not found')
-
-              values = {
-                  'ng_LeftEdge': str(left),
-                  'ng_TopEdge': str(top),
-                  'ng_Width': str(width),
-                  'ng_Height': str(height),
-              }
-
-              # Work field-by-field on the latest text, because replacements
-              # change offsets.  The search starts after the previous gadget's
-              # CreateGadget call so inherited values are not mistaken for this
-              # gadget's own assignment.
-              for field, value in values.items():
-                  id_pos = text.find(marker)
-                  prev_create = text.rfind('gad = CreateGadget(', 0, id_pos)
-                  if prev_create < 0:
-                      prev_create = max(0, id_pos - 2500)
-                  text_pos = text.rfind('ng.ng_GadgetText', prev_create, id_pos)
-
-                  region = text[prev_create:text_pos]
-                  rx = re.compile(rf'ng\.\s*{re.escape(field)}\s*(?:\+=|-=|=)\s*[^;]+;')
-                  matches = list(rx.finditer(region))
-                  line = f'ng.{field} = {value};'
-
-                  if matches:
-                      m = matches[-1]
-                      a = prev_create + m.start()
-                      b = prev_create + m.end()
-                      text = text[:a] + line + text[b:]
-                  else:
-                      line_start = text.rfind('\n', 0, text_pos) + 1
-                      indent = re.match(r'\s*', text[line_start:text_pos]).group(0)
-                      text = text[:line_start] + indent + line + '\n' + text[line_start:]
-
-              return text
-
-          for gid, geom in geometry.items():
-              s = patch_geometry(s, gid, *geom)
-
-          # The compact ink panel now fits inside the original width.
-          replace_once('        WA_Width, 660,', '        WA_Width, 520,', 'WA_Width')
-          replace_once('        WA_MinWidth, 660,', '        WA_MinWidth, 520,', 'WA_MinWidth')
-
-          # Refresh stale comments that described the old wide-panel geometry.
-          s = s.replace(
-              '/* Ink/toner status strip panel - a plain RastPort drawing in the space to\n'
-              ' * the right of the Engine/Debug/Media/Scaling rows (see main()\'s window\n'
-              ' * width/g_topborder), not GadTools gadgets: GadTools has no gauge/progress\n',
-              '/* Ink/toner status strip panel - a plain RastPort drawing in the compact\n'
-              ' * spare area to the right of IPP Path/Engine/Debug and above Media, not\n'
-              ' * GadTools gadgets: GadTools has no gauge/progress\n',
+          # Keep comments aligned with the compact button rows.
+          text = text.replace(
+              '// Query button - kept beside the printer address field.',
+              '// Query button - shares the Printer Model row in the compact layout.',
               1,
           )
-
-          # Basic safety checks before committing.
-          checks = [
-              '#define MP_MARKER_AREA_LEFT     320',
-              '#define MP_MARKER_AREA_BOTTOM   123',
-              'ng.ng_LeftEdge = 48;',
-              'ng.ng_TopEdge = 185 + topborder;',
-              '        WA_Width, 520,',
-              '        WA_MinWidth, 520,',
-              'static void mp_marker_short_name',
-          ]
-          missing = [x for x in checks if x not in s]
-          if missing:
-              raise SystemExit('post-patch checks failed: ' + repr(missing))
-          if 'WA_Width, 660,' in s or '#define MP_MARKER_AREA_LEFT   510' in s:
-              raise SystemExit('wide-layout remnants still present')
-
-          path.write_text(s, encoding='utf-8')
+          text = text.replace(
+              '// Discover button - sits below Query, searches the LAN for printers.\n'
+              '    // Nudged a few px below the shared IPP Path row so its bevel has\n'
+              '    // clear space from Query\'s above it, then restored so it doesn\'t\n'
+              '    // shift every row below.',
+              '// Discover button - shares the Printer IP/Host row in the compact layout.\n'
+              '    // Preserve the previous TopEdge afterwards so this isolated button does\n'
+              '    // not affect the state used by later gadget setup.',
+              1,
+          )
+          text = text.replace(
+              '// LeftEdge is nudged right of the other rows\' shared 130 - this is the\n'
+              '    // longest label at this column ("Printer Engine:", 15 chars) and at 130\n'
+              '    // it renders with no left margin at all, clipping against the window\n'
+              '    // edge.',
+              '// Printer Engine has the longest label in the left column; x=132 keeps\n'
+              '    // a small left margin while leaving the compact ink panel free at x=320.',
+              1,
+          )
+          path.write_text(text, encoding='utf-8')
           PY
 
-          git diff --check
-          git diff -- src/MintPrintSettings.c
+          if grep -P -n '\x00' src/MintPrintSettings.c; then
+            echo 'ERROR: embedded NUL remains in MintPrintSettings.c'
+            exit 1
+          fi
 
-      - name: Commit patched layout
+          git diff --check
+          grep -n 'MP_MARKER_AREA_LEFT\|MP_MARKER_AREA_BOTTOM\|WA_Width, 520\|WA_MinWidth, 520' src/MintPrintSettings.c
+
+      - name: Commit source cleanup
         shell: bash
         run: |
           if git diff --quiet; then
-            echo "No source changes needed"
+            echo 'No cleanup changes needed'
             exit 0
           fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add src/MintPrintSettings.c
-          git commit -m "Compact MintPRINT GUI and ink panel [compact-layout-applied]"
+          git commit -m 'Validate compact marker layout and C escapes [nul-fix-applied]'
           git push origin HEAD:claude/ink-toner-status-panel
