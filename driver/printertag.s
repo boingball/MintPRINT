@@ -94,10 +94,13 @@ printerName:
  * to read.
  *
  * version.revision, not a flat build counter - see driver_core.c's
- * MP_DRIVER_REV (version) / MP_DRIVER_SUBREV (revision) for what each
- * half means and when to bump which. Never a bare number on its own, so
- * it can't be misread as printer.device's own fixed V44 PrinterSegment
- * ABI marker above.
+ * MP_DRIVER_REV (version) / MP_DRIVER_SUBREV (revision). Never a bare
+ * number on its own, so it can't be misread as printer.device's own
+ * fixed V44 PrinterSegment ABI marker above. As of 1.2.2, the revision
+ * half is what moves for an ordinary rebuild - 41.1, 41.2, 41.3, and so
+ * on - the same way a real Amiga library keeps one version number
+ * across many small revisions; the version half only bumps for
+ * something that warrants a new version number outright.
  */
 mp_driver_version_marker:
         .asciz  "$VER: MintPRINT 41.1 (26.08.2026)"

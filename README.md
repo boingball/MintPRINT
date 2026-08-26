@@ -42,13 +42,18 @@ version-number bump for the driver's own build count.
   only for MintPrint Settings' own bundled-vs-installed update check and
   wasn't understood by anything else. The driver's own version now has two
   parts, matching real Amiga version.revision pairs (e.g. Workbench 3.9's
-  `47.102`): a version number (`MP_DRIVER_REV` in `driver_core.c`, continuing
-  the existing build count) and a revision within it (`MP_DRIVER_SUBREV`,
-  bumped for a fix that doesn't need a new version number) - so "driver
-  revision" is never just a bare integer that could be misread as
-  printer.device's own fixed V44 PrinterSegment ABI marker in the same file.
-  MintPrint Settings' update-detection and About/Test Print version display
-  now parse and compare the real `$VER:` string instead.
+  `47.102`): `MP_DRIVER_REV` (the version half, `driver_core.c`) and
+  `MP_DRIVER_SUBREV` (the revision half) - so "driver revision" is never
+  just a bare integer that could be misread as printer.device's own fixed
+  V44 PrinterSegment ABI marker in the same file. Going forward the
+  revision half is what moves for an ordinary driver rebuild - 41.1, 41.2,
+  41.3, and so on, the same way a real Amiga library keeps one version
+  number across many small revisions - and the version half only bumps for
+  something that warrants a new version number outright. MintPrint
+  Settings still automatically offers to update an out-of-date installed
+  driver at startup (About and Test Print show the same version), now
+  parsing and comparing the real `$VER:` version.revision pair instead of
+  the old flat counter.
 
 ## What's new in 1.2.1
 

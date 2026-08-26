@@ -47,10 +47,13 @@
  * version.revision pairing AmigaOS's own $VER: convention uses (e.g.
  * Workbench 3.9's 47.102), so a "driver revision" is never just a bare
  * number that could be misread as printer.device's own fixed V44
- * PrinterSegment ABI marker in printertag.s. MP_DRIVER_REV carries the
- * version half (continuing the build count this project has used since
- * revision 1); MP_DRIVER_SUBREV is the revision half, bumped for a
- * fix that doesn't warrant a new version number. */
+ * PrinterSegment ABI marker in printertag.s.
+ *
+ * As of 1.2.2: MP_DRIVER_SUBREV is what moves for an ordinary driver
+ * rebuild - 41.1, 41.2, 41.3, and so on - the same way a real Amiga
+ * library keeps one version number across many small revisions.
+ * MP_DRIVER_REV (the version half) only bumps for something that
+ * warrants a new version number outright, not on every rebuild. */
 #define MP_DRIVER_REV 41
 #define MP_DRIVER_SUBREV 1
 
