@@ -1,0 +1,62 @@
+name: Align compact PR63 docs
+
+on:
+  push:
+    branches:
+      - claude/ink-toner-status-panel
+
+permissions:
+  contents: write
+
+jobs:
+  patch-docs:
+    if: ${{ github.actor != 'github-actions[bot]' && !contains(github.event.head_commit.message, '[compact-docs-applied]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: claude/ink-toner-status-panel
+          fetch-depth: 0
+
+      - name: Update README and Aminet history
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          readme = Path('README.md')
+          s = readme.read_text(encoding='utf-8')
+          old = '''MintPRINT 1.2.3 brings back printer ink/toner status in MintPrint Settings'\nQuery flow, and widens the main window to make room for it. Driver behaviour\nis unchanged (still driver revision 41.1).\n\n- **Ink/toner level display.** Query now also requests the IPP Printer MIB\n  `marker-names`/`marker-colors`/`marker-types`/`marker-levels`/\n  `marker-low-levels`/`marker-high-levels` attributes (RFC 3805 /\n  PWG5100.13) and shows each reported marker as a thin, labelled level\n  strip in a new panel on the right side of the main window, filled in the\n  colour the printer itself reports (`#RRGGBB` or a small set of named\n  colours) via `ObtainBestPenA()` so it isn't limited to the window's\n  handful of fixed screen pens. A marker with no level yet reported draws\n  as an empty/unknown strip rather than being hidden. The main window\n  widened from 520px to 660px to fit the new panel without disturbing any\n  existing gadget's position.'''
+          new = '''MintPRINT 1.2.3 brings back printer ink/toner status in MintPrint Settings'\nQuery flow while keeping the compact 520px-wide main window. Driver behaviour\nis unchanged (still driver revision 41.1).\n\n- **Ink/toner level display.** Query now also requests the IPP Printer MIB\n  `marker-names`/`marker-colors`/`marker-types`/`marker-levels`/\n  `marker-low-levels`/`marker-high-levels` attributes (RFC 3805 /\n  PWG5100.13). Up to six reported markers are shown in a compact 2x3 panel\n  inside the existing window, using the spare area beside IPP Path / Printer\n  Engine / Debug and above Media. Each marker gets a short label, percentage\n  and coloured level bar using the printer-reported `#RRGGBB` or named colour\n  via `ObtainBestPenA()`. Unknown levels remain visibly empty rather than\n  being hidden.\n- **Compact settings layout.** The main GadTools controls were rearranged to\n  use the available 520px width more efficiently: Unit spans the top row,\n  Discover sits beside Printer IP/Host, Query beside Printer Model, and DPI /\n  Sides share the lower option rows. The status/output area remains unchanged.'''
+          if old not in s:
+              raise SystemExit('README 1.2.3 block did not match expected text')
+          readme.write_text(s.replace(old, new, 1), encoding='utf-8')
+
+          amin = Path('Aminet/MintPRINT.readme')
+          s = amin.read_text(encoding='utf-8')
+          old = '''       - Query now also requests the IPP marker-names/marker-colors/\n         marker-types/marker-levels/marker-low-levels/marker-high-levels\n         attributes (RFC 3805 / PWG5100.13 Printer MIB) and shows each\n         reported marker as a thin, labelled level strip in a new panel\n         on the right side of the main window, filled in the colour the\n         printer itself reports.\n       - The main window widened from 520px to 660px to fit the new\n         panel; no existing gadget moved.'''
+          new = '''       - Query now also requests the IPP marker-names/marker-colors/\n         marker-types/marker-levels/marker-low-levels/marker-high-levels\n         attributes (RFC 3805 / PWG5100.13 Printer MIB). Up to six\n         reported markers are shown in a compact 2x3 ink/toner panel in\n         the spare area beside IPP Path / Printer Engine / Debug, filled\n         in the colour the printer itself reports.\n       - The main window stays at 520px wide. The GadTools controls were\n         rearranged to make better use of the existing space, with Unit\n         across the top row and DPI/Sides sharing the lower option rows.'''
+          if old not in s:
+              raise SystemExit('Aminet 1.2.3 block did not match expected text')
+          amin.write_text(s.replace(old, new, 1), encoding='utf-8')
+          PY
+
+          git diff --check
+          if grep -n '660px\|widens the main window\|widened from 520px' README.md Aminet/MintPRINT.readme; then
+            echo 'ERROR: stale wide-window wording remains'
+            exit 1
+          fi
+          git diff -- README.md Aminet/MintPRINT.readme
+
+      - name: Commit doc cleanup
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo 'No documentation changes needed'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add README.md Aminet/MintPRINT.readme
+          git commit -m 'Document compact 520px ink panel [compact-docs-applied]'
+          git push origin HEAD:claude/ink-toner-status-panel
