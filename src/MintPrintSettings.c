@@ -69,12 +69,10 @@ extern struct GfxBase *GfxBase;
  * bottom edge. */
 #define MAX_OUTPUT_LINES 8
 /* The debug output box is OUTPUT_LEFT..OUTPUT_RIGHT wide - at the main
- * window's 660px width (widened in 1.2.3 to fit the ink-status panel,
- * see MP_MARKER_AREA_LEFT) that's ~630px, or ~78 chars of Topaz80
- * (8px/char). 62 stays under that with room to spare; it only needs to
- * stay above the 54 chars a real message like "Unit%d has no saved
- * settings yet - nothing to activate." needs. Re-check this against
- * OUTPUT_LEFT/OUTPUT_RIGHT if the window width changes again. */
+ * window's 520px width that's ~490px, or ~61 chars of Topaz80 (8px/char).
+ * MAX_OUTPUT_LINE_LENGTH includes the terminating NUL, so 62 stores at
+ * most 61 visible characters. Re-check this against OUTPUT_LEFT/
+ * OUTPUT_RIGHT if the window width changes again. */
 #define MAX_OUTPUT_LINE_LENGTH 62
 #define MAX_PRINT_MODES 8
 #define MAX_QUALITIES 5
@@ -2889,17 +2887,21 @@ void custom_printf(const char *format, ...) {
     redraw_output_box();
 }
 
-/* Ink/toner status strip panel - a plain RastPort drawing in the space to
- * the right of the Engine/Debug/Media/Scaling rows (see main()'s window
- * width/g_topborder), not GadTools gadgets: GadTools has no gauge/progress
+/* Ink/toner status strip panel - a plain RastPort drawing in the compact
+ * spare area to the right of IPP Path/Engine/Debug and above Media, not
+ * GadTools gadgets: GadTools has no gauge/progress
  * widget, and the fill colour needs to come from whatever RGB the printer
  * itself reports (marker-colors), which a fixed screen pen can't do -
  * hence ObtainBestPenA() per strip below rather than one of the four
  * pens (SetAPen 0-3) everything else in this window already uses. */
-#define MP_MARKER_AREA_LEFT   510
-#define MP_MARKER_STRIP_H     26
-#define MP_MARKER_BAR_H       10
-#define MP_MARKER_MAX_STRIPS  6
+#define MP_MARKER_AREA_LEFT     320
+#define MP_MARKER_AREA_TOP       65
+#define MP_MARKER_AREA_BOTTOM   123
+#define MP_MARKER_COLS            2
+#define MP_MARKER_COL_GAP          6
+#define MP_MARKER_ROW_H           14
+#define MP_MARKER_BAR_H            7
+#define MP_MARKER_MAX_STRIPS       6
 
 /* marker-colors (RFC 3805 / PWG5100.13) is either "#RRGGBB" or one of a
  * small set of keyword names - resolved to RGB here, not at parse time in
@@ -2960,9 +2962,50 @@ static int mp_marker_count(void) {
     return n;
 }
 
+static void mp_marker_short_name(int index, char out[3]) {
+    const char *name;
+    const char *color;
+
+    out[0] = ' ';
+
+    if (index < 0 || index >= MAX_MARKERS)
+        return;
+
+    name = marker_names[index];
+    color = marker_colors[index];
+
+    /* Keep already-compact printer names such as C/M/Y/K. */
+    if (name && name[0] && strlen(name) <= 2) {
+        out[0] = name[0];
+        out[1] = name[1] ? name[1] : ' ';
+        out[2] = ' ';
+        return;
+    }
+
+    /* Otherwise derive a predictable short label from marker colour. */
+    if (color && color[0]) {
+        if (strcasecmp(color, "cyan") == 0)          { strcpy(out, "C");  return; }
+        if (strcasecmp(color, "magenta") == 0)       { strcpy(out, "M");  return; }
+        if (strcasecmp(color, "yellow") == 0)        { strcpy(out, "Y");  return; }
+        if (strcasecmp(color, "black") == 0)         { strcpy(out, "BK"); return; }
+        if (strcasecmp(color, "light-cyan") == 0)    { strcpy(out, "LC"); return; }
+        if (strcasecmp(color, "light-magenta") == 0) { strcpy(out, "LM"); return; }
+        if (strcasecmp(color, "photo-black") == 0)   { strcpy(out, "PK"); return; }
+        if (strcasecmp(color, "matte-black") == 0)   { strcpy(out, "MK"); return; }
+    }
+
+    /* Last resort: first two characters of the reported marker name. */
+    if (name && name[0]) {
+        out[0] = (char)toupper((unsigned char)name[0]);
+        out[1] = name[1] ? (char)toupper((unsigned char)name[1]) : ' ';
+        out[2] = ' ';
+    }
+}
+
 static void mp_draw_marker_strips(void) {
     struct RastPort *rp;
-    int area_left, area_right, area_top, area_bottom, count, i;
+    int area_left, area_right, area_top, area_bottom;
+    int grid_top, cell_width, count, i;
 
     if (!window || !screen || !font) return;
 
@@ -2971,17 +3014,12 @@ static void mp_draw_marker_strips(void) {
     SetDrMd(rp, JAM2);
 
     area_left = MP_MARKER_AREA_LEFT;
-    area_right = window->Width - 10;
-    /* Aligned with the IPP Path/Discover row down to the Test Print row -
-     * see createAllGadgets()'s ng.ng_TopEdge math for where those rows
-     * land relative to topborder. */
-    area_top = g_topborder + 65;
-    area_bottom = g_topborder + 227;
+    area_right = window->Width - 20;
+    area_top = g_topborder + MP_MARKER_AREA_TOP;
+    area_bottom = g_topborder + MP_MARKER_AREA_BOTTOM;
     if (area_right <= area_left || area_bottom <= area_top) return;
 
-    /* Clear the whole column first - otherwise a bar that shrinks (level
-     * dropped) or a printer with fewer markers than the last one queried
-     * would leave stale pixels from the previous redraw behind. */
+    /* Clear only the compact panel; this rectangle contains no gadgets. */
     SetAPen(rp, 0);
     RectFill(rp, area_left, area_top, area_right, area_bottom);
 
@@ -2991,42 +3029,65 @@ static void mp_draw_marker_strips(void) {
 
     count = mp_marker_count();
     if (count <= 0) {
-        Move(rp, area_left, area_top + (font->tf_YSize + 4) + font->tf_Baseline);
-        Text(rp, "(Query for levels)", 19);
+        Move(rp,
+             area_left,
+             area_top + font->tf_YSize + 3 + font->tf_Baseline);
+        Text(rp, "(Query for levels)", 18);
         return;
     }
 
+    cell_width =
+        (area_right - area_left - MP_MARKER_COL_GAP) / MP_MARKER_COLS;
+    grid_top = area_top + font->tf_YSize + 3;
+
     for (i = 0; i < count; i++) {
-        int row_top = area_top + (font->tf_YSize + 4) + i * MP_MARKER_STRIP_H;
-        int bar_top, bar_bottom, bar_left, bar_right;
+        int col = i % MP_MARKER_COLS;
+        int row = i / MP_MARKER_COLS;
+        int cell_left = area_left +
+            col * (cell_width + MP_MARKER_COL_GAP);
+        int cell_right = cell_left + cell_width - 1;
+        int row_top = grid_top + row * MP_MARKER_ROW_H;
+        int text_y = row_top + font->tf_Baseline;
         int level = (i < num_marker_levels) ? marker_levels[i] : -1;
-        char namebuf[20];
+        int display_level;
+        char namebuf[3];
+        char pct[8];
+        int pct_len, pct_x;
+        int bar_left, bar_right, bar_top, bar_bottom;
         UBYTE r, g, b;
         BOOL have_rgb;
         LONG pen;
 
-        bar_top = row_top + font->tf_YSize + 2;
-        bar_bottom = bar_top + MP_MARKER_BAR_H;
-        if (bar_bottom > area_bottom) break; /* ran out of vertical room */
-        bar_left = area_left;
-        bar_right = area_right;
+        if (row_top + MP_MARKER_ROW_H > area_bottom)
+            break;
+
+        mp_marker_short_name(i, namebuf);
 
         SetAPen(rp, 1);
-        strncpy(namebuf, marker_names[i], sizeof(namebuf) - 1);
-        namebuf[sizeof(namebuf) - 1] = '\0';
-        Move(rp, area_left, row_top + font->tf_Baseline);
+        Move(rp, cell_left, text_y);
         Text(rp, namebuf, strlen(namebuf));
 
         if (level >= 0) {
-            char pct[8];
-            int pct_len;
-            snprintf(pct, sizeof(pct), "%d%%", level > 100 ? 100 : level);
-            pct_len = strlen(pct);
-            Move(rp, area_right - (pct_len * 8), row_top + font->tf_Baseline);
-            Text(rp, pct, pct_len);
+            display_level = level;
+            if (display_level > 100) display_level = 100;
+            snprintf(pct, sizeof(pct), "%d%%", display_level);
+        } else {
+            strcpy(pct, "--");
         }
 
-        /* Bar border */
+        pct_len = strlen(pct);
+        pct_x = cell_right - (pct_len * 8);
+        Move(rp, pct_x, text_y);
+        Text(rp, pct, pct_len);
+
+        /* Thin level bar between the short marker name and percentage. */
+        bar_left = cell_left + 20;
+        bar_right = pct_x - 4;
+        bar_top = row_top + 1;
+        bar_bottom = bar_top + MP_MARKER_BAR_H;
+        if (bar_right <= bar_left)
+            continue;
+
         SetAPen(rp, 1);
         RectFill(rp, bar_left, bar_top, bar_right, bar_top);
         RectFill(rp, bar_left, bar_bottom, bar_right, bar_bottom);
@@ -3036,29 +3097,40 @@ static void mp_draw_marker_strips(void) {
         have_rgb = mp_marker_rgb(marker_colors[i], &r, &g, &b);
         pen = have_rgb
             ? (LONG)ObtainBestPenA(screen->ViewPort.ColorMap,
-                                    (ULONG)r << 24, (ULONG)g << 24,
-                                    (ULONG)b << 24, NULL)
+                                  (ULONG)r << 24, (ULONG)g << 24,
+                                  (ULONG)b << 24, NULL)
             : -1;
 
         if (level >= 0) {
-            int fill_right = bar_left + 1 +
-                (int)(((long)(bar_right - bar_left - 2) *
-                       (level > 100 ? 100 : level)) / 100);
-            if (fill_right > bar_right - 1) fill_right = bar_right - 1;
+            int inside_width;
+            int fill_width;
+            int fill_right;
 
-            SetAPen(rp, pen >= 0 ? (UBYTE)pen : 1);
-            RectFill(rp, bar_left + 1, bar_top + 1, fill_right, bar_bottom - 1);
+            display_level = level;
+            if (display_level > 100) display_level = 100;
+            if (display_level < 0) display_level = 0;
+
+            inside_width = bar_right - bar_left - 1;
+            fill_width = (inside_width * display_level) / 100;
+            fill_right = bar_left + fill_width;
+
+            if (fill_width > 0) {
+                SetAPen(rp, pen >= 0 ? (UBYTE)pen : 1);
+                RectFill(rp,
+                         bar_left + 1, bar_top + 1,
+                         fill_right, bar_bottom - 1);
+            }
+
             if (fill_right < bar_right - 1) {
                 SetAPen(rp, 0);
-                RectFill(rp, fill_right + 1, bar_top + 1, bar_right - 1, bar_bottom - 1);
+                RectFill(rp,
+                         fill_right + 1, bar_top + 1,
+                         bar_right - 1, bar_bottom - 1);
             }
         }
-        /* level < 0 ("unknown", per RFC 3805) - leave the bar interior
-         * blank rather than guessing a fill width. */
 
-        if (pen >= 0) {
+        if (pen >= 0)
             ReleasePen(screen->ViewPort.ColorMap, (ULONG)pen);
-        }
     }
 }
 
@@ -5713,10 +5785,10 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // being viewed/edited. Only Unit0 is what the driver actually prints
     // with; switching here reloads the rest of the form from that unit's
     // saved file.
-    ng.ng_LeftEdge = 130;
-    ng.ng_TopEdge = 5 + topborder;
-    ng.ng_Width = 260;
-    ng.ng_Height = 12;
+    ng.ng_LeftEdge = 48;
+    ng.ng_TopEdge = 4 + topborder;
+    ng.ng_Width = 344;
+    ng.ng_Height = 16;
     ng.ng_GadgetText = (STRPTR)"Unit:";
     ng.ng_GadgetID = GAD_UNIT_DROPDOWN;
     gad = CreateGadget(CYCLE_KIND, gad, &ng,
@@ -5732,8 +5804,9 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // the driver actually reads at print time - the practical way to
     // "switch which printer is active" without touching driver code.
     ng.ng_LeftEdge = 400;
-    ng.ng_Width = 90;
-    ng.ng_Height = 12;
+    ng.ng_Width = 92;
+    ng.ng_Height = 14;
+    ng.ng_TopEdge = 5 + topborder;
     ng.ng_GadgetText = (STRPTR)"_Activate";
     ng.ng_GadgetID = GAD_SET_ACTIVE_BUTTON;
     ng.ng_Flags = 0;
@@ -5747,10 +5820,10 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     ng.ng_Flags = NG_HIGHLABEL;
 
     // IP string gadget
-    ng.ng_LeftEdge = 165;
-    ng.ng_TopEdge += 20;
-    ng.ng_Width = 190;
-    ng.ng_Height = 14;
+    ng.ng_LeftEdge = 128;
+    ng.ng_TopEdge = 24 + topborder;
+    ng.ng_Width = 128;
+    ng.ng_Height = 16;
     ng.ng_GadgetText = (STRPTR)"_Printer IP/Host:";
     ng.ng_GadgetID = GAD_IP_STRING;
     gad = CreateGadget(STRING_KIND, gad, &ng,
@@ -5769,8 +5842,9 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
     // Query button - kept beside the printer address field.
     ng.ng_LeftEdge = 400;
-    ng.ng_Width = 90;
-    ng.ng_Height = 12;
+    ng.ng_Width = 92;
+    ng.ng_Height = 14;
+    ng.ng_TopEdge = 44 + topborder;
     ng.ng_GadgetText = (STRPTR)"_Query";
     ng.ng_GadgetID = GAD_QUERY_BUTTON;
     ng.ng_Flags = 0;
@@ -5785,10 +5859,10 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // Printer Model (read-only display) - shows printer-make-and-model
     // from the last successful Query for this unit. Not user-editable;
     // persisted via MODEL= in the unit's own config file on Save.
-    ng.ng_LeftEdge = 165;
-    ng.ng_TopEdge += 20;
-    ng.ng_Width = 290;
-    ng.ng_Height = 14;
+    ng.ng_LeftEdge = 128;
+    ng.ng_TopEdge = 44 + topborder;
+    ng.ng_Width = 264;
+    ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"Printer Model:";
     ng.ng_GadgetID = GAD_MODEL_DISPLAY;
     gad = CreateGadget(STRING_KIND, gad, &ng,
@@ -5803,9 +5877,9 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
     // Driver IPP path
     ng.ng_LeftEdge = 130;
-    ng.ng_TopEdge += 20;
-    ng.ng_Width = 200;
-    ng.ng_Height = 14;
+    ng.ng_TopEdge = 65 + topborder;
+    ng.ng_Width = 104;
+    ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"IPP _Path:";
     ng.ng_GadgetID = GAD_IPP_PATH;
     gad = CreateGadget(STRING_KIND, gad, &ng,
@@ -5827,8 +5901,8 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     {
         UWORD row2_top = ng.ng_TopEdge;
         ng.ng_LeftEdge = 400;
-        ng.ng_TopEdge = row2_top + 4;
-        ng.ng_Width = 90;
+        ng.ng_TopEdge = 24 + topborder;
+        ng.ng_Width = 92;
         ng.ng_Height = 14;
         ng.ng_GadgetText = (STRPTR)"_Discover";
         ng.ng_GadgetID = GAD_DISCOVER_BUTTON;
@@ -5849,8 +5923,8 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // longest label at this column ("Printer Engine:", 15 chars) and at 130
     // it renders with no left margin at all, clipping against the window
     // edge.
-    ng.ng_LeftEdge = 160;
-    ng.ng_TopEdge += 20;
+    ng.ng_LeftEdge = 132;
+    ng.ng_TopEdge = 88 + topborder;
     ng.ng_Width = 180;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"Printer Engine:";
@@ -5866,7 +5940,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
     // Enable/disable diagnostic logs and retained rendered jobs
     ng.ng_LeftEdge = 130;
-    ng.ng_TopEdge += 20;
+    ng.ng_TopEdge = 105 + topborder;
     ng.ng_Width = 180;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"Debug:";
@@ -5882,7 +5956,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
     // Media dropdown
     ng.ng_LeftEdge = 130;
-    ng.ng_TopEdge += 20;
+    ng.ng_TopEdge = 125 + topborder;
     ng.ng_Width = 280;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"Media (Tray):";
@@ -5901,7 +5975,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
     // Scaling dropdown
     ng.ng_LeftEdge = 130;
-    ng.ng_TopEdge += 20;
+    ng.ng_TopEdge = 145 + topborder;
     ng.ng_Width = 150;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"Scaling:";
@@ -5914,7 +5988,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
     // Quality dropdown
     ng.ng_LeftEdge = 130;
-    ng.ng_TopEdge += 20;
+    ng.ng_TopEdge = 165 + topborder;
     ng.ng_Width = 150;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"Quality:";
@@ -5927,9 +6001,10 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
     // Capture DPI - shares the Quality row and is populated by Query from
     // printer-resolution-supported/PWG raster resolution capabilities.
-    ng.ng_LeftEdge = 400;
+    ng.ng_LeftEdge = 348;
     ng.ng_Width = 100;
     ng.ng_Height = 12;
+    ng.ng_TopEdge = 168 + topborder;
     ng.ng_GadgetText = (STRPTR)"DPI:";
     ng.ng_GadgetID = GAD_RESOLUTION;
     gad = CreateGadget(CYCLE_KIND, gad, &ng,
@@ -5944,7 +6019,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
     // Print Mode radio buttons
     ng.ng_LeftEdge = 130;
-    ng.ng_TopEdge += 20;
+    ng.ng_TopEdge = 185 + topborder;
     ng.ng_Width = 150;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"Print Mode:";
@@ -5965,6 +6040,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     ng.ng_LeftEdge = 350;
     ng.ng_Width = 150;
     ng.ng_Height = 12;
+    ng.ng_TopEdge = 185 + topborder;
     ng.ng_GadgetText = (STRPTR)"Sides:";
     ng.ng_GadgetID = GAD_SIDES;
     gad = CreateGadget(CYCLE_KIND, gad, &ng,
@@ -5979,7 +6055,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
     // Test Print button
     ng.ng_LeftEdge = 10;
-    ng.ng_TopEdge += 30;
+    ng.ng_TopEdge = 215 + topborder;
     ng.ng_Width = 110;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"_Test Print";
@@ -5994,8 +6070,10 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
 
     // Save button - same action as File -> Save Driver Settings.
-    ng.ng_LeftEdge = 280;
+    ng.ng_LeftEdge = 304;
     ng.ng_Width = 90;
+    ng.ng_TopEdge = 216 + topborder;
+    ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"_Save";
     ng.ng_GadgetID = GAD_SAVE_BUTTON;
     gad = CreateGadget(BUTTON_KIND, gad, &ng,
@@ -6007,8 +6085,10 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     }
 
     // Exit button
-    ng.ng_LeftEdge = 380;
+    ng.ng_LeftEdge = 408;
     ng.ng_Width = 90;
+    ng.ng_TopEdge = 216 + topborder;
+    ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"_Exit";
     ng.ng_GadgetID = GAD_EXIT_BUTTON;
     gad = CreateGadget(BUTTON_KIND, gad, &ng,
@@ -6535,8 +6615,8 @@ int main(void) {
         WA_Title, (ULONG)"MintPrint Settings",
         WA_Gadgets, (ULONG)glist,
         WA_AutoAdjust, TRUE,
-        WA_Width, 660,
-        WA_MinWidth, 660,
+        WA_Width, 520,
+        WA_MinWidth, 520,
         WA_InnerHeight, 350,
         WA_MinHeight, 350,
         WA_DragBar, TRUE,
