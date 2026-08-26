@@ -28,6 +28,26 @@ printers (JPEG, PostScript, PWG Raster, or PDF; no driver-specific software
 on the printer side) straight from Amiga applications, via a real `DEVS:Printers/`
 printer.device driver plus a GUI setup tool.
 
+## What's new in 1.2.3
+
+MintPRINT 1.2.3 brings back printer ink/toner status in MintPrint Settings'
+Query flow while keeping the compact 520px-wide main window. Driver behaviour
+is unchanged (still driver revision 41.1).
+
+- **Ink/toner level display.** Query now also requests the IPP Printer MIB
+  `marker-names`/`marker-colors`/`marker-types`/`marker-levels`/
+  `marker-low-levels`/`marker-high-levels` attributes (RFC 3805 /
+  PWG5100.13). Up to six reported markers are shown in a compact 2x3 panel
+  inside the existing window, using the spare area beside IPP Path / Printer
+  Engine / Debug and above Media. Each marker gets a short label, percentage
+  and coloured level bar using the printer-reported `#RRGGBB` or named colour
+  via `ObtainBestPenA()`. Unknown levels remain visibly empty rather than
+  being hidden.
+- **Compact settings layout.** The main GadTools controls were rearranged to
+  use the available 520px width more efficiently: Unit spans the top row,
+  Discover sits beside Printer IP/Host, Query beside Printer Model, and DPI /
+  Sides share the lower option rows. The status/output area remains unchanged.
+
 ## What's new in 1.2.2
 
 MintPRINT 1.2.2 switches driver version tracking to a real AmigaOS `$VER:`
@@ -253,7 +273,7 @@ be added with its AmigaOS version, TCP/IP stack, engine and exact print options.
 
 ## Status
 
-MintPRINT is now a real, working app: version **1.2.2** GUI with **driver
+MintPRINT is now a real, working app: version **1.2.3** GUI with **driver
 revision 41.1**, with multiple printers confirmed fully working over IPP/AirPrint
 from real Amiga hardware. It's still actively developed and not every printer
 is confirmed yet, so check the

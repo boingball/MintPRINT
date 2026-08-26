@@ -18,12 +18,9 @@
 #include <proto/dos.h>
 #include <dos/dostags.h> // for SYS_Asynch (SystemTags)
 #include <proto/intuition.h>
-#include <proto/datatypes.h>
 #include <proto/gadtools.h>
 #include <proto/graphics.h>
 typedef long ssize_t;
-#include <datatypes/pictureclass.h>
-#include <datatypes/datatypesclass.h>
 #include <clib/alib_protos.h>
 #include <proto/bsdsocket.h>
 #include <intuition/intuition.h>
@@ -48,6 +45,7 @@ typedef long ssize_t;
 #include "dpi_options.h"
 #include "media_size.h"
 #include "ipp_enum.h"
+#include "lodepng.h"
 
 /* All status/progress output goes to the on-screen status box, never a
  * console - the end user may have launched this from Workbench, where
@@ -70,9 +68,9 @@ extern struct GfxBase *GfxBase;
 #define MAX_OUTPUT_LINES 8
 /* The debug output box is OUTPUT_LEFT..OUTPUT_RIGHT wide - at the main
  * window's 520px width that's ~490px, or ~61 chars of Topaz80 (8px/char).
- * 47 left several real messages (e.g. "Unit%d has no saved settings yet -
- * nothing to activate.", 54 chars) truncated mid-word. Re-check this
- * against OUTPUT_LEFT/OUTPUT_RIGHT if the window width changes again. */
+ * MAX_OUTPUT_LINE_LENGTH includes the terminating NUL, so 62 stores at
+ * most 61 visible characters. Re-check this against OUTPUT_LEFT/
+ * OUTPUT_RIGHT if the window width changes again. */
 #define MAX_OUTPUT_LINE_LENGTH 62
 #define MAX_PRINT_MODES 8
 #define MAX_QUALITIES 5
@@ -133,13 +131,13 @@ static struct MPTestPrintJob test_print_job;
 // switchable GUI-side profiles (e.g. for a second/third network printer).
 #define MAX_UNITS 8
 
-#define OUTPUT_TOP     265 // Below Test Print / Save / Exit row
+#define OUTPUT_TOP     228 // Below Test Print / Save / Exit row
 #define OUTPUT_LEFT    10
 #define OUTPUT_RIGHT   (window->Width - 20)
 
 // Define the USED macro for GCC
 #define USED __attribute__((used))
-#define MINTPRINT_SETTINGS_VERSION "1.2.2"
+#define MINTPRINT_SETTINGS_VERSION "1.2.3"
 #define MINTPRINT_DRIVER_DEST ((CONST_STRPTR)"DEVS:Printers/MintPRINT")
 #define MINTPRINT_DRIVER_SRC  ((CONST_STRPTR)"PROGDIR:MintPRINT")
 
@@ -505,7 +503,7 @@ int safe_send(int sockfd, const void *vbuf, int len) {
         }
     }
 
-    printf("[✓] Finished sending %d bytes successfully\n", total_sent);
+    printf("[OK] Finished sending %d bytes successfully\n", total_sent);
     return total_sent;
 }
 
@@ -586,6 +584,42 @@ char driver_scaling_buffer[MAX_ATTR_LEN] = "";
 char driver_sides_buffer[MAX_ATTR_LEN] = "";
 int current_unit_index = 0;
 char printer_make_model[128] = "";
+char printer_icon_uri[256] = "";
+
+#define MP_PRINTER_ICON_LEFT  411
+#define MP_PRINTER_ICON_TOP   117
+#define MP_PRINTER_ICON_SIZE   35
+#define MP_PRINTER_ICON_TEMP  "T:MintPRINT-printer-icon.img"
+#define MP_PRINTER_ICON_PIXELS (MP_PRINTER_ICON_SIZE * MP_PRINTER_ICON_SIZE)
+#define MP_PRINTER_ICON_MAX_SOURCE_DIM 1024
+static UBYTE mp_printer_icon_rgba[MP_PRINTER_ICON_PIXELS * 4];
+static UBYTE mp_printer_icon_pens[MP_PRINTER_ICON_PIXELS];
+static UBYTE mp_printer_icon_mask[MP_PRINTER_ICON_PIXELS];
+static BOOL mp_printer_icon_valid = FALSE;
+static BOOL mp_printer_icon_pens_valid = FALSE;
+
+/* Ink/toner status (RFC 3805 Printer MIB / PWG5100.13 "marker-*"
+ * attributes). Each of marker-names/marker-colors/marker-types/
+ * marker-levels/marker-low-levels/marker-high-levels is its own separate
+ * 1setOf IPP attribute, arriving as a consecutive run of values (same
+ * shape as supported_media/supported_sides/etc. above) rather than
+ * interleaved - so they're kept as parallel arrays here, each with its
+ * own count, and combined by index afterwards (see mp_marker_count()
+ * near the drawing code) rather than as one array of structs. */
+#define MAX_MARKERS MAX_VALUES
+char marker_names[MAX_MARKERS][MAX_ATTR_LEN];
+int num_marker_names = 0;
+char marker_colors[MAX_MARKERS][MAX_ATTR_LEN];
+int num_marker_colors = 0;
+char marker_types[MAX_MARKERS][MAX_ATTR_LEN];
+int num_marker_types = 0;
+int marker_levels[MAX_MARKERS];
+int num_marker_levels = 0;
+int marker_low_levels[MAX_MARKERS];
+int num_marker_low_levels = 0;
+int marker_high_levels[MAX_MARKERS];
+int num_marker_high_levels = 0;
+
 STRPTR *unit_dropdown_labels = mp_unit_label_ptrs;
 /* MintPRINT prefs #6: queried job defaults are saved into Unit0. */
 /* MintPRINT prefs #7: saved-state placeholders, ghosting, layout and engine selector. */
@@ -597,6 +631,11 @@ int output_line = 0;
 struct Screen *screen = NULL;
 void *vi = NULL;
 struct TextFont *font = NULL;
+/* Set once in main() from the same WBorTop/Font->ta_YSize calculation
+ * createAllGadgets()'s "topborder" parameter uses, so the ink-strip panel
+ * (drawn separately from GadTools, after the window already exists) lines
+ * its rows up with the gadget rows instead of recomputing its own guess. */
+static UWORD g_topborder = 0;
 BOOL operation_in_progress = FALSE;
 
 // Font definition
@@ -676,6 +715,11 @@ static void unit_config_path(int idx, BOOL envarc, char *out, int out_size) {
 
 static void unit_cache_path(int idx, BOOL envarc, char *out, int out_size) {
     snprintf(out, out_size, "%s:MintPRINT/Unit%d.cache", envarc ? "ENVARC" : "ENV", idx);
+}
+
+static void unit_icon_cache_path(int idx, BOOL envarc, char *out, int out_size) {
+    snprintf(out, out_size, "%s:MintPRINT/Art/Unit%d.mpic",
+             envarc ? "ENVARC" : "ENV", idx);
 }
 
 static BOOL unit_file_exists(int idx) {
@@ -1841,7 +1885,7 @@ static void apply_driver_config_to_gadgets(struct Window *win) {
     g = find_gadget_by_id(GAD_MODEL_DISPLAY);
     if (g)
         GT_SetGadgetAttrs(g, win, NULL,
-                          GTST_String, (ULONG)printer_make_model,
+                          GTTX_Text, (ULONG)printer_make_model,
                           TAG_DONE);
 
     GT_RefreshWindow(win, NULL);
@@ -2363,6 +2407,17 @@ static void mp_cache_clear_capabilities(void) {
     supports_multiple_document_jobs = FALSE;
     supports_single_document_handling = FALSE;
     strcpy(pwg_sheet_back_value, "normal");
+    /* Ink/toner status is live-only (not persisted to the capability cache
+     * file - see mp_cache_write_file() - since levels are a snapshot, not
+     * a capability), so switching units must clear it here rather than
+     * leaving the previous printer's ink levels on screen until the next
+     * Query. */
+    num_marker_names = 0;
+    num_marker_colors = 0;
+    num_marker_types = 0;
+    num_marker_levels = 0;
+    num_marker_low_levels = 0;
+    num_marker_high_levels = 0;
 }
 
 static BOOL mp_cache_write_file(CONST_STRPTR filename,
@@ -2687,8 +2742,24 @@ static void apply_cached_capabilities(struct Window *win) {
  * cached capabilities (or "Not Detected" ghosting if there is none yet),
  * and the print-mode radio state. Used both when switching the Unit
  * dropdown and by File > Reload Driver Settings. */
+/* Defined further down, alongside the rest of the ink-status panel's
+ * drawing code - forward-declared here since reload_current_unit() (a
+ * unit switch clears any previously-queried printer's ink levels via
+ * mp_cache_clear_capabilities() above) needs to repaint the now-empty
+ * panel before that code appears in the file. */
+static void mp_draw_marker_strips(void);
+static void mp_draw_sides_hint(void);
+static void mp_draw_printer_icon(void);
+static void mp_clear_printer_icon(void);
+static BOOL mp_load_printer_icon_cache(BOOL require_uri_match);
+
 static void reload_current_unit(struct Window *win) {
     mp_cache_clear_capabilities();
+    mp_clear_printer_icon();
+    /* Show the per-Unit processed artwork immediately. The normal startup
+     * Query will validate its URI and fetch a replacement only if needed. */
+    if (unit_file_exists(current_unit_index))
+        mp_load_printer_icon_cache(FALSE);
 
     if (load_driver_config())
         custom_printf("MintPRINT Unit%d loaded\n", current_unit_index);
@@ -2722,6 +2793,9 @@ static void reload_current_unit(struct Window *win) {
     }
 
     GT_RefreshWindow(win, NULL);
+    mp_draw_marker_strips();
+    mp_draw_sides_hint();
+    mp_draw_printer_icon();
 }
 
 
@@ -2840,6 +2914,253 @@ void custom_printf(const char *format, ...) {
     redraw_output_box();
 }
 
+/* Ink/toner status strip panel - a plain RastPort drawing in the compact
+ * spare area to the right of IPP Path/Engine/Debug and above Media, not
+ * GadTools gadgets: GadTools has no gauge/progress
+ * widget, and the fill colour needs to come from whatever RGB the printer
+ * itself reports (marker-colors), which a fixed screen pen can't do -
+ * hence ObtainBestPenA() per strip below rather than one of the four
+ * pens (SetAPen 0-3) everything else in this window already uses. */
+#define MP_MARKER_AREA_LEFT     320
+#define MP_MARKER_AREA_TOP       57
+#define MP_MARKER_AREA_BOTTOM   115
+#define MP_MARKER_COLS            2
+#define MP_MARKER_COL_GAP          6
+#define MP_MARKER_ROW_H           14
+#define MP_MARKER_BAR_H            7
+#define MP_MARKER_MAX_STRIPS       6
+
+/* marker-colors (RFC 3805 / PWG5100.13) is either "#RRGGBB" or one of a
+ * small set of keyword names - resolved to RGB here, not at parse time in
+ * query_printer_attributes(), since what to do with an unrecognised name
+ * is a drawing concern (fall back to no fill), not a parsing one. */
+/* One hex digit -> 0-15, or -1 if not a hex digit - used instead of
+ * sscanf("%x") below, since the lightweight clib some Amiga toolchains
+ * link against doesn't reliably support %x, and there's no cross-compiler
+ * in this environment to find that out the hard way. */
+static int mp_hex_nibble(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static BOOL mp_marker_rgb(const char *color, UBYTE *r, UBYTE *g, UBYTE *b) {
+    if (!color || !color[0]) return FALSE;
+
+    if (color[0] == '#' && strlen(color) >= 7) {
+        int hi, lo, i;
+        UBYTE comp[3];
+        for (i = 0; i < 3; i++) {
+            hi = mp_hex_nibble(color[1 + i * 2]);
+            lo = mp_hex_nibble(color[2 + i * 2]);
+            if (hi < 0 || lo < 0) return FALSE;
+            comp[i] = (UBYTE)((hi << 4) | lo);
+        }
+        *r = comp[0]; *g = comp[1]; *b = comp[2];
+        return TRUE;
+    }
+
+    if (strcasecmp(color, "cyan") == 0)            { *r = 0;   *g = 255; *b = 255; return TRUE; }
+    if (strcasecmp(color, "light-cyan") == 0)      { *r = 170; *g = 255; *b = 255; return TRUE; }
+    if (strcasecmp(color, "magenta") == 0)         { *r = 255; *g = 0;   *b = 255; return TRUE; }
+    if (strcasecmp(color, "light-magenta") == 0)   { *r = 255; *g = 170; *b = 255; return TRUE; }
+    if (strcasecmp(color, "yellow") == 0)          { *r = 255; *g = 255; *b = 0;   return TRUE; }
+    if (strcasecmp(color, "black") == 0)           { *r = 0;   *g = 0;   *b = 0;   return TRUE; }
+    if (strcasecmp(color, "photo-black") == 0 ||
+        strcasecmp(color, "matte-black") == 0)     { *r = 40;  *g = 40;  *b = 40;  return TRUE; }
+    if (strcasecmp(color, "gray") == 0 ||
+        strcasecmp(color, "grey") == 0)            { *r = 160; *g = 160; *b = 160; return TRUE; }
+    if (strcasecmp(color, "red") == 0)             { *r = 255; *g = 0;   *b = 0;   return TRUE; }
+    if (strcasecmp(color, "green") == 0)           { *r = 0;   *g = 200; *b = 0;   return TRUE; }
+    if (strcasecmp(color, "blue") == 0)            { *r = 0;   *g = 0;   *b = 255; return TRUE; }
+    if (strcasecmp(color, "white") == 0)           { *r = 255; *g = 255; *b = 255; return TRUE; }
+    return FALSE; /* "multi-color", "unknown", "none", or anything else */
+}
+
+/* Bounded by marker-names/marker-colors, not marker-levels: a strip with
+ * no level yet (index >= num_marker_levels) still draws as "unknown"
+ * rather than being dropped, so a printer that's slow to report levels
+ * doesn't make the whole panel disappear. */
+static int mp_marker_count(void) {
+    int n = num_marker_names;
+    if (num_marker_colors < n) n = num_marker_colors;
+    if (n > MP_MARKER_MAX_STRIPS) n = MP_MARKER_MAX_STRIPS;
+    return n;
+}
+
+static void mp_marker_short_name(int index, char out[3]) {
+    const char *name;
+    const char *color;
+
+    out[0] = '\0';
+
+    if (index < 0 || index >= MAX_MARKERS)
+        return;
+
+    name = marker_names[index];
+    color = marker_colors[index];
+
+    /* Keep already-compact printer names such as C/M/Y/K. */
+    if (name && name[0] && strlen(name) <= 2) {
+        out[0] = name[0];
+        out[1] = name[1] ? name[1] : '\0';
+        out[2] = '\0';
+        return;
+    }
+
+    /* Otherwise derive a predictable short label from marker colour. */
+    if (color && color[0]) {
+        if (strcasecmp(color, "cyan") == 0)          { strcpy(out, "C");  return; }
+        if (strcasecmp(color, "magenta") == 0)       { strcpy(out, "M");  return; }
+        if (strcasecmp(color, "yellow") == 0)        { strcpy(out, "Y");  return; }
+        if (strcasecmp(color, "black") == 0)         { strcpy(out, "BK"); return; }
+        if (strcasecmp(color, "light-cyan") == 0)    { strcpy(out, "LC"); return; }
+        if (strcasecmp(color, "light-magenta") == 0) { strcpy(out, "LM"); return; }
+        if (strcasecmp(color, "photo-black") == 0)   { strcpy(out, "PK"); return; }
+        if (strcasecmp(color, "matte-black") == 0)   { strcpy(out, "MK"); return; }
+    }
+
+    /* Last resort: first two characters of the reported marker name. */
+    if (name && name[0]) {
+        out[0] = (char)toupper((unsigned char)name[0]);
+        out[1] = name[1] ? (char)toupper((unsigned char)name[1]) : '\0';
+        out[2] = '\0';
+    }
+}
+
+static void mp_draw_marker_strips(void) {
+    struct RastPort *rp;
+    int area_left, area_right, area_top, area_bottom;
+    int grid_top, cell_width, count, i;
+
+    if (!window || !screen || !font) return;
+
+    rp = window->RPort;
+    SetFont(rp, font);
+    SetDrMd(rp, JAM2);
+
+    area_left = MP_MARKER_AREA_LEFT;
+    area_right = window->Width - 20;
+    area_top = g_topborder + MP_MARKER_AREA_TOP;
+    area_bottom = g_topborder + MP_MARKER_AREA_BOTTOM;
+    if (area_right <= area_left || area_bottom <= area_top) return;
+
+    /* Clear only the compact panel; this rectangle contains no gadgets. */
+    SetAPen(rp, 0);
+    RectFill(rp, area_left, area_top, area_right, area_bottom);
+
+    SetAPen(rp, 1);
+    Move(rp, area_left, area_top + font->tf_Baseline);
+    Text(rp, "Ink/Toner:", 10);
+
+    count = mp_marker_count();
+    if (count <= 0) {
+        Move(rp,
+             area_left,
+             area_top + font->tf_YSize + 3 + font->tf_Baseline);
+        Text(rp, "(Query for levels)", 18);
+        return;
+    }
+
+    cell_width =
+        (area_right - area_left - MP_MARKER_COL_GAP) / MP_MARKER_COLS;
+    grid_top = area_top + font->tf_YSize + 3;
+
+    for (i = 0; i < count; i++) {
+        int col = i % MP_MARKER_COLS;
+        int row = i / MP_MARKER_COLS;
+        int cell_left = area_left +
+            col * (cell_width + MP_MARKER_COL_GAP);
+        int cell_right = cell_left + cell_width - 1;
+        int row_top = grid_top + row * MP_MARKER_ROW_H;
+        int text_y = row_top + font->tf_Baseline;
+        int level = (i < num_marker_levels) ? marker_levels[i] : -1;
+        int display_level;
+        char namebuf[3];
+        char pct[8];
+        int pct_len, pct_x;
+        int bar_left, bar_right, bar_top, bar_bottom;
+        UBYTE r, g, b;
+        BOOL have_rgb;
+        LONG pen;
+
+        if (row_top + MP_MARKER_ROW_H > area_bottom)
+            break;
+
+        mp_marker_short_name(i, namebuf);
+
+        SetAPen(rp, 1);
+        Move(rp, cell_left, text_y);
+        Text(rp, namebuf, strlen(namebuf));
+
+        if (level >= 0) {
+            display_level = level;
+            if (display_level > 100) display_level = 100;
+            snprintf(pct, sizeof(pct), "%d%%", display_level);
+        } else {
+            strcpy(pct, "--");
+        }
+
+        pct_len = strlen(pct);
+        pct_x = cell_right - (pct_len * 8);
+        Move(rp, pct_x, text_y);
+        Text(rp, pct, pct_len);
+
+        /* Thin level bar between the short marker name and percentage. */
+        bar_left = cell_left + 20;
+        bar_right = pct_x - 4;
+        bar_top = row_top + 1;
+        bar_bottom = bar_top + MP_MARKER_BAR_H;
+        if (bar_right <= bar_left)
+            continue;
+
+        SetAPen(rp, 1);
+        RectFill(rp, bar_left, bar_top, bar_right, bar_top);
+        RectFill(rp, bar_left, bar_bottom, bar_right, bar_bottom);
+        RectFill(rp, bar_left, bar_top, bar_left, bar_bottom);
+        RectFill(rp, bar_right, bar_top, bar_right, bar_bottom);
+
+        have_rgb = mp_marker_rgb(marker_colors[i], &r, &g, &b);
+        pen = have_rgb
+            ? (LONG)ObtainBestPenA(screen->ViewPort.ColorMap,
+                                  (ULONG)r << 24, (ULONG)g << 24,
+                                  (ULONG)b << 24, NULL)
+            : -1;
+
+        if (level >= 0) {
+            int inside_width;
+            int fill_width;
+            int fill_right;
+
+            display_level = level;
+            if (display_level > 100) display_level = 100;
+            if (display_level < 0) display_level = 0;
+
+            inside_width = bar_right - bar_left - 1;
+            fill_width = (inside_width * display_level) / 100;
+            fill_right = bar_left + fill_width;
+
+            if (fill_width > 0) {
+                SetAPen(rp, pen >= 0 ? (UBYTE)pen : 1);
+                RectFill(rp,
+                         bar_left + 1, bar_top + 1,
+                         fill_right, bar_bottom - 1);
+            }
+
+            if (fill_right < bar_right - 1) {
+                SetAPen(rp, 0);
+                RectFill(rp,
+                         fill_right + 1, bar_top + 1,
+                         bar_right - 1, bar_bottom - 1);
+            }
+        }
+
+        if (pen >= 0)
+            ReleasePen(screen->ViewPort.ColorMap, (ULONG)pen);
+    }
+}
+
 int load_ilbm_to_rgb(const char *filename, unsigned char **rgb_out, int *width_out, int *height_out) {
     struct jpeg_data data;
     memset(&data, 0, sizeof(data));
@@ -2870,6 +3191,204 @@ int load_ilbm_to_rgb(const char *filename, unsigned char **rgb_out, int *width_o
     *height_out = data.height;
     free_jpeg_data(&data);
     return 0;
+}
+
+/* ---------------------------------------------------------------------
+ * Duplex visual hint.
+ *
+ * The 32x32 ILBM files live next to the application in PROGDIR:Art/ and
+ * are staged there by the release targets in the Makefile. Keeping them
+ * external makes them easy to replace without rebuilding MintPrintSettings
+ * and reuses the ILBM decoder already linked into this program.
+ *
+ * This is intentionally hand-drawn into spare space rather than another
+ * GadTools gadget: it is purely an explanatory picture for the Sides cycle.
+ * ------------------------------------------------------------------ */
+#define MP_SIDES_HINT_LEFT       460
+#define MP_SIDES_HINT_TOP        117
+#define MP_SIDES_HINT_SIZE        32
+#define MP_SIDES_HINT_MAX_PENS    32
+#define MP_SIDES_HINT_COUNT        3
+
+struct MPSidesHintImage {
+    unsigned char *rgb;
+    int width;
+    int height;
+    BOOL attempted;
+};
+
+struct MPSidesHintPen {
+    UBYTE r, g, b;
+    LONG pen;
+};
+
+static struct MPSidesHintImage mp_sides_hint_images[MP_SIDES_HINT_COUNT];
+static const char *mp_sides_hint_paths[MP_SIDES_HINT_COUNT] = {
+    "PROGDIR:Art/single.iff",
+    "PROGDIR:Art/longside.iff",
+    "PROGDIR:Art/shortside.iff"
+};
+
+static int mp_sides_hint_index(void) {
+    if (strcmp(driver_sides_buffer, "two-sided-long-edge") == 0)
+        return 1;
+    if (strcmp(driver_sides_buffer, "two-sided-short-edge") == 0)
+        return 2;
+    return 0;
+}
+
+static BOOL mp_load_sides_hint_image(int index) {
+    struct MPSidesHintImage *image;
+    struct jpeg_data data;
+    int pixels;
+    int i;
+
+    if (index < 0 || index >= MP_SIDES_HINT_COUNT)
+        return FALSE;
+
+    image = &mp_sides_hint_images[index];
+    if (image->attempted)
+        return image->rgb != NULL;
+
+    image->attempted = TRUE;
+    memset(&data, 0, sizeof(data));
+
+    /* Avoid load_ilbm_to_rgb() here because it logs to the GUI status box. */
+    if (load_iff_direct(mp_sides_hint_paths[index], &data) != 0)
+        return FALSE;
+
+    if (data.width <= 0 || data.height <= 0 ||
+        data.width > 64 || data.height > 64) {
+        free_jpeg_data(&data);
+        return FALSE;
+    }
+
+    pixels = data.width * data.height;
+    image->rgb = AllocVec((ULONG)pixels * 3UL, MEMF_ANY);
+    if (!image->rgb) {
+        free_jpeg_data(&data);
+        return FALSE;
+    }
+
+    for (i = 0; i < pixels; ++i) {
+        image->rgb[i * 3 + 0] = data.red[i];
+        image->rgb[i * 3 + 1] = data.green[i];
+        image->rgb[i * 3 + 2] = data.blue[i];
+    }
+    image->width = data.width;
+    image->height = data.height;
+    free_jpeg_data(&data);
+    return TRUE;
+}
+
+static UBYTE mp_sides_hint_nearest_pen(const ULONG *palette,
+                                         int pen_count,
+                                         UBYTE r, UBYTE g, UBYTE b) {
+    int i;
+    int best = 0;
+    ULONG best_distance = 0xffffffffUL;
+
+    for (i = 0; i < pen_count; ++i) {
+        LONG pr = (LONG)(palette[i * 3 + 0] >> 24);
+        LONG pg = (LONG)(palette[i * 3 + 1] >> 24);
+        LONG pb = (LONG)(palette[i * 3 + 2] >> 24);
+        LONG dr = (LONG)r - pr;
+        LONG dg = (LONG)g - pg;
+        LONG db = (LONG)b - pb;
+        ULONG distance = (ULONG)(dr * dr + dg * dg + db * db);
+
+        if (distance < best_distance) {
+            best = i;
+            best_distance = distance;
+            if (distance == 0)
+                break;
+        }
+    }
+
+    return (UBYTE)best;
+}
+
+static void mp_draw_sides_hint(void) {
+    struct MPSidesHintImage *image;
+    ULONG screen_palette[3 * 256];
+    struct ColorMap *cm;
+    struct RastPort *rp;
+    int index;
+    int screen_pen_count;
+    int draw_w, draw_h;
+    int x, y;
+    int left = MP_SIDES_HINT_LEFT;
+    int top = g_topborder + MP_SIDES_HINT_TOP;
+
+    if (!window || !screen)
+        return;
+
+    rp = window->RPort;
+    cm = screen->ViewPort.ColorMap;
+    if (!cm || cm->Count == 0)
+        return;
+
+    screen_pen_count = (int)cm->Count;
+    if (screen_pen_count > 256)
+        screen_pen_count = 256;
+    GetRGB32(cm, 0, (ULONG)screen_pen_count, screen_palette);
+
+    SetDrMd(rp, JAM1);
+    SetAPen(rp, 0);
+    RectFill(rp, left - 1, top - 1,
+             left + MP_SIDES_HINT_SIZE, top + MP_SIDES_HINT_SIZE);
+    SetAPen(rp, 1);
+    RectFill(rp, left - 1, top - 1,
+             left + MP_SIDES_HINT_SIZE, top - 1);
+    RectFill(rp, left - 1, top - 1,
+             left - 1, top + MP_SIDES_HINT_SIZE);
+    RectFill(rp, left - 1, top + MP_SIDES_HINT_SIZE,
+             left + MP_SIDES_HINT_SIZE, top + MP_SIDES_HINT_SIZE);
+    RectFill(rp, left + MP_SIDES_HINT_SIZE, top - 1,
+             left + MP_SIDES_HINT_SIZE, top + MP_SIDES_HINT_SIZE);
+
+    index = mp_sides_hint_index();
+    if (!mp_load_sides_hint_image(index))
+        return;
+
+    image = &mp_sides_hint_images[index];
+    draw_w = image->width < MP_SIDES_HINT_SIZE
+           ? image->width : MP_SIDES_HINT_SIZE;
+    draw_h = image->height < MP_SIDES_HINT_SIZE
+           ? image->height : MP_SIDES_HINT_SIZE;
+
+    for (y = 0; y < draw_h; ++y) {
+        LONG last_pen = -1;
+        for (x = 0; x < draw_w; ++x) {
+            int pixel = y * image->width + x;
+            UBYTE r = image->rgb[pixel * 3 + 0];
+            UBYTE g = image->rgb[pixel * 3 + 1];
+            UBYTE b = image->rgb[pixel * 3 + 2];
+            UBYTE pen = mp_sides_hint_nearest_pen(screen_palette,
+                                                   screen_pen_count,
+                                                   r, g, b);
+
+            if ((LONG)pen != last_pen) {
+                SetAPen(rp, pen);
+                last_pen = (LONG)pen;
+            }
+            WritePixel(rp, left + x, top + y);
+        }
+    }
+
+}
+
+static void mp_free_sides_hint_images(void) {
+    int i;
+    for (i = 0; i < MP_SIDES_HINT_COUNT; ++i) {
+        if (mp_sides_hint_images[i].rgb) {
+            FreeVec(mp_sides_hint_images[i].rgb);
+            mp_sides_hint_images[i].rgb = NULL;
+        }
+        mp_sides_hint_images[i].width = 0;
+        mp_sides_hint_images[i].height = 0;
+        mp_sides_hint_images[i].attempted = FALSE;
+    }
 }
 
 // Creates a valid PWG header and uncompressed RGB data
@@ -3903,6 +4422,559 @@ static int mp_connect_with_timeout(int sockfd, struct sockaddr_in *addr, int tim
     return rc;
 }
 
+/* ---------------------------------------------------------------------
+ * Optional printer picture advertised by IPP's printer-icons attribute.
+ *
+ * Fetch the first HTTP URI only.  PNG decoding is handled internally by
+ * the same LodePNG decoder used by MintAMP, producing RGBA pixels with real
+ * alpha.  MintPRINT area-averages that image down to 32x32, composites the
+ * translucent edge pixels against the GUI background, then maps the result
+ * to the current screen's pens.  No picture.datatype is required.
+ * This is deliberately optional: unsupported URI/download/decode failure
+ * simply leaves the preview blank.
+ * ------------------------------------------------------------------ */
+static void mp_clear_printer_icon(void) {
+    mp_printer_icon_valid = FALSE;
+    mp_printer_icon_pens_valid = FALSE;
+    memset(mp_printer_icon_rgba, 0, sizeof(mp_printer_icon_rgba));
+    memset(mp_printer_icon_mask, 0, sizeof(mp_printer_icon_mask));
+    DeleteFile((CONST_STRPTR)MP_PRINTER_ICON_TEMP);
+}
+
+/* Processed printer-art cache format.  Keep this deliberately tiny and
+ * private to MintPRINT: 8-byte version magic, a fixed 256-byte source URI,
+ * then the already-scaled RGBA pixels.  Loading this avoids both the HTTP
+ * transfer and a LodePNG decode on subsequent opens. */
+static const UBYTE mp_printer_icon_cache_magic[8] = {
+    'M', 'P', 'I', 'C', '0', '0', '0', '1'
+};
+
+static BOOL mp_write_printer_icon_cache_file(CONST_STRPTR path) {
+    BPTR file;
+    char cached_uri[sizeof(printer_icon_uri)];
+    BOOL ok = TRUE;
+
+    if (!mp_printer_icon_valid || !path)
+        return FALSE;
+
+    memset(cached_uri, 0, sizeof(cached_uri));
+    strncpy(cached_uri, printer_icon_uri, sizeof(cached_uri) - 1);
+
+    file = Open(path, MODE_NEWFILE);
+    if (!file)
+        return FALSE;
+
+    if (Write(file, (APTR)mp_printer_icon_cache_magic,
+              sizeof(mp_printer_icon_cache_magic)) !=
+        (LONG)sizeof(mp_printer_icon_cache_magic))
+        ok = FALSE;
+    if (ok && Write(file, cached_uri, sizeof(cached_uri)) !=
+              (LONG)sizeof(cached_uri))
+        ok = FALSE;
+    if (ok && Write(file, mp_printer_icon_rgba,
+                    sizeof(mp_printer_icon_rgba)) !=
+              (LONG)sizeof(mp_printer_icon_rgba))
+        ok = FALSE;
+
+    Close(file);
+    if (!ok)
+        DeleteFile(path);
+    return ok;
+}
+
+static BOOL mp_load_printer_icon_cache_file(CONST_STRPTR path,
+                                             BOOL require_uri_match) {
+    BPTR file;
+    UBYTE magic[sizeof(mp_printer_icon_cache_magic)];
+    char cached_uri[sizeof(printer_icon_uri)];
+    UBYTE *rgba;
+    int i;
+
+    file = Open(path, MODE_OLDFILE);
+    if (!file)
+        return FALSE;
+
+    if (Read(file, magic, sizeof(magic)) != (LONG)sizeof(magic) ||
+        memcmp(magic, mp_printer_icon_cache_magic, sizeof(magic)) != 0 ||
+        Read(file, cached_uri, sizeof(cached_uri)) !=
+            (LONG)sizeof(cached_uri)) {
+        Close(file);
+        return FALSE;
+    }
+    cached_uri[sizeof(cached_uri) - 1] = '\0';
+
+    if (require_uri_match &&
+        (!printer_icon_uri[0] || strcmp(cached_uri, printer_icon_uri) != 0)) {
+        Close(file);
+        return FALSE;
+    }
+
+    rgba = AllocVec(sizeof(mp_printer_icon_rgba), MEMF_ANY);
+    if (!rgba) {
+        Close(file);
+        return FALSE;
+    }
+    if (Read(file, rgba, sizeof(mp_printer_icon_rgba)) !=
+        (LONG)sizeof(mp_printer_icon_rgba)) {
+        FreeVec(rgba);
+        Close(file);
+        return FALSE;
+    }
+    Close(file);
+
+    memcpy(mp_printer_icon_rgba, rgba, sizeof(mp_printer_icon_rgba));
+    FreeVec(rgba);
+    memset(mp_printer_icon_mask, 0, sizeof(mp_printer_icon_mask));
+    for (i = 0; i < MP_PRINTER_ICON_PIXELS; ++i)
+        mp_printer_icon_mask[i] = mp_printer_icon_rgba[i * 4 + 3] ? 1 : 0;
+
+    mp_printer_icon_valid = TRUE;
+    mp_printer_icon_pens_valid = FALSE;
+    return TRUE;
+}
+
+static void mp_save_printer_icon_cache(void) {
+    char env_path[96];
+    char envarc_path[96];
+
+    if (!mp_printer_icon_valid)
+        return;
+
+    if (!ensure_config_dir((CONST_STRPTR)"ENV:MintPRINT") ||
+        !ensure_config_dir((CONST_STRPTR)"ENVARC:MintPRINT") ||
+        !ensure_config_dir((CONST_STRPTR)"ENV:MintPRINT/Art") ||
+        !ensure_config_dir((CONST_STRPTR)"ENVARC:MintPRINT/Art"))
+        return;
+
+    unit_icon_cache_path(current_unit_index, FALSE, env_path, sizeof(env_path));
+    unit_icon_cache_path(current_unit_index, TRUE, envarc_path, sizeof(envarc_path));
+    mp_write_printer_icon_cache_file((CONST_STRPTR)env_path);
+    mp_write_printer_icon_cache_file((CONST_STRPTR)envarc_path);
+}
+
+static BOOL mp_load_printer_icon_cache(BOOL require_uri_match) {
+    char env_path[96];
+    char envarc_path[96];
+
+    unit_icon_cache_path(current_unit_index, FALSE, env_path, sizeof(env_path));
+    unit_icon_cache_path(current_unit_index, TRUE, envarc_path, sizeof(envarc_path));
+
+    if (mp_load_printer_icon_cache_file((CONST_STRPTR)env_path,
+                                        require_uri_match))
+        return TRUE;
+
+    if (mp_load_printer_icon_cache_file((CONST_STRPTR)envarc_path,
+                                        require_uri_match)) {
+        /* Re-seed volatile ENV: after a reboot, best-effort. */
+        if (ensure_config_dir((CONST_STRPTR)"ENV:MintPRINT") &&
+            ensure_config_dir((CONST_STRPTR)"ENV:MintPRINT/Art"))
+            mp_copy_file((CONST_STRPTR)envarc_path, (CONST_STRPTR)env_path);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static void mp_delete_printer_icon_cache(void) {
+    char env_path[96];
+    char envarc_path[96];
+    unit_icon_cache_path(current_unit_index, FALSE, env_path, sizeof(env_path));
+    unit_icon_cache_path(current_unit_index, TRUE, envarc_path, sizeof(envarc_path));
+    DeleteFile((CONST_STRPTR)env_path);
+    DeleteFile((CONST_STRPTR)envarc_path);
+}
+
+static BOOL mp_fetch_printer_icon_file(const char *uri) {
+    const char *authority;
+    const char *slash;
+    const char *colon;
+    char host[96];
+    char path[256];
+    char request[512];
+    char *response;
+    int host_len;
+    int port = 80;
+    int sockfd;
+    int total = 0;
+    int http_status = 0;
+    int body_off = 0;
+    int body_len = 0;
+    int complete = 0;
+    int request_len;
+    struct sockaddr_in serv_addr;
+    struct timeval timeout;
+    BPTR file;
+
+    if (!uri || strncmp(uri, "http://", 7) != 0)
+        return FALSE;
+
+    authority = uri + 7;
+    slash = strchr(authority, '/');
+    if (!slash)
+        return FALSE;
+
+    colon = memchr(authority, ':', (size_t)(slash - authority));
+    host_len = (int)((colon ? colon : slash) - authority);
+    if (host_len <= 0 || host_len >= (int)sizeof(host))
+        return FALSE;
+
+    memcpy(host, authority, (size_t)host_len);
+    host[host_len] = '\0';
+
+    if (colon) {
+        port = atoi(colon + 1);
+        if (port <= 0 || port > 65535)
+            return FALSE;
+    }
+
+    strncpy(path, slash, sizeof(path) - 1);
+    path[sizeof(path) - 1] = '\0';
+
+    memset(&serv_addr, 0, sizeof(serv_addr));
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons((UWORD)port);
+    serv_addr.sin_addr.s_addr = inet_addr(host);
+    if (serv_addr.sin_addr.s_addr == (ULONG)-1)
+        return FALSE;
+
+    sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0)
+        return FALSE;
+
+    timeout.tv_sec = 5;
+    timeout.tv_usec = 0;
+    setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout));
+    setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, (char *)&timeout, sizeof(timeout));
+
+    if (mp_connect_with_timeout(sockfd, &serv_addr, 5) < 0) {
+        CloseSocket(sockfd);
+        return FALSE;
+    }
+
+    snprintf(request, sizeof(request),
+             "GET %s HTTP/1.1\r\n"
+             "Host: %s\r\n"
+             "User-Agent: MintPrintSettings/%s\r\n"
+             "Accept: image/png,image/jpeg,image/*\r\n"
+             "Connection: close\r\n\r\n",
+             path, host, MINTPRINT_SETTINGS_VERSION);
+    request_len = (int)strlen(request);
+
+    if (safe_send(sockfd, request, request_len) != request_len) {
+        CloseSocket(sockfd);
+        return FALSE;
+    }
+
+    response = AllocVec(MAX_BUFFER, MEMF_ANY);
+    if (!response) {
+        CloseSocket(sockfd);
+        return FALSE;
+    }
+
+    while (total < MAX_BUFFER) {
+        int got = recv(sockfd, response + total, MAX_BUFFER - total, 0);
+        if (got <= 0)
+            break;
+        total += got;
+        complete = mp_http_final_body(response, total, &http_status,
+                                      &body_off, &body_len);
+        if (complete != 0)
+            break;
+    }
+    CloseSocket(sockfd);
+
+    if (complete == 0)
+        complete = mp_http_final_body(response, total, &http_status,
+                                      &body_off, &body_len);
+
+    if (complete != 1 || http_status != 200 || body_len <= 0 ||
+        body_off < 0 || body_off + body_len > total) {
+        FreeVec(response);
+        return FALSE;
+    }
+
+    file = Open((CONST_STRPTR)MP_PRINTER_ICON_TEMP, MODE_NEWFILE);
+    if (!file) {
+        FreeVec(response);
+        return FALSE;
+    }
+
+    if (Write(file, response + body_off, body_len) != body_len) {
+        Close(file);
+        DeleteFile((CONST_STRPTR)MP_PRINTER_ICON_TEMP);
+        FreeVec(response);
+        return FALSE;
+    }
+
+    Close(file);
+    FreeVec(response);
+    return TRUE;
+}
+
+static BOOL mp_load_printer_icon_rgba(void) {
+    static const UBYTE png_signature[8] = { 137, 80, 78, 71, 13, 10, 26, 10 };
+    BPTR file;
+    LONG file_size;
+    UBYTE *png_data = NULL;
+    unsigned char *decoded = NULL;
+    unsigned png_w = 0;
+    unsigned png_h = 0;
+    unsigned err;
+    int draw_w;
+    int draw_h;
+    int off_x;
+    int off_y;
+    int dy;
+
+    file = Open((CONST_STRPTR)MP_PRINTER_ICON_TEMP, MODE_OLDFILE);
+    if (!file)
+        return FALSE;
+
+    if (Seek(file, 0, OFFSET_END) == -1) {
+        Close(file);
+        return FALSE;
+    }
+    file_size = Seek(file, 0, OFFSET_BEGINNING);
+    if (file_size < 24 || file_size > MAX_BUFFER) {
+        Close(file);
+        return FALSE;
+    }
+
+    png_data = AllocVec((ULONG)file_size, MEMF_ANY);
+    if (!png_data) {
+        Close(file);
+        return FALSE;
+    }
+    if (Read(file, png_data, file_size) != file_size) {
+        Close(file);
+        FreeVec(png_data);
+        return FALSE;
+    }
+    Close(file);
+
+    /* Reject non-PNG and decompression-bomb dimensions before LodePNG
+     * allocates width*height*4.  PNG's IHDR width/height live at bytes
+     * 16..23 and are big-endian. */
+    if (memcmp(png_data, png_signature, sizeof(png_signature)) != 0) {
+        FreeVec(png_data);
+        return FALSE;
+    }
+    png_w = ((unsigned)png_data[16] << 24) |
+            ((unsigned)png_data[17] << 16) |
+            ((unsigned)png_data[18] << 8) |
+            (unsigned)png_data[19];
+    png_h = ((unsigned)png_data[20] << 24) |
+            ((unsigned)png_data[21] << 16) |
+            ((unsigned)png_data[22] << 8) |
+            (unsigned)png_data[23];
+    if (png_w == 0 || png_h == 0 ||
+        png_w > MP_PRINTER_ICON_MAX_SOURCE_DIM ||
+        png_h > MP_PRINTER_ICON_MAX_SOURCE_DIM) {
+        FreeVec(png_data);
+        return FALSE;
+    }
+
+    err = lodepng_decode32(&decoded, &png_w, &png_h,
+                           png_data, (size_t)file_size);
+    FreeVec(png_data);
+    if (err || !decoded)
+        return FALSE;
+
+    memset(mp_printer_icon_rgba, 0, sizeof(mp_printer_icon_rgba));
+    memset(mp_printer_icon_mask, 0, sizeof(mp_printer_icon_mask));
+
+    draw_w = MP_PRINTER_ICON_SIZE;
+    draw_h = MP_PRINTER_ICON_SIZE;
+    if (png_w > png_h)
+        draw_h = (int)((png_h * MP_PRINTER_ICON_SIZE) / png_w);
+    else if (png_h > png_w)
+        draw_w = (int)((png_w * MP_PRINTER_ICON_SIZE) / png_h);
+    if (draw_w < 1) draw_w = 1;
+    if (draw_h < 1) draw_h = 1;
+    off_x = (MP_PRINTER_ICON_SIZE - draw_w) / 2;
+    off_y = (MP_PRINTER_ICON_SIZE - draw_h) / 2;
+
+    /* Area-average each destination pixel.  The source Brother icon is
+     * normally 128x128, so this is just a cheap 4x4 average and gives a
+     * much nicer tiny icon than nearest-neighbour.  RGB is accumulated
+     * premultiplied by alpha so transparent coloured pixels cannot bleed
+     * a red/black matte into the edges. */
+    for (dy = 0; dy < draw_h; ++dy) {
+        unsigned sy0 = (unsigned)((dy * (int)png_h) / draw_h);
+        unsigned sy1 = (unsigned)(((dy + 1) * (int)png_h) / draw_h);
+        int dx2;
+        if (sy1 <= sy0) sy1 = sy0 + 1;
+        if (sy1 > png_h) sy1 = png_h;
+
+        for (dx2 = 0; dx2 < draw_w; ++dx2) {
+            unsigned sx0 = (unsigned)((dx2 * (int)png_w) / draw_w);
+            unsigned sx1 = (unsigned)(((dx2 + 1) * (int)png_w) / draw_w);
+            unsigned sy;
+            ULONG sum_a = 0;
+            ULONG sum_ra = 0;
+            ULONG sum_ga = 0;
+            ULONG sum_ba = 0;
+            ULONG samples = 0;
+            int dest = (off_y + dy) * MP_PRINTER_ICON_SIZE + (off_x + dx2);
+            if (sx1 <= sx0) sx1 = sx0 + 1;
+            if (sx1 > png_w) sx1 = png_w;
+
+            for (sy = sy0; sy < sy1; ++sy) {
+                unsigned sx;
+                for (sx = sx0; sx < sx1; ++sx) {
+                    const unsigned char *p = decoded + ((sy * png_w + sx) * 4U);
+                    ULONG a = p[3];
+                    sum_a += a;
+                    sum_ra += (ULONG)p[0] * a;
+                    sum_ga += (ULONG)p[1] * a;
+                    sum_ba += (ULONG)p[2] * a;
+                    ++samples;
+                }
+            }
+
+            if (samples && sum_a) {
+                UBYTE *d = mp_printer_icon_rgba + dest * 4;
+                d[0] = (UBYTE)(sum_ra / sum_a);
+                d[1] = (UBYTE)(sum_ga / sum_a);
+                d[2] = (UBYTE)(sum_ba / sum_a);
+                d[3] = (UBYTE)(sum_a / samples);
+                mp_printer_icon_mask[dest] = d[3] ? 1 : 0;
+            }
+        }
+    }
+
+    free(decoded); /* matching allocator used by lodepng.c */
+    mp_printer_icon_valid = TRUE;
+    mp_printer_icon_pens_valid = FALSE;
+    return TRUE;
+}
+
+static void mp_refresh_printer_icon(void) {
+    mp_clear_printer_icon();
+
+    if (!printer_icon_uri[0]) {
+        /* A successful Query saying there is no printer-icons attribute
+         * makes any older artwork for this Unit stale. */
+        mp_delete_printer_icon_cache();
+        return;
+    }
+
+    /* Fast path: the processed 35x35 RGBA cache includes the source URI.
+     * If it still matches, no HTTP transfer and no PNG decode are needed. */
+    if (mp_load_printer_icon_cache(TRUE))
+        return;
+
+    if (mp_fetch_printer_icon_file(printer_icon_uri) &&
+        mp_load_printer_icon_rgba())
+        mp_save_printer_icon_cache();
+
+    DeleteFile((CONST_STRPTR)MP_PRINTER_ICON_TEMP);
+}
+
+static UBYTE mp_printer_icon_nearest_pen(const ULONG *palette,
+                                         int pen_count,
+                                         UBYTE r, UBYTE g, UBYTE b) {
+    int i;
+    int best = 0;
+    ULONG best_distance = 0xffffffffUL;
+
+    for (i = 0; i < pen_count; ++i) {
+        LONG pr = (LONG)((palette[i * 3 + 0] >> 24) & 0xffUL);
+        LONG pg = (LONG)((palette[i * 3 + 1] >> 24) & 0xffUL);
+        LONG pb = (LONG)((palette[i * 3 + 2] >> 24) & 0xffUL);
+        LONG dr = (LONG)r - pr;
+        LONG dg = (LONG)g - pg;
+        LONG db = (LONG)b - pb;
+        ULONG distance = (ULONG)(dr * dr + dg * dg + db * db);
+        if (distance < best_distance) {
+            best_distance = distance;
+            best = i;
+            if (distance == 0)
+                break;
+        }
+    }
+    return (UBYTE)best;
+}
+
+static void mp_draw_printer_icon(void) {
+    ULONG screen_palette[3 * 256];
+    struct ColorMap *cm;
+    struct RastPort *rp;
+    int screen_pen_count;
+    int left = MP_PRINTER_ICON_LEFT;
+    int top = g_topborder + MP_PRINTER_ICON_TOP;
+    int i;
+    LONG last_pen = -1;
+
+    if (!window || !screen)
+        return;
+
+    rp = window->RPort;
+    cm = screen->ViewPort.ColorMap;
+    if (!cm || cm->Count == 0)
+        return;
+
+    screen_pen_count = (int)cm->Count;
+    if (screen_pen_count > 256)
+        screen_pen_count = 256;
+    GetRGB32(cm, 0, (ULONG)screen_pen_count, screen_palette);
+
+    SetDrMd(rp, JAM1);
+    SetAPen(rp, 0);
+    RectFill(rp, left - 1, top - 1,
+             left + MP_PRINTER_ICON_SIZE, top + MP_PRINTER_ICON_SIZE);
+
+    if (!mp_printer_icon_valid)
+        return;
+
+    /* Convert RGBA to the current screen's pens once per downloaded icon,
+     * not on every refresh.  Partial alpha is composited against pen 0,
+     * which is exactly the background we just cleared the icon box with. */
+    if (!mp_printer_icon_pens_valid) {
+        UBYTE bg_r = (UBYTE)((screen_palette[0] >> 24) & 0xffUL);
+        UBYTE bg_g = (UBYTE)((screen_palette[1] >> 24) & 0xffUL);
+        UBYTE bg_b = (UBYTE)((screen_palette[2] >> 24) & 0xffUL);
+
+        for (i = 0; i < MP_PRINTER_ICON_PIXELS; ++i) {
+            const UBYTE *p = mp_printer_icon_rgba + i * 4;
+            ULONG a = p[3];
+            UBYTE r;
+            UBYTE g;
+            UBYTE b;
+
+            if (a == 0) {
+                mp_printer_icon_mask[i] = 0;
+                mp_printer_icon_pens[i] = 0;
+                continue;
+            }
+
+            r = (UBYTE)(((ULONG)p[0] * a + (ULONG)bg_r * (255UL - a) + 127UL) / 255UL);
+            g = (UBYTE)(((ULONG)p[1] * a + (ULONG)bg_g * (255UL - a) + 127UL) / 255UL);
+            b = (UBYTE)(((ULONG)p[2] * a + (ULONG)bg_b * (255UL - a) + 127UL) / 255UL);
+            mp_printer_icon_pens[i] = mp_printer_icon_nearest_pen(screen_palette,
+                                                                  screen_pen_count,
+                                                                  r, g, b);
+            mp_printer_icon_mask[i] = 1;
+        }
+        mp_printer_icon_pens_valid = TRUE;
+    }
+
+    for (i = 0; i < MP_PRINTER_ICON_PIXELS; ++i) {
+        int x;
+        int y;
+        UBYTE pen;
+        if (!mp_printer_icon_mask[i])
+            continue;
+        pen = mp_printer_icon_pens[i];
+        if ((LONG)pen != last_pen) {
+            SetAPen(rp, pen);
+            last_pen = (LONG)pen;
+        }
+        x = i % MP_PRINTER_ICON_SIZE;
+        y = i / MP_PRINTER_ICON_SIZE;
+        WritePixel(rp, left + x, top + y);
+    }
+}
+
 // Updated query_printer_attributes with fixed mapping logic and tray name parsing
 int query_printer_attributes(const char *ip, int port, char *response, int maxlen) {
     custom_printf("CLEAR");
@@ -3935,6 +5007,13 @@ int query_printer_attributes(const char *ip, int port, char *response, int maxle
     supports_single_document_handling = FALSE;
     strcpy(pwg_sheet_back_value, "normal");
     printer_make_model[0] = '\0';
+    printer_icon_uri[0] = '\0';
+    num_marker_names = 0;
+    num_marker_colors = 0;
+    num_marker_types = 0;
+    num_marker_levels = 0;
+    num_marker_low_levels = 0;
+    num_marker_high_levels = 0;
 
     // Allocate buffers for parsing
     char *name = malloc(512);
@@ -4015,7 +5094,11 @@ int query_printer_attributes(const char *ip, int port, char *response, int maxle
             "multiple-document-jobs-supported",
             "multiple-document-handling-supported",
             "jpeg-k-octets-supported", "jpeg-x-dimension-supported",
-            "jpeg-y-dimension-supported", NULL
+            "jpeg-y-dimension-supported",
+            "printer-icons",
+            "marker-names", "marker-colors", "marker-types",
+            "marker-levels", "marker-low-levels", "marker-high-levels",
+            NULL
         };
         int i;
         for (i = 0; mp_requested_attrs[i]; i++) {
@@ -4624,6 +5707,46 @@ query_receive_pump_gui:
                                (value_tag == 0x41 || value_tag == 0x42)) {
                         strncpy(printer_make_model, value, sizeof(printer_make_model) - 1);
                         printer_make_model[sizeof(printer_make_model) - 1] = '\0';
+                    } else if (strcmp(name, "printer-icons") == 0 &&
+                               value_tag == 0x45 && printer_icon_uri[0] == '\0') {
+                        strncpy(printer_icon_uri, value, sizeof(printer_icon_uri) - 1);
+                        printer_icon_uri[sizeof(printer_icon_uri) - 1] = '\0';
+                    } else if (strcmp(name, "marker-names") == 0 &&
+                               (value_tag == 0x41 || value_tag == 0x42 ||
+                                value_tag == 0x44)) {
+                        store_value(marker_names, &num_marker_names, value);
+                    } else if (strcmp(name, "marker-colors") == 0 &&
+                               (value_tag == 0x41 || value_tag == 0x42 ||
+                                value_tag == 0x44)) {
+                        /* "#RRGGBB" (PWG5100.13) or CSS-style names
+                         * ("cyan", "multi-color", ...) depending on the
+                         * printer - resolved to a screen pen when drawn,
+                         * not here. */
+                        store_value(marker_colors, &num_marker_colors, value);
+                    } else if (strcmp(name, "marker-types") == 0 &&
+                               value_tag == 0x44) {
+                        store_value(marker_types, &num_marker_types, value);
+                    } else if (strcmp(name, "marker-levels") == 0 &&
+                               value_tag == 0x21 && value_len == 4) {
+                        /* Percent full, 0-100; RFC 3805 reserves negative
+                         * values (-1, -2, ...) to mean "unknown"/"some
+                         * value not currently reportable", not a real
+                         * level - store as-is and let the drawing code
+                         * treat negative as unknown rather than clamping
+                         * here and losing that distinction. */
+                        int level = (int)mp_ipp_decode_be32(
+                            (const UBYTE *)ipp_start + pos - value_len);
+                        store_int_value(marker_levels, &num_marker_levels, level);
+                    } else if (strcmp(name, "marker-low-levels") == 0 &&
+                               value_tag == 0x21 && value_len == 4) {
+                        int level = (int)mp_ipp_decode_be32(
+                            (const UBYTE *)ipp_start + pos - value_len);
+                        store_int_value(marker_low_levels, &num_marker_low_levels, level);
+                    } else if (strcmp(name, "marker-high-levels") == 0 &&
+                               value_tag == 0x21 && value_len == 4) {
+                        int level = (int)mp_ipp_decode_be32(
+                            (const UBYTE *)ipp_start + pos - value_len);
+                        store_int_value(marker_high_levels, &num_marker_high_levels, level);
                     }
                 }
 
@@ -4769,7 +5892,7 @@ query_receive_pump_gui:
         struct Gadget *model_gadget = find_gadget_by_id(GAD_MODEL_DISPLAY);
         if (model_gadget) {
             GT_SetGadgetAttrs(model_gadget, window, NULL,
-                              GTST_String, (ULONG)printer_make_model,
+                              GTTX_Text, (ULONG)printer_make_model,
                               TAG_DONE);
         }
         /* Preview the freshly-queried (not yet saved) model in the Unit
@@ -4878,7 +6001,18 @@ static void perform_query_flow(struct Window *win, const char *ip_only, int port
     if (!ok) {
         custom_printf("CLEAR");
         custom_printf("Scan failed - please try Query again");
+        mp_clear_printer_icon();
+        mp_load_printer_icon_cache(FALSE);
+    } else {
+        mp_refresh_printer_icon();
     }
+    /* Redraw either way: query_printer_attributes() already reset the
+     * marker-* arrays before this loop even on failure, so a failed
+     * re-query correctly clears a previous printer's ink levels off the
+     * panel instead of leaving them looking current. */
+    mp_draw_marker_strips();
+    mp_draw_sides_hint();
+    mp_draw_printer_icon();
 }
 
 int send_pwg_print_job(const char *ip, int port, const char *media, const char *print_mode, unsigned char *pwg_data, int pwg_size) {
@@ -5441,9 +6575,9 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // being viewed/edited. Only Unit0 is what the driver actually prints
     // with; switching here reloads the rest of the form from that unit's
     // saved file.
-    ng.ng_LeftEdge = 130;
-    ng.ng_TopEdge = 5 + topborder;
-    ng.ng_Width = 260;
+    ng.ng_LeftEdge = 64;
+    ng.ng_TopEdge = 3 + topborder;
+    ng.ng_Width = 328;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"Unit:";
     ng.ng_GadgetID = GAD_UNIT_DROPDOWN;
@@ -5460,8 +6594,9 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // the driver actually reads at print time - the practical way to
     // "switch which printer is active" without touching driver code.
     ng.ng_LeftEdge = 400;
-    ng.ng_Width = 90;
+    ng.ng_Width = 92;
     ng.ng_Height = 12;
+    ng.ng_TopEdge = 3 + topborder;
     ng.ng_GadgetText = (STRPTR)"_Activate";
     ng.ng_GadgetID = GAD_SET_ACTIVE_BUTTON;
     ng.ng_Flags = 0;
@@ -5475,10 +6610,10 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     ng.ng_Flags = NG_HIGHLABEL;
 
     // IP string gadget
-    ng.ng_LeftEdge = 165;
-    ng.ng_TopEdge += 20;
-    ng.ng_Width = 190;
-    ng.ng_Height = 14;
+    ng.ng_LeftEdge = 144;
+    ng.ng_TopEdge = 21 + topborder;
+    ng.ng_Width = 248;
+    ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"_Printer IP/Host:";
     ng.ng_GadgetID = GAD_IP_STRING;
     gad = CreateGadget(STRING_KIND, gad, &ng,
@@ -5495,10 +6630,11 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
 
 
-    // Query button - kept beside the printer address field.
+    // Query button - shares the Printer Model row in the compact layout.
     ng.ng_LeftEdge = 400;
-    ng.ng_Width = 90;
+    ng.ng_Width = 92;
     ng.ng_Height = 12;
+    ng.ng_TopEdge = 39 + topborder;
     ng.ng_GadgetText = (STRPTR)"_Query";
     ng.ng_GadgetID = GAD_QUERY_BUTTON;
     ng.ng_Flags = 0;
@@ -5513,16 +6649,15 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // Printer Model (read-only display) - shows printer-make-and-model
     // from the last successful Query for this unit. Not user-editable;
     // persisted via MODEL= in the unit's own config file on Save.
-    ng.ng_LeftEdge = 165;
-    ng.ng_TopEdge += 20;
-    ng.ng_Width = 290;
-    ng.ng_Height = 14;
+    ng.ng_LeftEdge = 128;
+    ng.ng_TopEdge = 39 + topborder;
+    ng.ng_Width = 264;
+    ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"Printer Model:";
     ng.ng_GadgetID = GAD_MODEL_DISPLAY;
-    gad = CreateGadget(STRING_KIND, gad, &ng,
-        GTST_String, (ULONG)printer_make_model,
-        GTST_MaxChars, sizeof(printer_make_model) - 1,
-        GA_Disabled, TRUE,
+    gad = CreateGadget(TEXT_KIND, gad, &ng,
+        GTTX_Text, (ULONG)printer_make_model,
+        GTTX_Justification, GTJ_LEFT,
         TAG_DONE);
     if (!gad) {
         printf("Failed to create model display\n");
@@ -5531,9 +6666,9 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
     // Driver IPP path
     ng.ng_LeftEdge = 130;
-    ng.ng_TopEdge += 20;
-    ng.ng_Width = 200;
-    ng.ng_Height = 14;
+    ng.ng_TopEdge = 57 + topborder;
+    ng.ng_Width = 104;
+    ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"IPP _Path:";
     ng.ng_GadgetID = GAD_IPP_PATH;
     gad = CreateGadget(STRING_KIND, gad, &ng,
@@ -5548,16 +6683,15 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
         return NULL;
     }
 
-    // Discover button - sits below Query, searches the LAN for printers.
-    // Nudged a few px below the shared IPP Path row so its bevel has
-    // clear space from Query's above it, then restored so it doesn't
-    // shift every row below.
+    // Discover button - shares the Printer IP/Host row in the compact layout.
+    // Preserve the previous TopEdge afterwards so this isolated button does
+    // not affect the state used by later gadget setup.
     {
         UWORD row2_top = ng.ng_TopEdge;
         ng.ng_LeftEdge = 400;
-        ng.ng_TopEdge = row2_top + 4;
-        ng.ng_Width = 90;
-        ng.ng_Height = 14;
+        ng.ng_TopEdge = 21 + topborder;
+        ng.ng_Width = 92;
+        ng.ng_Height = 12;
         ng.ng_GadgetText = (STRPTR)"_Discover";
         ng.ng_GadgetID = GAD_DISCOVER_BUTTON;
         ng.ng_Flags = 0;
@@ -5573,12 +6707,10 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
     // Printer document engine: JPEG, PostScript, PWG Raster, PDF, or
     // Apple Raster (URF).
-    // LeftEdge is nudged right of the other rows' shared 130 - this is the
-    // longest label at this column ("Printer Engine:", 15 chars) and at 130
-    // it renders with no left margin at all, clipping against the window
-    // edge.
-    ng.ng_LeftEdge = 160;
-    ng.ng_TopEdge += 20;
+    // Printer Engine has the longest label in the left column; x=132 keeps
+    // a small left margin while leaving the compact ink panel free at x=320.
+    ng.ng_LeftEdge = 130;
+    ng.ng_TopEdge = 78 + topborder;
     ng.ng_Width = 180;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"Printer Engine:";
@@ -5594,7 +6726,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
     // Enable/disable diagnostic logs and retained rendered jobs
     ng.ng_LeftEdge = 130;
-    ng.ng_TopEdge += 20;
+    ng.ng_TopEdge = 95 + topborder;
     ng.ng_Width = 180;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"Debug:";
@@ -5610,8 +6742,8 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
     // Media dropdown
     ng.ng_LeftEdge = 130;
-    ng.ng_TopEdge += 20;
-    ng.ng_Width = 280;
+    ng.ng_TopEdge = 117 + topborder;
+    ng.ng_Width = 270;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"Media (Tray):";
     ng.ng_GadgetID = GAD_MEDIA_DROPDOWN;
@@ -5629,7 +6761,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
     // Scaling dropdown
     ng.ng_LeftEdge = 130;
-    ng.ng_TopEdge += 20;
+    ng.ng_TopEdge = 135 + topborder;
     ng.ng_Width = 150;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"Scaling:";
@@ -5642,7 +6774,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
     // Quality dropdown
     ng.ng_LeftEdge = 130;
-    ng.ng_TopEdge += 20;
+    ng.ng_TopEdge = 153 + topborder;
     ng.ng_Width = 150;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"Quality:";
@@ -5655,9 +6787,10 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
     // Capture DPI - shares the Quality row and is populated by Query from
     // printer-resolution-supported/PWG raster resolution capabilities.
-    ng.ng_LeftEdge = 400;
+    ng.ng_LeftEdge = 348;
     ng.ng_Width = 100;
     ng.ng_Height = 12;
+    ng.ng_TopEdge = 171 + topborder;
     ng.ng_GadgetText = (STRPTR)"DPI:";
     ng.ng_GadgetID = GAD_RESOLUTION;
     gad = CreateGadget(CYCLE_KIND, gad, &ng,
@@ -5672,7 +6805,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
     // Print Mode radio buttons
     ng.ng_LeftEdge = 130;
-    ng.ng_TopEdge += 20;
+    ng.ng_TopEdge = 171 + topborder;
     ng.ng_Width = 150;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"Print Mode:";
@@ -5693,6 +6826,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     ng.ng_LeftEdge = 350;
     ng.ng_Width = 150;
     ng.ng_Height = 12;
+    ng.ng_TopEdge = 153 + topborder;
     ng.ng_GadgetText = (STRPTR)"Sides:";
     ng.ng_GadgetID = GAD_SIDES;
     gad = CreateGadget(CYCLE_KIND, gad, &ng,
@@ -5707,7 +6841,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
     // Test Print button
     ng.ng_LeftEdge = 10;
-    ng.ng_TopEdge += 30;
+    ng.ng_TopEdge = 198 + topborder;
     ng.ng_Width = 110;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"_Test Print";
@@ -5722,8 +6856,10 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
 
     // Save button - same action as File -> Save Driver Settings.
-    ng.ng_LeftEdge = 280;
+    ng.ng_LeftEdge = 304;
     ng.ng_Width = 90;
+    ng.ng_TopEdge = 198 + topborder;
+    ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"_Save";
     ng.ng_GadgetID = GAD_SAVE_BUTTON;
     gad = CreateGadget(BUTTON_KIND, gad, &ng,
@@ -5735,8 +6871,10 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     }
 
     // Exit button
-    ng.ng_LeftEdge = 380;
+    ng.ng_LeftEdge = 408;
     ng.ng_Width = 90;
+    ng.ng_TopEdge = 198 + topborder;
+    ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"_Exit";
     ng.ng_GadgetID = GAD_EXIT_BUTTON;
     gad = CreateGadget(BUTTON_KIND, gad, &ng,
@@ -5843,6 +6981,20 @@ void process_window_events(struct Window *win) {
                                     mp_copy_file((CONST_STRPTR)src_cache_env, (CONST_STRPTR)dst_cache_env);
                                     mp_copy_file((CONST_STRPTR)src_cache_envarc, (CONST_STRPTR)dst_cache_envarc);
 
+                                    /* Carry the processed printer artwork too. */
+                                    {
+                                        char src_icon_env[96], src_icon_envarc[96];
+                                        char dst_icon_env[96], dst_icon_envarc[96];
+                                        ensure_config_dir((CONST_STRPTR)"ENV:MintPRINT/Art");
+                                        ensure_config_dir((CONST_STRPTR)"ENVARC:MintPRINT/Art");
+                                        unit_icon_cache_path(current_unit_index, FALSE, src_icon_env, sizeof(src_icon_env));
+                                        unit_icon_cache_path(current_unit_index, TRUE, src_icon_envarc, sizeof(src_icon_envarc));
+                                        unit_icon_cache_path(0, FALSE, dst_icon_env, sizeof(dst_icon_env));
+                                        unit_icon_cache_path(0, TRUE, dst_icon_envarc, sizeof(dst_icon_envarc));
+                                        mp_copy_file((CONST_STRPTR)src_icon_env, (CONST_STRPTR)dst_icon_env);
+                                        mp_copy_file((CONST_STRPTR)src_icon_envarc, (CONST_STRPTR)dst_icon_envarc);
+                                    }
+
                                     custom_printf("Unit%d copied to Unit0 - it is now the active printer.\n",
                                                   current_unit_index);
                                     current_unit_index = 0;
@@ -5918,6 +7070,25 @@ void process_window_events(struct Window *win) {
                                 driver_engine_explicit = TRUE;
                                 update_sides_dropdown(win);
                                 update_dpi_dropdown(win);
+                                mp_draw_sides_hint();
+                            }
+                        }
+                        break;
+
+                        case GAD_SIDES:
+                        {
+                            ULONG selected = 0;
+                            GT_GetGadgetAttrs(gad, win, NULL,
+                                              GTCY_Active, (ULONG)&selected,
+                                              TAG_DONE);
+                            if (selected < (ULONG)mp_sides_option_count) {
+                                strncpy(driver_sides_buffer,
+                                        mp_sides_value_storage[selected],
+                                        sizeof(driver_sides_buffer) - 1);
+                                driver_sides_buffer[
+                                    sizeof(driver_sides_buffer) - 1] = '\0';
+                                printf("Sides set to: %s\n", driver_sides_buffer);
+                                mp_draw_sides_hint();
                             }
                         }
                         break;
@@ -6059,6 +7230,9 @@ void process_window_events(struct Window *win) {
                      * something forces a refresh (e.g. Printer Prefs
                      * opening on top of this window and closing again). */
                     redraw_output_box();
+                    mp_draw_marker_strips();
+                    mp_draw_sides_hint();
+                    mp_draw_printer_icon();
                     break;
 
                     case IDCMP_MENUPICK:
@@ -6231,6 +7405,7 @@ int main(void) {
 
     // Calculate top border
     topborder = screen->WBorTop + (screen->Font->ta_YSize + 1);
+    g_topborder = topborder;
     /* Cycle label pointers already target process-lifetime static storage.
      * seed_saved_option_labels() populated those arrays above. */
     // Load the same Unit0 profile used by DEVS:Printers/MintPRINT.
@@ -6263,8 +7438,8 @@ int main(void) {
         WA_AutoAdjust, TRUE,
         WA_Width, 520,
         WA_MinWidth, 520,
-        WA_InnerHeight, 350,
-        WA_MinHeight, 350,
+        WA_InnerHeight, 312,
+        WA_MinHeight, 312,
         WA_DragBar, TRUE,
         WA_DepthGadget, TRUE,
         WA_Activate, TRUE,
@@ -6292,6 +7467,8 @@ int main(void) {
     /* Draw the status box's empty border immediately, rather than leaving
      * it invisible until the first status line happens to draw it. */
     custom_printf("CLEAR");
+    mp_draw_marker_strips();
+    mp_draw_sides_hint();
 
     // Set the initial state of the print mode radio buttons
     struct Gadget *print_mode_gadget = glist;
@@ -6335,6 +7512,32 @@ int main(void) {
         printf("No cached capabilities for this endpoint - press Query\n");
     }
 
+    /* Refresh live printer state (especially ink/toner levels) on startup
+     * when this unit already has a saved endpoint. Reuse exactly the same
+     * Query flow as the button so port fallback, capability updates, cache
+     * refresh and marker redraw behaviour stay in one place. A new/blank
+     * install has an empty ip_buffer and deliberately does nothing here. */
+    if (ip_buffer[0]) {
+        char startup_ip[64];
+        int startup_port = -1;
+        char *startup_response = malloc(MAX_BUFFER);
+
+        if (!startup_response) {
+            printf("Could not allocate startup Query response buffer - skipping live refresh\n");
+        } else {
+            if (parse_ip_and_port(ip_buffer, startup_ip,
+                                  sizeof(startup_ip), &startup_port)) {
+                printf("Refreshing saved printer status on startup: %s\n", ip_buffer);
+                perform_query_flow(window, startup_ip, startup_port,
+                                   startup_response);
+            } else {
+                printf("Saved printer address '%s' is invalid - skipping startup Query\n",
+                       ip_buffer);
+            }
+            free(startup_response);
+        }
+    }
+
     /* check_and_offer_driver_install() above can pop an EasyRequest on top
      * of this window before the event loop below has even started, so any
      * IDCMP_REFRESHWINDOW that dialog's close generates sits unhandled
@@ -6346,6 +7549,8 @@ int main(void) {
      * shown to the user, doesn't depend on that event ever arriving in
      * time. */
     redraw_output_box();
+    mp_draw_marker_strips();
+    mp_draw_sides_hint();
 
     // Process events
     process_window_events(window);
@@ -6364,6 +7569,8 @@ int main(void) {
             GT_ReplyIMsg(imsg);
         }
     }
+
+    mp_free_sides_hint_images();
 
     /* Correct GadTools teardown order: first detach menus and close the
      * window, then free gadgets, then release the label backing memory.
@@ -6421,6 +7628,7 @@ int main(void) {
     }
 
     // Close libraries in reverse order of opening
+    mp_clear_printer_icon();
     if (SocketBase) {
         CloseLibrary(SocketBase);
         SocketBase = NULL;
