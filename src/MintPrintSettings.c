@@ -57,6 +57,7 @@ void custom_printf(const char *format, ...);
 #define printf custom_printf
 
 extern struct GfxBase *GfxBase;
+extern struct ExecBase *SysBase;
 #define MAX_VALUES 32
 #define MAX_ATTR_LEN 64
 #define MAX_BUFFER 256000
@@ -137,9 +138,18 @@ static struct MPTestPrintJob test_print_job;
 
 // Define the USED macro for GCC
 #define USED __attribute__((used))
-#define MINTPRINT_SETTINGS_VERSION "1.2.3"
+#define MINTPRINT_SETTINGS_VERSION "1.2.4"
 #define MINTPRINT_DRIVER_DEST ((CONST_STRPTR)"DEVS:Printers/MintPRINT")
-#define MINTPRINT_DRIVER_SRC  ((CONST_STRPTR)"PROGDIR:MintPRINT")
+
+/* MintPrint Settings now ships as a single drawer containing both bundled
+ * driver builds under Drivers/, and picks the one matching this machine's
+ * printer.device generation automatically - see mp_driver_src_path() near
+ * the other driver-install helpers. The macro is function-like so every
+ * use site (including ones earlier in this file than the function
+ * definition itself) re-evaluates the detection rather than caching a
+ * stale path. */
+#define MINTPRINT_DRIVER_SRC  (mp_driver_src_path())
+static CONST_STRPTR mp_driver_src_path(void);
 
 /* The driver's own build version, read out of its "$VER: MintPRINT
  * <version>.<revision>" string - see mp_read_driver_version() near the
@@ -150,15 +160,6 @@ struct MPDriverVersion {
     UWORD version;
     UWORD revision;
 };
-static BOOL mp_read_driver_version(CONST_STRPTR path, struct MPDriverVersion *out);
-
-/* DEVS:Printers/MintPRINT install helper paths - also read by the test
- * page (mintprint_test_page) to report the installed driver revision. */
-#define MINTPRINT_DRIVER_DEST ((CONST_STRPTR)"DEVS:Printers/MintPRINT")
-#define MINTPRINT_DRIVER_SRC  ((CONST_STRPTR)"PROGDIR:MintPRINT")
-
-/* Forward declaration: defined later, near the other driver-install
- * helpers, but the test page needs it earlier in the file. */
 static BOOL mp_read_driver_version(CONST_STRPTR path, struct MPDriverVersion *out);
 
 /* Visible both to AmigaOS's Version command and in the About requester. */
@@ -3495,10 +3496,57 @@ int convert_to_pwg(unsigned char *rgb, int w, int h, unsigned char **pwg_out, in
 /* ---------------------------------------------------------------------
  * DEVS:Printers/MintPRINT install helper
  *
- * MintPrint Settings ships next to the compiled MintPRINT printer.device
- * driver (PROGDIR:MintPRINT). If the driver is not yet installed in
- * DEVS:Printers/, offer to copy it in and point the user at Printer Prefs.
+ * MintPrint Settings ships as a single drawer holding both bundled driver
+ * builds under PROGDIR:Drivers/ (MintPRINT-V44 and MintPRINT-OS31 - see
+ * docs/OS31_SUPPORT.md for why two builds exist at all) and automatically
+ * picks the one matching this machine's printer.device generation. If the
+ * chosen driver is not yet installed in DEVS:Printers/, offer to copy it
+ * in and point the user at Printer Prefs.
  * ------------------------------------------------------------------- */
+
+/* The extended V44 printer-driver interface (PPCF_EXTENDED / PRTA_NoIO /
+ * PRTA_8BitGuns) shipped with AmigaOS 3.5, whose exec.library is v44.
+ * Every component released together with a given AmigaOS version shares
+ * that version's major library number, so exec.library's own version is a
+ * reliable stand-in for "does this machine's printer.device understand
+ * the V44 tags" without having to open printer.device just to ask. */
+#define MP_EXEC_VERSION_V44 44
+
+static BOOL mp_needs_os31_driver(void) {
+    return SysBase->LibNode.lib_Version < MP_EXEC_VERSION_V44;
+}
+
+/* Friendly label for the About box and install prompts. The exec.library
+ * numbers below are the ones real AmigaOS 3.x releases shipped with; any
+ * exec.library version outside this list (older or a future release) is
+ * still reported by its raw version number rather than guessed at. */
+static void mp_describe_amiga_os(char *buf, size_t bufsize) {
+    UWORD ver = SysBase->LibNode.lib_Version;
+    const char *label;
+
+    switch (ver) {
+        case 39: label = "3.0";      break;
+        case 40: label = "3.1";      break;
+        case 44: label = "3.5";      break;
+        case 45: label = "3.9";      break;
+        case 47: label = "3.2+";     break;
+        default: label = NULL;       break;
+    }
+
+    if (label) {
+        snprintf(buf, bufsize, "AmigaOS %s (exec.library v%u)", label, (unsigned)ver);
+    } else {
+        snprintf(buf, bufsize, "exec.library v%u", (unsigned)ver);
+    }
+}
+
+/* Bundled driver source path, chosen from the two drawers under
+ * PROGDIR:Drivers/ - see mp_needs_os31_driver() above. */
+static CONST_STRPTR mp_driver_src_path(void) {
+    return mp_needs_os31_driver()
+        ? (CONST_STRPTR)"PROGDIR:Drivers/MintPRINT-OS31/MintPRINT"
+        : (CONST_STRPTR)"PROGDIR:Drivers/MintPRINT-V44/MintPRINT";
+}
 
 static BOOL mp_file_exists(CONST_STRPTR name) {
     BPTR lock = Lock(name, ACCESS_READ);
@@ -3667,10 +3715,15 @@ static BOOL mp_driver_version_newer(const struct MPDriverVersion *a,
 
 static void show_about(struct Window *win) {
     struct EasyStruct es;
-    char msg[512];
+    char msg[640];
     char installed_str[32];
     char bundled_str[32];
+    char os_desc[64];
     struct MPDriverVersion installed_ver, bundled_ver;
+    CONST_STRPTR src_path = MINTPRINT_DRIVER_SRC;
+    CONST_STRPTR variant_name = mp_needs_os31_driver() ? "OS3.0/3.1 classic" : "V44+";
+
+    mp_describe_amiga_os(os_desc, sizeof(os_desc));
 
     if (mp_read_driver_version(MINTPRINT_DRIVER_DEST, &installed_ver)) {
         snprintf(installed_str, sizeof(installed_str), "v%u.%u",
@@ -3678,7 +3731,7 @@ static void show_about(struct Window *win) {
     } else {
         strcpy(installed_str, "not installed / unknown");
     }
-    if (mp_read_driver_version(MINTPRINT_DRIVER_SRC, &bundled_ver)) {
+    if (mp_read_driver_version(src_path, &bundled_ver)) {
         snprintf(bundled_str, sizeof(bundled_str), "v%u.%u",
                  (unsigned)bundled_ver.version, (unsigned)bundled_ver.revision);
     } else {
@@ -3688,13 +3741,16 @@ static void show_about(struct Window *win) {
     snprintf(msg, sizeof(msg),
         "MintPRINT v" MINTPRINT_SETTINGS_VERSION
         " - IPP/AirPrint printing for AmigaOS\n\n"
+        "Detected: %s\n"
+        "Selected driver: %s (%s)\n\n"
         "Installed driver (DEVS:Printers/MintPRINT): %s\n"
-        "Bundled driver (next to this program): %s\n\n"
+        "Bundled driver (%s): %s\n\n"
         "Bug reports and source:\n"
         "github.com/boingball/MintPRINT\n\n"
         "If this saved you a trip to the printer shop:\n"
         "buymeacoffee.com/boingball",
-        installed_str, bundled_str);
+        os_desc, variant_name, src_path,
+        installed_str, src_path, bundled_str);
 
     es.es_StructSize = sizeof(struct EasyStruct);
     es.es_Flags = 0;
@@ -3706,12 +3762,20 @@ static void show_about(struct Window *win) {
 
 static void check_and_offer_driver_install(struct Window *win) {
     struct EasyStruct es;
-    char msg[192];
+    char msg[256];
+    char os_desc[64];
     struct MPDriverVersion src_ver, dest_ver;
     BOOL have_src_ver, have_dest_ver;
+    CONST_STRPTR src_path = MINTPRINT_DRIVER_SRC;
+    CONST_STRPTR variant_name = mp_needs_os31_driver() ? "OS3.0/3.1 classic" : "V44+";
 
-    if (!mp_file_exists(MINTPRINT_DRIVER_SRC)) {
-        printf("MintPRINT driver not found next to this program; skipping install check.\n");
+    mp_describe_amiga_os(os_desc, sizeof(os_desc));
+    printf("Detected %s - using the %s driver (%s).\n", os_desc, variant_name, src_path);
+
+    if (!mp_file_exists(src_path)) {
+        printf("Bundled driver not found at %s; skipping install check.\n", src_path);
+        printf("Check that both Drivers/MintPRINT-V44/ and Drivers/MintPRINT-OS31/\n");
+        printf("are present next to this program.\n");
         return;
     }
 
@@ -3728,7 +3792,7 @@ static void check_and_offer_driver_install(struct Window *win) {
          * unreadable because it's older, not because it's current. Only
          * skip the prompt when the installed version is actually known
          * and already at least as new as the bundled one. */
-        have_src_ver = mp_read_driver_version(MINTPRINT_DRIVER_SRC, &src_ver);
+        have_src_ver = mp_read_driver_version(src_path, &src_ver);
         have_dest_ver = mp_read_driver_version(MINTPRINT_DRIVER_DEST, &dest_ver);
 
         if (!have_src_ver) {
@@ -3740,20 +3804,22 @@ static void check_and_offer_driver_install(struct Window *win) {
 
         if (have_dest_ver) {
             snprintf(msg, sizeof(msg),
-                     "A newer MintPRINT driver is available\n(installed: v%u.%u, bundled: v%u.%u).\nUpdate DEVS:Printers/MintPRINT now?",
+                     "A newer MintPRINT driver is available\n(installed: v%u.%u, bundled: v%u.%u).\n\nDetected %s: using the %s driver.\nUpdate DEVS:Printers/MintPRINT now?",
                      (unsigned)dest_ver.version, (unsigned)dest_ver.revision,
-                     (unsigned)src_ver.version, (unsigned)src_ver.revision);
+                     (unsigned)src_ver.version, (unsigned)src_ver.revision,
+                     os_desc, variant_name);
         } else {
             snprintf(msg, sizeof(msg),
-                     "A newer MintPRINT driver is available\n(installed driver predates version tracking, bundled: v%u.%u).\nUpdate DEVS:Printers/MintPRINT now?",
-                     (unsigned)src_ver.version, (unsigned)src_ver.revision);
+                     "A newer MintPRINT driver is available\n(installed driver predates version tracking, bundled: v%u.%u).\n\nDetected %s: using the %s driver.\nUpdate DEVS:Printers/MintPRINT now?",
+                     (unsigned)src_ver.version, (unsigned)src_ver.revision,
+                     os_desc, variant_name);
         }
         es.es_TextFormat = (UBYTE *)msg;
         es.es_GadgetFormat = (UBYTE *)"Update|Later";
 
         if (!EasyRequest(win, &es, NULL)) return;
 
-        if (mp_copy_file(MINTPRINT_DRIVER_SRC, MINTPRINT_DRIVER_DEST)) {
+        if (mp_copy_file(src_path, MINTPRINT_DRIVER_DEST)) {
             printf("Updated MintPRINT driver to v%u.%u in DEVS:Printers/MintPRINT\n",
                    (unsigned)src_ver.version, (unsigned)src_ver.revision);
             printf("Reboot (or otherwise unload the old driver segment) before printing.\n");
@@ -3769,11 +3835,14 @@ static void check_and_offer_driver_install(struct Window *win) {
         return;
     }
 
-    es.es_TextFormat = (UBYTE *)"The MintPRINT printer driver is not installed in\nDEVS:Printers/. Install it now?";
+    snprintf(msg, sizeof(msg),
+             "The MintPRINT printer driver is not installed in\nDEVS:Printers/.\n\nDetected %s: install the %s driver now?",
+             os_desc, variant_name);
+    es.es_TextFormat = (UBYTE *)msg;
     es.es_GadgetFormat = (UBYTE *)"Install|Cancel";
 
     if (EasyRequest(win, &es, NULL)) {
-        if (mp_copy_file(MINTPRINT_DRIVER_SRC, MINTPRINT_DRIVER_DEST)) {
+        if (mp_copy_file(src_path, MINTPRINT_DRIVER_DEST)) {
             printf("Installed MintPRINT driver to DEVS:Printers/MintPRINT\n");
 
             es.es_TextFormat = (UBYTE *)"MintPRINT driver installed.\n\nOpen Printer preferences now and select\n'MintPRINT' as your printer, then save.\n\nReboot before printing - a driver segment already\nresident in memory will not pick up this file until then.";

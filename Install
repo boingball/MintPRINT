@@ -1,0 +1,150 @@
+; MintPRINT Installer script
+;
+; Alternative to running MintPrintSettings itself for the initial install:
+; both paths do the same auto-detection, so use whichever you prefer.
+;
+; This archive ships ONE application drawer (MintPRINT/) containing
+; MintPrintSettings plus BOTH bundled printer.device driver builds, under
+; MintPRINT/Drivers/:
+;
+;   Drivers/MintPRINT-V44/MintPRINT   - AmigaOS 3.2, 3.5, 3.9 (V44+)
+;   Drivers/MintPRINT-OS31/MintPRINT  - AmigaOS 3.0, 3.1 (classic pre-V44)
+;
+; See docs/OS31_SUPPORT.md in the source repository for why two driver
+; builds exist at all. This script detects which one this machine needs
+; from exec.library's own version (every AmigaOS release bumps exec.library
+; and printer.device together, so exec's version is a reliable stand-in -
+; see mp_needs_os31_driver() in src/MintPrintSettings.c), offers that as
+; the default choice, and lets you override it if you know better.
+
+(set #mp-appname "MintPRINT")
+
+(set #exec-version (getversion "exec.library"))
+(set #is-v44 (>= #exec-version (* 44 65536)))
+
+(set #os-hint
+    (if #is-v44
+        "That looks like a V44-capable AmigaOS (3.2, 3.5, 3.9 or later) - the normal driver build should be correct."
+        "That looks like AmigaOS 3.0 or 3.1 - the classic pre-V44 driver build should be correct."
+    )
+)
+
+(message
+    "MintPRINT setup\n\n"
+    "Detected exec.library v" #exec-version " on this system.\n\n"
+    #os-hint
+)
+
+(set #driver-choice
+    (askchoice
+        (prompt
+            "What AmigaOS / printer.device generation is this machine "
+            "actually running? The option below was auto-detected from "
+            "exec.library's version - change it only if you know it's "
+            "wrong (for example, a 3.1 system with a hand-updated "
+            "printer.device)."
+        )
+        (help
+            "MintPRINT needs different driver builds for the classic "
+            "pre-V44 printer.device (AmigaOS 3.0/3.1) and the newer V44+ "
+            "extended interface (AmigaOS 3.2, 3.5, 3.9 and later). "
+            "Picking the wrong one will still install, but the driver "
+            "will not talk to printer.device correctly."
+        )
+        (choices
+            "AmigaOS 3.2 / 3.5 / 3.9 or later (V44+ driver)"
+            "AmigaOS 3.0 / 3.1 (classic driver)"
+        )
+        (default (if #is-v44 0 1))
+    )
+)
+
+(set #driver-subdir
+    (if (= #driver-choice 0) "Drivers/MintPRINT-V44" "Drivers/MintPRINT-OS31")
+)
+(set #driver-label
+    (if (= #driver-choice 0) "V44+" "OS3.0/3.1 classic")
+)
+(set #driver-src
+    (tackon #mp-appname (tackon #driver-subdir "MintPRINT"))
+)
+
+(set #dest
+    (askdir
+        (prompt "Where should the MintPRINT drawer (MintPrintSettings, "
+                "guide and artwork) be installed?")
+        (help "Pick any drawer you like - Workbench:Utilities is a "
+              "reasonable default. The printer.device driver itself "
+              "always installs to DEVS:Printers/, regardless of this "
+              "choice.")
+        (default "SYS:Utilities")
+        (newpath)
+    )
+)
+
+(set #appdir (tackon #dest #mp-appname))
+
+(makedir #appdir)
+
+(copyfiles
+    (source (tackon #mp-appname "MintPrintSettings"))
+    (dest #appdir)
+    (infos)
+)
+
+(copyfiles
+    (source (tackon #mp-appname "MintPrintSettings.guide"))
+    (dest #appdir)
+)
+
+(copyfiles
+    (source (tackon #mp-appname "Art"))
+    (dest (tackon #appdir "Art"))
+    (all)
+)
+
+(if (exists "MintPRINT.info")
+    (copyfiles
+        (source "MintPRINT.info")
+        (dest #dest)
+    )
+)
+
+; Only replace an existing DEVS:Printers/MintPRINT if this archive's copy
+; is actually newer - getversion reads the same "$VER: MintPRINT
+; <version>.<revision>" string MintPrint Settings itself compares before
+; offering to update, so a machine that already has a newer driver
+; (installed by hand, or by a later archive) is left alone here too.
+(set #driver-dest-ver (getversion "DEVS:Printers/MintPRINT"))
+(set #driver-src-ver (getversion #driver-src))
+
+(if (OR (< #driver-dest-ver 0) (> #driver-src-ver #driver-dest-ver))
+    (
+        (copyfiles
+            (source #driver-src)
+            (dest "DEVS:Printers")
+            (newname "MintPRINT")
+        )
+        (message
+            "Installed the " #driver-label " driver to "
+            "DEVS:Printers/MintPRINT.\n\n"
+            "Reboot before printing - a driver segment already resident "
+            "in memory will not pick up this file until then."
+        )
+    )
+    (message
+        "DEVS:Printers/MintPRINT is already the same version or newer - "
+        "leaving it alone."
+    )
+)
+
+(message
+    "MintPRINT installed to " #appdir ".\n\n"
+    "Next steps:\n"
+    "1. Reboot, if the driver above was just installed or updated.\n"
+    "2. Open Prefs/Printer and select MintPRINT as the printer.\n"
+    "3. Run MintPrintSettings from " #appdir " to enter your printer's "
+    "IP/host and IPP path, then Query and Save."
+)
+
+(exit)

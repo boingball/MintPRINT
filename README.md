@@ -28,6 +28,36 @@ printers (JPEG, PostScript, PWG Raster, or PDF; no driver-specific software
 on the printer side) straight from Amiga applications, via a real `DEVS:Printers/`
 printer.device driver plus a GUI setup tool.
 
+## What's new in 1.2.4
+
+MintPRINT 1.2.4 is a packaging/build change: one distributable drawer
+instead of two, with automatic AmigaOS-version detection choosing the
+right driver. Driver behaviour is unchanged (still driver revision 41.1).
+
+- **One MintPRINT drawer for every supported AmigaOS release.** The
+  separate `MintPRINT` / `MintPRINT-OS31` release bundles are merged into a
+  single `MintPRINT/` drawer, with both compiled drivers staged under
+  `Drivers/MintPRINT-V44/` (AmigaOS 3.2, 3.5, 3.9+) and
+  `Drivers/MintPRINT-OS31/` (AmigaOS 3.0/3.1 classic) - see
+  `docs/OS31_SUPPORT.md`. There is no longer a "which archive do I
+  download" question.
+- **Automatic driver selection.** MintPrint Settings now reads
+  `SysBase->LibNode.lib_Version` at startup (`mp_needs_os31_driver()` /
+  `mp_driver_src_path()` in `src/MintPrintSettings.c`) and installs or
+  offers to update whichever `Drivers/MintPRINT-<variant>/MintPRINT` this
+  machine's printer.device generation actually needs. The detected AmigaOS
+  version and chosen driver are shown in the install/update prompts and the
+  About box (`mp_describe_amiga_os()`), so the choice is never a silent
+  guess.
+- **New `Install` script.** A classic AmigaDOS Installer script at the
+  repository root offers the same auto-detect-then-confirm flow (asking
+  "what AmigaOS/printer.device generation is this?" with the detected
+  answer pre-selected) for anyone who prefers that install path over
+  running MintPrintSettings first.
+- `make release` now builds both drivers and stages the single combined
+  bundle in one step; the old separate `make release31`/`make release-all`
+  targets are gone since there is only one bundle to build.
+
 ## What's new in 1.2.3
 
 MintPRINT 1.2.3 brings back printer ink/toner status in MintPrint Settings'
@@ -202,10 +232,15 @@ still selected by default where available.
 - **`src/MintPrintSettings.c`** - MintPrint Settings, the GUI setup/test
   front-end. Discovers printers on the LAN (SSDP + mDNS), queries IPP
   capabilities, supports multiple saved printer profiles (Unit0-7), offers
-  capability-gated one-sided/duplex choices, offers to install/update the
-  driver, and can send a test page. Its **Help** menu opens
+  capability-gated one-sided/duplex choices, detects this machine's AmigaOS/
+  printer.device generation to pick the matching bundled driver, offers to
+  install/update it, and can send a test page. Its **Help** menu opens
   `docs/MintPrintSettings.guide`, an in-app AmigaGuide walkthrough for new
   users. See `docs/MINTPRINT_PREFS.md`.
+- **`Install`** - a classic AmigaDOS Installer script, an alternative
+  install path to running `MintPrintSettings` directly. Does the same
+  AmigaOS-version detection and lets you confirm or override the driver
+  choice before copying anything.
 - **`windows_ipp_probe.py`** - a small Windows-runnable diagnostic script
   for isolating printer-side vs Amiga-side IPP issues without needing
   Amiga-specific tooling. Useful when reporting a printer MintPRINT
@@ -219,12 +254,24 @@ still selected by default where available.
 
 ## Installing
 
-Run `MintPrintSettings` - it detects a missing or out-of-date
-`DEVS:Printers/MintPRINT` and offers to install/update it (copying from
-next to itself). **Reboot after any driver install or update** - a driver
-segment already resident in memory will not pick up a replaced file until
-then. Then open `Prefs/Printer`, select `MintPRINT`, and configure your
-printer's IP/host, IPP path, and document format in MintPrint Settings.
+MintPRINT ships as one drawer (`MintPRINT/`) containing `MintPrintSettings`
+and both driver builds under `Drivers/` - `Drivers/MintPRINT-V44/` for
+AmigaOS 3.2, 3.5, 3.9 (and later), `Drivers/MintPRINT-OS31/` for the
+classic pre-V44 AmigaOS 3.0/3.1 build (see `docs/OS31_SUPPORT.md`).
+
+Run `MintPrintSettings` - it detects which driver this machine needs from
+exec.library's version, tells you what it found, and offers to
+install/update a missing or out-of-date `DEVS:Printers/MintPRINT` from the
+matching `Drivers/` subdrawer. **Reboot after any driver install or
+update** - a driver segment already resident in memory will not pick up a
+replaced file until then. Then open `Prefs/Printer`, select `MintPRINT`,
+and configure your printer's IP/host, IPP path, and document format in
+MintPrint Settings.
+
+Prefer a classic Amiga install experience instead? Run the `Install`
+script at the top of the archive - it offers the same auto-detected driver
+choice (with the option to override it) through the standard AmigaOS
+Installer.
 
 ## Supported document formats
 
@@ -245,14 +292,18 @@ Requires `m68k-amigaos-gcc` (Bebbo's cross-toolchain) on `PATH`, or set
 `CROSS=` to a different prefix.
 
     make gui       # MintPrintSettings
-    make driver    # build/driver/MintPRINT
-    make release   # both, staged into release/MintPRINT/ ready to distribute
+    make driver    # build/driver/MintPRINT (V44+ build)
+    make driver31  # build/driver31/MintPRINT (AmigaOS 3.0/3.1 classic build)
+    make release   # all three, staged into release/MintPRINT/ ready to distribute
     make clean
 
-`make release` does not generate Workbench icons - add
-`MintPrintSettings.info` / `MintPRINT.info` inside `release/MintPRINT/`,
-and a drawer icon matching the folder's name in its parent directory,
-before distributing.
+`make release` stages one drawer with both driver builds under
+`Drivers/MintPRINT-V44/` and `Drivers/MintPRINT-OS31/`, plus the `Install`
+script and Aminet readme next to it. See `docs/OS31_SUPPORT.md` for the two
+driver builds and `mp_driver_src_path()` in `src/MintPrintSettings.c` for
+how the right one gets chosen at runtime. Workbench icons for
+`MintPrintSettings` and the release drawer itself are copied in
+automatically from `art/` if present there.
 
 ## Reporting a problem
 
@@ -273,7 +324,7 @@ be added with its AmigaOS version, TCP/IP stack, engine and exact print options.
 
 ## Status
 
-MintPRINT is now a real, working app: version **1.2.3** GUI with **driver
+MintPRINT is now a real, working app: version **1.2.4** GUI with **driver
 revision 41.1**, with multiple printers confirmed fully working over IPP/AirPrint
 from real Amiga hardware. It's still actively developed and not every printer
 is confirmed yet, so check the

@@ -154,22 +154,50 @@ when the printer advertises it.
 
 ## Driver install helper
 
-MintPrint Settings expects the compiled driver binary to sit next to it as
-`PROGDIR:MintPRINT` (i.e. ship `MintPrintSettings` and the driver binary in
-the same drawer). On startup, if `DEVS:Printers/MintPRINT` does not exist:
+MintPRINT now ships as a single drawer holding `MintPrintSettings` plus
+*both* compiled driver builds under `PROGDIR:Drivers/`:
 
-1. If `PROGDIR:MintPRINT` is also missing, a note is logged and startup
-   continues normally (nothing to offer to install).
-2. Otherwise the user is asked whether to install it. On confirmation the
-   driver is copied to `DEVS:Printers/MintPRINT`.
+- `Drivers/MintPRINT-V44/MintPRINT` - AmigaOS 3.2, 3.5, 3.9 (V44+
+  printer.device).
+- `Drivers/MintPRINT-OS31/MintPRINT` - AmigaOS 3.0, 3.1 (classic pre-V44
+  printer.device). See `docs/OS31_SUPPORT.md` for why this second build
+  exists at all.
+
+On startup, `mp_needs_os31_driver()` (`src/MintPrintSettings.c`) checks
+`SysBase->LibNode.lib_Version` - AmigaOS releases bump exec.library and
+printer.device together, so exec's own version reliably indicates whether
+this machine's printer.device understands the V44 tags - and
+`mp_driver_src_path()` picks the matching drawer above as the bundled
+driver source for the rest of this flow. `mp_describe_amiga_os()` turns
+that same version into a friendly label (e.g. "AmigaOS 3.1 (exec.library
+v40)") shown in the install/update prompts and the About box, so the user
+can see what was detected and why a given driver was chosen.
+
+If `DEVS:Printers/MintPRINT` does not exist:
+
+1. If the detected driver's bundled copy is also missing (i.e. its
+   `Drivers/MintPRINT-<variant>/` drawer isn't present), a note is logged
+   and startup continues normally (nothing to offer to install).
+2. Otherwise the user is asked whether to install it, with the detected
+   AmigaOS version and chosen driver variant named in the prompt. On
+   confirmation the driver is copied to `DEVS:Printers/MintPRINT`.
 3. On success, the user is asked whether to open Printer preferences now.
    Confirming launches `SYS:Prefs/Printer` (`SystemTags(..., SYS_Asynch,
    TRUE, ...)`) so they can select **MintPRINT** as their printer driver and
    save.
 
+If `DEVS:Printers/MintPRINT` already exists, the same detection picks which
+bundled copy to compare against it, and the existing newer-version check
+(comparing `$VER: MintPRINT` strings) decides whether to offer an update.
+
 This only ever offers to *install* the driver; selecting it in Printer
 preferences and saving remains a manual step the user must do themselves; is
 not something Preferences can do automatically.
+
+A standalone `Install` script (classic AmigaDOS Installer format) at the
+repository root does the equivalent auto-detect-then-choose flow for users
+who prefer that install path over running MintPrintSettings first; see the
+comments at the top of that script.
 
 ## Capability cache
 
