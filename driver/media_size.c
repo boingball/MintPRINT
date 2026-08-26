@@ -220,3 +220,23 @@ unsigned long mp_text_top_margin_rows(unsigned long top_line_parameter,
 
     return (units_216ths * dpi + 108UL) / 216UL;
 }
+
+unsigned long mp_wordsworth_top_margin_rows(unsigned long form_length_lines,
+                                            unsigned long target_rows,
+                                            unsigned long dpi)
+{
+    unsigned long form_rows, difference, tolerance;
+
+    if (!form_length_lines || !target_rows || !dpi ||
+        form_length_lines > 0xffffffffUL / dpi)
+        return 0;
+
+    form_rows = (form_length_lines * dpi + 3UL) / 6UL;
+    difference = form_rows >= target_rows
+        ? form_rows - target_rows : target_rows - form_rows;
+    tolerance = dpi / 12UL; /* one twelfth of an inch */
+    if (difference > tolerance)
+        return 0;
+
+    return dpi / 2UL;
+}

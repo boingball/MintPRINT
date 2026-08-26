@@ -141,10 +141,13 @@ and keeps the media-height split as a fallback - see `docs/URF_ENGINE.md`'s
 "Duplex and strip-printing accumulation" section for the full mechanism.
 The rev 36 physical retest then showed that the 443 missing physical rows were
 all appended at the bottom: pagination was correct, but the configured
-0.50-inch top border was lost. Revision 37 retains printer.device's standard
-`aSTBM` top/bottom-margin command and converts its top line and VMI into
-leading raster rows (150 rows for 0.50 inch at 300 DPI); final media padding
-continues to supply the remaining bottom border.
+0.50-inch top border was lost. Revision 37 added support and diagnostics for
+printer.device's standard `aSTBM` command, but its real trace proved Wordsworth
+does not send that command: it clears margins, sets a 70-line A4 form, then
+sends only the 3062-row printable raster. Revision 38 recognises that matching
+form-length/physical-media strip signature and restores the documented
+0.50-inch top border (150 rows at 300 DPI); final media padding continues to
+supply the remaining bottom border.
 
 ### Brother HL-L2350DW
 
@@ -415,12 +418,12 @@ graphics dumps to assemble one physical page.
 
 ### Wordworth 7 Print Setup
 
-Use driver revision **37** or newer for the current strip-printing path.
+Use driver revision **38** or newer for the current strip-printing path.
 Revision 16 first preserved Wordworth's strip printing as one media-sized PWG
 page and prevented trailing narrow graphics dumps from becoming a second IPP
-job. Revisions 36 and 37 additionally separate logical pages before physical
-media padding and restore the standard command-stream top border ahead of the
-printable raster.
+job. Revision 36 additionally separates logical pages before physical media
+padding; revision 38 restores the configured, documented Wordsworth top border
+when the application supplies only its form-length signature.
 
 Set Wordworth 7's **Print Setup** window to:
 

@@ -42,7 +42,7 @@
  * exactly which build produced it, rather than relying on whoever's
  * reading it to separately check About or remember what they last
  * copied to DEVS:Printers/. */
-#define MP_DRIVER_REV 37
+#define MP_DRIVER_REV 38
 
 struct ExecBase *SysBase = NULL;
 struct DosLibrary *DOSBase = NULL;
@@ -169,6 +169,8 @@ static ULONG g_current_special = 0;
  * them to device-resolution rows. */
 static ULONG g_text_top_margin_line = 0;
 static ULONG g_text_margin_vmi = 0;
+static ULONG g_text_form_length_lines = 0;
+static BOOL g_text_margins_cleared = FALSE;
 static BOOL g_sizing_pass = FALSE;
 
 static BOOL g_job_open = FALSE;
@@ -1354,6 +1356,8 @@ int PRT_STDARGS DriverOpen(struct IORequest *ior)
     g_current_special = 0;
     g_text_top_margin_line = 0;
     g_text_margin_vmi = 0;
+    g_text_form_length_lines = 0;
+    g_text_margins_cleared = FALSE;
     g_page_had_noformfeed = FALSE;
     g_discard_aux_band = FALSE;
     g_discard_aux_band_has_ink = FALSE;
@@ -1463,6 +1467,7 @@ LONG PRT_STDARGS DoSpecial(UWORD *command, UBYTE output_buffer[],
     if (command && *command == aSTBM && params && current_line_spacing) {
         g_text_top_margin_line = (ULONG)((UBYTE *)params)[0];
         g_text_margin_vmi = (ULONG)(UBYTE)*current_line_spacing;
+        g_text_margins_cleared = FALSE;
         mp_log_3("Text page margins topLine/VMI/bottomLine",
                  (LONG)g_text_top_margin_line,
                  (LONG)g_text_margin_vmi,
@@ -1470,10 +1475,18 @@ LONG PRT_STDARGS DoSpecial(UWORD *command, UBYTE output_buffer[],
     } else if (command && *command == aCAM) {
         g_text_top_margin_line = 0;
         g_text_margin_vmi = 0;
+        g_text_margins_cleared = TRUE;
         mp_log_text("Text page margins cleared");
+    } else if (command && *command == aSLPP && params) {
+        g_text_form_length_lines = (ULONG)((UBYTE *)params)[0];
+        mp_log_3("Text form length lines/VMI/marginsCleared",
+                 (LONG)g_text_form_length_lines,
+                 current_line_spacing ?
+                     (LONG)(UBYTE)*current_line_spacing : -1,
+                 g_text_margins_cleared ? 1 : 0);
     } else if (command &&
                (*command == aTMS || *command == aBMS ||
-                *command == aSLPP || *command == aPERF ||
+                *command == aPERF ||
                 *command == aPERF0)) {
         mp_log_3("Text page command id/param0/VMI",
                  (LONG)*command,
@@ -1687,9 +1700,17 @@ LONG PRT_STDARGS Render(LONG ct, LONG x, LONG y, LONG status, ...)
 
             leading_height = g_leading_aux_height;
             if (g_current_special & SPECIAL_NOFORMFEED) {
+                ULONG target_height = mp_media_target_height(
+                    g_config.media, g_page_width,
+                    g_config.resolution ? g_config.resolution : 300UL);
                 ULONG command_margin = mp_text_top_margin_rows(
                     g_text_top_margin_line, g_text_margin_vmi,
                     g_config.resolution ? g_config.resolution : 300UL);
+
+                if (!command_margin && g_text_margins_cleared)
+                    command_margin = mp_wordsworth_top_margin_rows(
+                        g_text_form_length_lines, target_height,
+                        g_config.resolution ? g_config.resolution : 300UL);
 
                 /* A narrow leading control band and aSTBM can describe the
                  * same physical whitespace. Use the larger observation,
@@ -1698,10 +1719,10 @@ LONG PRT_STDARGS Render(LONG ct, LONG x, LONG y, LONG status, ...)
                 if (command_margin > leading_height)
                     leading_height = command_margin;
                 if (command_margin > 0)
-                    mp_log_3("Restoring command top margin rows/line/VMI",
+                    mp_log_3("Restoring top margin rows/line/formLength",
                              (LONG)command_margin,
                              (LONG)g_text_top_margin_line,
-                             (LONG)g_text_margin_vmi);
+                             (LONG)g_text_form_length_lines);
             }
             if (leading_height > 0xffffffffUL - g_page_height) {
                 mp_log_text("Leading strip whitespace height overflow");

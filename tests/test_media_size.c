@@ -150,6 +150,21 @@ int main(void)
     assert(3505UL -
            (mp_text_top_margin_rows(4UL, 36UL, 300UL) + 3062UL) == 293UL);
 
+    /* The rev37 trace proved Wordsworth does not send aSTBM: it sends aCAM
+     * followed by aSLPP 70, then a 3062-row printable raster. Seventy lines
+     * at 6 LPI is 3500 rows at 300 DPI, matching the width-derived 3505-row
+     * A4 sheet within rounding. Restore the documented 0.50-inch top border
+     * only for that matching form/media signature. */
+    assert(mp_wordsworth_top_margin_rows(70UL, 3505UL, 300UL) == 150UL);
+    assert(mp_wordsworth_top_margin_rows(66UL, 3300UL, 300UL) == 150UL);
+    assert(mp_wordsworth_top_margin_rows(70UL, 7010UL, 600UL) == 300UL);
+    assert(mp_wordsworth_top_margin_rows(70UL, 3505UL, 300UL) + 3062UL ==
+           3212UL);
+    assert(!mp_wordsworth_top_margin_rows(70UL, 3300UL, 300UL));
+    assert(!mp_wordsworth_top_margin_rows(0UL, 3505UL, 300UL));
+    assert(!mp_wordsworth_top_margin_rows(70UL, 0UL, 300UL));
+    assert(!mp_wordsworth_top_margin_rows(70UL, 3505UL, 0UL));
+
     logical_rows = 0;
     logical_pages = 0;
     for (row = 0; row < 31UL; ++row) {

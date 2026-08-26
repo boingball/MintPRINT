@@ -86,4 +86,14 @@ unsigned long mp_text_top_margin_rows(unsigned long top_line_parameter,
                                       unsigned long vmi_216ths,
                                       unsigned long dpi);
 
+/* Wordsworth clears printer margins and sends only the complete form length
+ * before its NOFORMFEED raster strips; its separate Print Borders values are
+ * not present in IODRPReq or the command stream. Recognise that form-length
+ * signature only when it agrees with the configured physical page at the
+ * standard six lines per inch, then restore the documented 0.50-inch top
+ * border. Returns zero when the form and media do not agree. */
+unsigned long mp_wordsworth_top_margin_rows(unsigned long form_length_lines,
+                                            unsigned long target_rows,
+                                            unsigned long dpi);
+
 #endif
