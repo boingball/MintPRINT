@@ -96,4 +96,10 @@ unsigned long mp_wordsworth_top_margin_rows(unsigned long form_length_lines,
                                             unsigned long target_rows,
                                             unsigned long dpi);
 
+/* Convert accumulated printer vertical-motion units (VMI is 1/216 inch)
+ * into device-resolution rows. Used for aIND, aNEL and literal line feeds
+ * observed before a graphics dump. */
+unsigned long mp_vertical_advance_rows(unsigned long units_216ths,
+                                       unsigned long dpi);
+
 #endif

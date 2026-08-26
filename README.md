@@ -30,15 +30,19 @@ printer.device driver plus a GUI setup tool.
 
 ## What's new in 1.2.1
 
-MintPRINT 1.2.1 currently carries **driver revision 38**, adding a new engine
+MintPRINT 1.2.1 currently carries **driver revision 39**, adding a new engine
 and the following Wordsworth strip-printing fixes:
 
-- **Wordsworth page borders** (driver rev 38). A rev 37 trace proved that
+- **Wordsworth page borders** (driver rev 39). The driver now processes and
+  accumulates pre-dump `aIND`, `aNEL` and literal line-feed movement using
+  printer.device's 1/216-inch VMI, then emits the corresponding leading white
+  raster rows. A rev 37 trace had proved that
   Wordsworth clears margins and sends only a 70-line form length, not its
-  separate Print Borders values. The driver now recognises that form-length/
-  physical-media strip signature and restores the documented 0.50-inch top
-  border: 150 leading rows at 300 DPI. The media-height finalizer supplies the
-  remaining bottom border. Explicit standard `aSTBM` margins remain supported.
+  separate Print Borders values through the margin commands; rev 38 therefore
+  added a form-length/physical-media fallback which restores the documented
+  0.50-inch top border (150 rows at 300 DPI) when no real vertical movement or
+  explicit `aSTBM` placement appears. The media-height finalizer supplies the
+  remaining bottom border.
 - **Wordsworth logical page boundaries** (driver rev 36). A terminal short
   strip now ends the application's printable page before the physical-media
   padding, preventing the first 443 rows of the next page from being pulled

@@ -71,6 +71,8 @@ extern LONG PRT_STDARGS DoSpecial(UWORD *command, UBYTE output_buffer[],
                                   BYTE *current_line_position,
                                   BYTE *current_line_spacing,
                                   BYTE *crlf_flag, STRPTR params);
+extern VOID MintPRINTNoteVerticalAdvance(ULONG vmi_216ths);
+extern VOID MintPRINTResetVerticalAdvances(void);
 
 /* Required by proto/graphics.h library stubs.  Text output opens the library
  * only while DriverClose is rasterising captured PRT: data. */
@@ -184,6 +186,7 @@ LONG PRT_STDARGS ConvFunc(UBYTE *buf, UBYTE c, LONG crlf_flag)
     }
 
     if (c == '\n') {
+        MintPRINTNoteVerticalAdvance(0);
         if (g_text_last_was_cr) {
             g_text_last_was_cr = FALSE;
             return 0;
@@ -193,6 +196,9 @@ LONG PRT_STDARGS ConvFunc(UBYTE *buf, UBYTE c, LONG crlf_flag)
     }
 
     g_text_last_was_cr = FALSE;
+
+    if (c == '\f')
+        MintPRINTResetVerticalAdvances();
 
     if (c == '\f' || c == '\t' || (c >= 0x20 && c != 0x7f)) {
         if (mp_text_append(c) && c != '\f' && c != '\t' && c != ' ')
@@ -212,6 +218,9 @@ LONG PRT_STDARGS TextDoSpecial(UWORD *command, UBYTE output_buffer[],
                                BYTE *crlf_flag, STRPTR params)
 {
     if (command && (*command == aIND || *command == aNEL)) {
+        ULONG vmi = current_line_spacing ?
+                    (ULONG)(UBYTE)*current_line_spacing : 0UL;
+        MintPRINTNoteVerticalAdvance(vmi);
         g_text_last_was_cr = FALSE;
         if (!g_text_capture_failed)
             mp_text_append('\n');

@@ -42,7 +42,7 @@
  * exactly which build produced it, rather than relying on whoever's
  * reading it to separately check About or remember what they last
  * copied to DEVS:Printers/. */
-#define MP_DRIVER_REV 38
+#define MP_DRIVER_REV 39
 
 struct ExecBase *SysBase = NULL;
 struct DosLibrary *DOSBase = NULL;
@@ -171,6 +171,8 @@ static ULONG g_text_top_margin_line = 0;
 static ULONG g_text_margin_vmi = 0;
 static ULONG g_text_form_length_lines = 0;
 static BOOL g_text_margins_cleared = FALSE;
+static ULONG g_text_vertical_units = 0;
+static ULONG g_text_vertical_advances = 0;
 static BOOL g_sizing_pass = FALSE;
 
 static BOOL g_job_open = FALSE;
@@ -1358,6 +1360,8 @@ int PRT_STDARGS DriverOpen(struct IORequest *ior)
     g_text_margin_vmi = 0;
     g_text_form_length_lines = 0;
     g_text_margins_cleared = FALSE;
+    g_text_vertical_units = 0;
+    g_text_vertical_advances = 0;
     g_page_had_noformfeed = FALSE;
     g_discard_aux_band = FALSE;
     g_discard_aux_band_has_ink = FALSE;
@@ -1464,7 +1468,15 @@ LONG PRT_STDARGS DoSpecial(UWORD *command, UBYTE output_buffer[],
      * first raster band. The bottom parameter need not be stored: the
      * media-height finalizer already supplies all remaining white rows at
      * the bottom after the logical printable page ends. */
-    if (command && *command == aSTBM && params && current_line_spacing) {
+    if (command && *command == aVERP0) {
+        g_text_margin_vmi = 27UL; /* 1/8 inch = 27/216 inch */
+        if (current_line_spacing) *current_line_spacing = 27;
+        mp_log_3("Text VMI command/id/units", (LONG)*command, 27, 0);
+    } else if (command && *command == aVERP1) {
+        g_text_margin_vmi = 36UL; /* 1/6 inch = 36/216 inch */
+        if (current_line_spacing) *current_line_spacing = 36;
+        mp_log_3("Text VMI command/id/units", (LONG)*command, 36, 0);
+    } else if (command && *command == aSTBM && params && current_line_spacing) {
         g_text_top_margin_line = (ULONG)((UBYTE *)params)[0];
         g_text_margin_vmi = (ULONG)(UBYTE)*current_line_spacing;
         g_text_margins_cleared = FALSE;
@@ -1498,6 +1510,34 @@ LONG PRT_STDARGS DoSpecial(UWORD *command, UBYTE output_buffer[],
     /* No physical escape language is emitted: raster and captured-text jobs
      * are submitted through IPP instead of a parallel/serial transport. */
     return 0;
+}
+
+/* Called by command_table.c for aIND/aNEL and literal LF traffic. Keep the
+ * physical vertical motion separate from captured text: a graphics-oriented
+ * application can advance the paper before PRD_DUMPRPORT without ever
+ * emitting printable characters. A zero VMI means printer.device supplied no
+ * current spacing; use the last explicit VMI, then the normal 1/6-inch
+ * default. */
+VOID MintPRINTNoteVerticalAdvance(ULONG vmi_216ths)
+{
+    ULONG vmi = vmi_216ths;
+
+    if (!vmi) vmi = g_text_margin_vmi;
+    if (!vmi) vmi = 36UL;
+    if (g_text_vertical_units <= 0xffffffffUL - vmi) {
+        g_text_vertical_units += vmi;
+        ++g_text_vertical_advances;
+    }
+    mp_log_3("Text vertical advance count/VMI/units",
+             (LONG)g_text_vertical_advances, (LONG)vmi,
+             (LONG)g_text_vertical_units);
+}
+
+VOID MintPRINTResetVerticalAdvances(void)
+{
+    g_text_vertical_units = 0;
+    g_text_vertical_advances = 0;
+    mp_log_text("Text vertical position reset");
 }
 
 LONG PRT_STDARGS Render(LONG ct, LONG x, LONG y, LONG status, ...)
@@ -1700,17 +1740,33 @@ LONG PRT_STDARGS Render(LONG ct, LONG x, LONG y, LONG status, ...)
 
             leading_height = g_leading_aux_height;
             if (g_current_special & SPECIAL_NOFORMFEED) {
+                ULONG dpi = g_config.resolution ?
+                            g_config.resolution : 300UL;
                 ULONG target_height = mp_media_target_height(
-                    g_config.media, g_page_width,
-                    g_config.resolution ? g_config.resolution : 300UL);
+                    g_config.media, g_page_width, dpi);
+                ULONG vertical_margin = mp_vertical_advance_rows(
+                    g_text_vertical_units, dpi);
                 ULONG command_margin = mp_text_top_margin_rows(
                     g_text_top_margin_line, g_text_margin_vmi,
-                    g_config.resolution ? g_config.resolution : 300UL);
+                    dpi);
 
-                if (!command_margin && g_text_margins_cleared)
+                /* Actual paper movement is the strongest placement signal.
+                 * aSTBM is next; Wordsworth's form-length reconstruction is
+                 * used only when neither appeared. Reject implausibly large
+                 * pre-dump movement so ordinary captured text cannot consume
+                 * most of a graphics page. */
+                if (vertical_margin && target_height &&
+                    vertical_margin <= target_height / 4UL) {
+                    command_margin = vertical_margin;
+                    mp_log_3("Restoring vertical advance rows/count/units",
+                             (LONG)vertical_margin,
+                             (LONG)g_text_vertical_advances,
+                             (LONG)g_text_vertical_units);
+                } else if (!command_margin && g_text_margins_cleared) {
                     command_margin = mp_wordsworth_top_margin_rows(
                         g_text_form_length_lines, target_height,
-                        g_config.resolution ? g_config.resolution : 300UL);
+                        dpi);
+                }
 
                 /* A narrow leading control band and aSTBM can describe the
                  * same physical whitespace. Use the larger observation,
@@ -1724,6 +1780,12 @@ LONG PRT_STDARGS Render(LONG ct, LONG x, LONG y, LONG status, ...)
                              (LONG)g_text_top_margin_line,
                              (LONG)g_text_form_length_lines);
             }
+            /* A vertical movement positions only the next new graphics page,
+             * never every continuation band. Later pages can supply their
+             * own advances; if Wordsworth does not, its form-length fallback
+             * above still restores the documented border consistently. */
+            g_text_vertical_units = 0;
+            g_text_vertical_advances = 0;
             if (leading_height > 0xffffffffUL - g_page_height) {
                 mp_log_text("Leading strip whitespace height overflow");
                 g_leading_aux_height = 0;

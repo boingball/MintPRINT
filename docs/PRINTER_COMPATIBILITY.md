@@ -147,7 +147,11 @@ does not send that command: it clears margins, sets a 70-line A4 form, then
 sends only the 3062-row printable raster. Revision 38 recognises that matching
 form-length/physical-media strip signature and restores the documented
 0.50-inch top border (150 rows at 300 DPI); final media padding continues to
-supply the remaining bottom border.
+supply the remaining bottom border. Revision 39 also processes pre-dump
+`aIND`, `aNEL`, and literal LF movement at the active VMI as the stronger,
+genuine vertical-position signal; the rev 38 form-length reconstruction now
+acts only as a fallback when no such movement or explicit `aSTBM` margin is
+present.
 
 ### Brother HL-L2350DW
 
@@ -418,12 +422,12 @@ graphics dumps to assemble one physical page.
 
 ### Wordworth 7 Print Setup
 
-Use driver revision **38** or newer for the current strip-printing path.
+Use driver revision **39** or newer for the current strip-printing path.
 Revision 16 first preserved Wordworth's strip printing as one media-sized PWG
 page and prevented trailing narrow graphics dumps from becoming a second IPP
 job. Revision 36 additionally separates logical pages before physical media
-padding; revision 38 restores the configured, documented Wordsworth top border
-when the application supplies only its form-length signature.
+padding; revision 39 restores pre-dump vertical movement when supplied and
+otherwise retains revision 38's documented Wordsworth form-length fallback.
 
 Set Wordworth 7's **Print Setup** window to:
 

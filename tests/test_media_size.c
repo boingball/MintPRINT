@@ -165,6 +165,14 @@ int main(void)
     assert(!mp_wordsworth_top_margin_rows(70UL, 0UL, 300UL));
     assert(!mp_wordsworth_top_margin_rows(70UL, 3505UL, 0UL));
 
+    /* Three ordinary 1/6-inch advances are Wordsworth's 0.50-inch top
+     * position when it communicates the placement through aIND/aNEL/LF. */
+    assert(mp_vertical_advance_rows(3UL * 36UL, 300UL) == 150UL);
+    assert(mp_vertical_advance_rows(3UL * 36UL, 600UL) == 300UL);
+    assert(mp_vertical_advance_rows(4UL * 27UL, 300UL) == 150UL);
+    assert(!mp_vertical_advance_rows(0UL, 300UL));
+    assert(!mp_vertical_advance_rows(108UL, 0UL));
+
     logical_rows = 0;
     logical_pages = 0;
     for (row = 0; row < 31UL; ++row) {

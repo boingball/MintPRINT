@@ -240,3 +240,12 @@ unsigned long mp_wordsworth_top_margin_rows(unsigned long form_length_lines,
 
     return dpi / 2UL;
 }
+
+unsigned long mp_vertical_advance_rows(unsigned long units_216ths,
+                                       unsigned long dpi)
+{
+    if (!units_216ths || !dpi ||
+        units_216ths > (0xffffffffUL - 108UL) / dpi)
+        return 0;
+    return (units_216ths * dpi + 108UL) / 216UL;
+}
