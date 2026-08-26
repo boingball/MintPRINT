@@ -1,0 +1,53 @@
+name: PR63 fix IFF ByteRun1 decoding
+
+on:
+  push:
+    branches:
+      - claude/ink-toner-status-panel
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ github.actor != 'github-actions[bot]' && !contains(github.event.head_commit.message, '[iff-rle-fixed]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: claude/ink-toner-status-panel
+          fetch-depth: 0
+
+      - name: Fix ByteRun1 compressed source accounting
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('Archive/Old JPEG Decode/iff-loader.c')
+          s = p.read_text(encoding='utf-8')
+
+          old = '''    return dest_pos;\n}\n\nstatic UWORD get_pixel_from_planes'''
+          new = '''    /* ByteRun1 callers need the number of COMPRESSED source bytes\n     * consumed, not the number of decoded destination bytes produced.\n     * Returning dest_pos made the next row/bitplane start at the wrong\n     * BODY offset whenever compression actually saved any bytes. */\n    return src_pos;\n}\n\nstatic UWORD get_pixel_from_planes'''
+          if old not in s:
+              raise SystemExit('decompress_rle return anchor not found')
+          s = s.replace(old, new, 1)
+
+          old = '''                int written = decompress_rle(body_data + src, planes[p] + offset, body_size - src, bpr);\n                src += written;'''
+          new = '''                int consumed = decompress_rle(body_data + src, planes[p] + offset, body_size - src, bpr);\n                if (consumed <= 0 || src + consumed > (int)body_size) {\n                    printf("Invalid ByteRun1 data at row %d plane %d", y, p);\n                    for (int q = 0; q < bmhd.nPlanes; q++)\n                        if (planes[q]) FreeVec(planes[q]);\n                    if (planes) FreeVec(planes);\n                    if (colormap) FreeVec(colormap);\n                    if (body_data) FreeVec(body_data);\n                    if (data->red) FreeVec(data->red);\n                    if (data->green) FreeVec(data->green);\n                    if (data->blue) FreeVec(data->blue);\n                    memset(data, 0, sizeof(*data));\n                    return -1;\n                }\n                src += consumed;'''
+          if old not in s:
+              raise SystemExit('ByteRun1 caller anchor not found')
+          s = s.replace(old, new, 1)
+
+          p.write_text(s, encoding='utf-8')
+          PY
+
+          grep -q 'return src_pos;' 'Archive/Old JPEG Decode/iff-loader.c'
+          grep -q 'int consumed = decompress_rle' 'Archive/Old JPEG Decode/iff-loader.c'
+          git diff --check
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add 'Archive/Old JPEG Decode/iff-loader.c'
+          git commit -m 'Fix ILBM ByteRun1 source accounting [iff-rle-fixed]'
+          git push origin HEAD:claude/ink-toner-status-panel
