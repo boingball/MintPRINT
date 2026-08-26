@@ -214,3 +214,13 @@ int mp_urf_finish(MPUrfEncoder *e)
     if (!e || e->failed) return 0;
     return e->rows_written == e->height;
 }
+
+int mp_urf_grow(MPUrfEncoder *e, unsigned long extra_rows)
+{
+    unsigned long new_height;
+    if (!e || e->failed || !extra_rows) return 0;
+    new_height = e->height + extra_rows;
+    if (new_height < e->height || new_height > 65535UL) return 0;
+    e->height = new_height;
+    return 1;
+}

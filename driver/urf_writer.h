@@ -93,4 +93,20 @@ int mp_urf_begin_page(MPUrfEncoder *enc,
 int mp_urf_write_scanline(MPUrfEncoder *enc, const unsigned char *rgb);
 int mp_urf_finish(MPUrfEncoder *enc);
 
+/* Byte offset, from the start of a page's own 32-byte header, of the
+ * height field - see driver_core.c's per-page g_urf_page_header_offset
+ * (mirrors g_pwg_page_header_offset) and mp_urf_grow() below. */
+#define MP_URF_HEIGHT_FIELD_OFFSET 16UL
+
+/* Raises the row-count cap mp_urf_write_scanline() enforces by
+ * extra_rows, without touching anything already written (no new header,
+ * no reset) - the same growable-declared-height contract
+ * mp_pwg_grow() already offers PWG Raster. For accumulating several
+ * strip-printed bands of the same page into one Apple Raster document,
+ * the page header's height field (MP_URF_HEIGHT_FIELD_OFFSET) must be
+ * patched separately once the true total is known - see
+ * driver_core.c's mp_page_finalize(). Fails if the new total exceeds
+ * 65535 rows. */
+int mp_urf_grow(MPUrfEncoder *enc, unsigned long extra_rows);
+
 #endif

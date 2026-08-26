@@ -86,7 +86,7 @@ failure-prone "literal run" half (control byte 128-255, with its own
 minimum-run-length and byte-overflow edge cases) is never needed for a
 fully valid, decodable stream.
 
-## Duplex, and why strip-printing accumulation still isn't supported
+## Duplex and strip-printing accumulation
 
 Unlike PWG Raster's per-page header, Apple Raster declares its total page
 count once, up front, in the 12-byte file header - before any page's raster
@@ -108,14 +108,27 @@ whole multi-page file is submitted as a single IPP Print-Job once complete.
 printer advertises them **and** the selected engine's own document format
 (`image/urf` here) - see `mp_duplex_transport_supported()`.
 
-**Still PWG Raster-only:** strip-printing accumulation (`mp_pwg_grow()`,
-the `SPECIAL_NOFORMFEED`-driven band merging that lets one physical page
-span several `Render(0)` cycles, e.g. Wordworth's output) is not
-implemented for URF - only whole-page duplex is. A NOFORMFEED band under
-`ENGINE=urf` finalizes immediately as its own page/side, exactly like the
-JPEG/PDF/PostScript engines already do (no regression versus the prior
-single-page-only URF scope - it just means a strip-printing application
-combined with `ENGINE=urf` duplex is not yet a supported combination).
+**Strip-printing accumulation is also implemented for URF**, using the same
+growable-declared-height contract PWG Raster's `mp_pwg_grow()` already
+offers: `mp_urf_grow()` raises a page's declared height as more
+`SPECIAL_NOFORMFEED` bands arrive (e.g. Wordworth's output splitting one
+physical page into several same-width bands), and `mp_page_finalize()`
+patches the page header's height field with the true total once the whole
+page is known - see `MP_URF_HEIGHT_FIELD_OFFSET`. Tiny leading/auxiliary
+NOFORMFEED bands (positioning artifacts some applications emit) are
+discarded the same way for both engines too
+(`mp_is_tiny_leading_auxiliary_band()`/`mp_is_tiny_auxiliary_band()`).
+
+This was **not** true in URF's first duplex build (driver revision 31): a
+NOFORMFEED band under `ENGINE=urf` finalized immediately as its own page,
+same as JPEG/PDF/PostScript. Combined with duplex, that turned one
+strip-printed physical page into dozens of bogus single-band "duplex
+pages" queued into one file - confirmed on a real Brother MFC-J6930DW
+duplex test, where 62 pages got queued instead of the true handful, and
+the printer rejected the job (`server-error-job-canceled`). Driver
+revision 32 fixes this by extending the same accumulator PWG Raster
+already had to also cover URF - see `mp_engine_supports_strip_accumulation()`
+in `driver_core.c`.
 
 ## Status: confirmed physically printing
 
@@ -134,11 +147,16 @@ and 3508 valid rows with no corruption. See
 confirmation is still pending, since it wasn't the hardware used for the
 test above.
 
-That confirmed test was one-sided. Duplex support (see above) is new and
-not yet physically confirmed - in particular, the "no backside row
-reversal" assumption is worth checking specifically: a backside page that
-prints upside-down or mirrored, while the front side and page count are
-otherwise correct, points there first.
+That confirmed test was one-sided. Duplex support (see above) is new; its
+first real test (Brother MFC-J6930DW, driver revision 31) surfaced the
+strip-printing accumulation gap described above rather than confirming
+duplex itself - the document was strip-printed, so the missing accumulator
+turned it into dozens of bogus single-band "duplex pages" and the printer
+canceled the job before any paper came out. That gap is now fixed (driver
+revision 32); duplex itself - including the "no backside row reversal"
+assumption - is still not yet physically confirmed. A backside page that
+prints upside-down or mirrored, while the front side, page count and
+overall page geometry are otherwise correct, points there first.
 
 If a URF test print comes out wrong (garbled image, printer error, rejected
 job), the most useful next artifact is `T:MintPRINT-job.urf` (kept when
@@ -184,6 +202,7 @@ page, followed by a single submission once the whole document is queued:
     MintPRINT: IPP duplex Print-Job error/http/status 0 200 0
 
 `make test-urf` runs the host-side encoder tests (`tests/test_urf_writer.c`)
-covering the file/page header byte layout, the row compression, and the
-multi-page duplex file/page-header sequencing, without needing AmigaOS
-hardware.
+covering the file/page header byte layout, the row compression, the
+multi-page duplex file/page-header sequencing, and the grow-then-patch
+strip-accumulation contract (`mp_urf_grow()` plus a post-hoc height-field
+patch), without needing AmigaOS hardware.

@@ -71,11 +71,19 @@ rows. `pwg-sheet-back=rotated`; scaling `auto`; quality `high`; color;
 source `auto`.
 
 This printer also advertises `two-sided-long-edge`/`two-sided-short-edge`,
-making it a candidate to confirm URF duplex (driver revision 31, see
-`docs/DUPLEX_PRINTING.md`) - not yet physically tested, in particular
-whether Apple Raster's lack of a backside-transform mechanism (unlike PWG's
-`pwg-sheet-back=rotated` above) produces a correctly-oriented backside on
-this specific printer's duplex unit.
+making it the printer that first tested URF duplex. The first attempt
+(driver revision 31) failed: the test document was strip-printed
+(`SPECIAL_NOFORMFEED`), and URF's duplex implementation at that revision had
+no strip-printing accumulator (PWG-only at the time), so every small band
+became its own bogus single-band "duplex page" - the driver log showed 62
+pages queued for what should have been a handful, and the printer rejected
+the job (`IPP duplex Print-Job error/http/status -16 200 1288`,
+`server-error-job-canceled`). Fixed in driver revision 32 by extending the
+same strip-printing accumulator PWG Raster already had to also cover URF -
+see `docs/URF_ENGINE.md`. Not yet re-tested; still also unconfirmed once
+retested is whether Apple Raster's lack of a backside-transform mechanism
+(unlike PWG's `pwg-sheet-back=rotated` above) produces a correctly-oriented
+backside on this specific printer's duplex unit.
 
 ### Brother HL-L2350DW
 
@@ -241,7 +249,7 @@ printer - still needs an OKI B412 test report to close out issue #60.
 This printer also advertises duplex sides (`two-sided-long-edge`,
 `two-sided-short-edge`). MintPRINT duplex originally required
 `ENGINE=pwg-raster`, which this printer does not advertise - but `ENGINE=urf`
-now supports duplex too (driver revision 31, see `docs/DUPLEX_PRINTING.md`
+now supports duplex too (driver revision 32, see `docs/DUPLEX_PRINTING.md`
 and `docs/URF_ENGINE.md`), so duplex is expected to be reachable here once
 this printer's own URF printing is confirmed, one-sided first.
 

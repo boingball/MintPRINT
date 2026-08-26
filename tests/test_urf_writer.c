@@ -253,6 +253,66 @@ static int test_tumble_byte(void)
     return 0;
 }
 
+/* Strip-printing accumulation: a page begins at one band's height, grows
+ * as more NOFORMFEED bands arrive (mp_urf_grow(), the same growable-
+ * declared-height contract pwg_writer.c's mp_pwg_grow() already offers),
+ * accepts rows up to the new total, and the page header's height field
+ * gets patched with the final total once known - exactly what
+ * driver_core.c's mp_page_finalize() does for a real strip-printed page. */
+static int test_grow_and_patch(void)
+{
+    const unsigned long width = 2;
+    unsigned long scratch_size = mp_urf_scratch_size(width);
+    unsigned char *scratch = (unsigned char *)malloc(scratch_size);
+    unsigned char out_buf[512];
+    struct Sink sink;
+    MPUrfEncoder enc;
+    unsigned char row[2 * 3];
+    unsigned char *height_field;
+
+    if (!scratch) return 1;
+    sink.buf = out_buf;
+    sink.size = 0;
+    sink.cap = sizeof(out_buf);
+    row[0] = 1; row[1] = 1; row[2] = 1;
+    row[3] = 2; row[4] = 2; row[5] = 2;
+
+    /* First band: declares height 1, matching the first NOFORMFEED band's
+     * own height - exactly like case 0's initial mp_job_begin() call. */
+    if (!mp_urf_begin_page(&enc, width, 1, 300, 1, 0, 0,
+                           scratch, scratch_size, sink_write, &sink)) {
+        free(scratch); return 10;
+    }
+    if (be32(out_buf + 12 + 16) != 1UL) { free(scratch); return 11; }
+    if (!mp_urf_write_scanline(&enc, row)) { free(scratch); return 12; }
+
+    /* Growing by 0 or past 65535 must fail without touching enc->height. */
+    if (mp_urf_grow(&enc, 0)) { free(scratch); return 13; }
+    if (mp_urf_grow(&enc, 65535UL)) { free(scratch); return 14; }
+    if (enc.height != 1UL) { free(scratch); return 15; }
+
+    /* A second and third band arrive (mp_job_reserve_page's job) - grow to
+     * accept them without a new header or losing what's already written. */
+    if (!mp_urf_grow(&enc, 2)) { free(scratch); return 16; }
+    if (enc.height != 3UL) { free(scratch); return 17; }
+    if (!mp_urf_write_scanline(&enc, row)) { free(scratch); return 18; }
+    if (!mp_urf_write_scanline(&enc, row)) { free(scratch); return 19; }
+    if (!mp_urf_finish(&enc)) { free(scratch); return 20; }
+
+    /* The on-the-wire header still says height=1 - only the encoder's own
+     * declared cap changed until this patch happens, the same two-step
+     * mp_page_finalize() relies on. */
+    if (be32(out_buf + 12 + 16) != 1UL) { free(scratch); return 21; }
+
+    height_field = out_buf + 12 + MP_URF_HEIGHT_FIELD_OFFSET;
+    height_field[0] = 0; height_field[1] = 0;
+    height_field[2] = 0; height_field[3] = 3;
+    if (be32(out_buf + 12 + 16) != 3UL) { free(scratch); return 22; }
+
+    free(scratch);
+    return 0;
+}
+
 int main(void)
 {
     int rc;
@@ -265,6 +325,9 @@ int main(void)
 
     rc = test_tumble_byte();
     if (rc) return 200 + rc;
+
+    rc = test_grow_and_patch();
+    if (rc) return 300 + rc;
 
     return 0;
 }
