@@ -31,20 +31,22 @@ printer.device driver plus a GUI setup tool.
 ## What's new in 1.2.3
 
 MintPRINT 1.2.3 brings back printer ink/toner status in MintPrint Settings'
-Query flow, and widens the main window to make room for it. Driver behaviour
+Query flow while keeping the compact 520px-wide main window. Driver behaviour
 is unchanged (still driver revision 41.1).
 
 - **Ink/toner level display.** Query now also requests the IPP Printer MIB
   `marker-names`/`marker-colors`/`marker-types`/`marker-levels`/
   `marker-low-levels`/`marker-high-levels` attributes (RFC 3805 /
-  PWG5100.13) and shows each reported marker as a thin, labelled level
-  strip in a new panel on the right side of the main window, filled in the
-  colour the printer itself reports (`#RRGGBB` or a small set of named
-  colours) via `ObtainBestPenA()` so it isn't limited to the window's
-  handful of fixed screen pens. A marker with no level yet reported draws
-  as an empty/unknown strip rather than being hidden. The main window
-  widened from 520px to 660px to fit the new panel without disturbing any
-  existing gadget's position.
+  PWG5100.13). Up to six reported markers are shown in a compact 2x3 panel
+  inside the existing window, using the spare area beside IPP Path / Printer
+  Engine / Debug and above Media. Each marker gets a short label, percentage
+  and coloured level bar using the printer-reported `#RRGGBB` or named colour
+  via `ObtainBestPenA()`. Unknown levels remain visibly empty rather than
+  being hidden.
+- **Compact settings layout.** The main GadTools controls were rearranged to
+  use the available 520px width more efficiently: Unit spans the top row,
+  Discover sits beside Printer IP/Host, Query beside Printer Model, and DPI /
+  Sides share the lower option rows. The status/output area remains unchanged.
 
 ## What's new in 1.2.2
 

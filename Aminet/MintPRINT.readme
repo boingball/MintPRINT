@@ -195,12 +195,13 @@ History
 
        - Query now also requests the IPP marker-names/marker-colors/
          marker-types/marker-levels/marker-low-levels/marker-high-levels
-         attributes (RFC 3805 / PWG5100.13 Printer MIB) and shows each
-         reported marker as a thin, labelled level strip in a new panel
-         on the right side of the main window, filled in the colour the
-         printer itself reports.
-       - The main window widened from 520px to 660px to fit the new
-         panel; no existing gadget moved.
+         attributes (RFC 3805 / PWG5100.13 Printer MIB). Up to six
+         reported markers are shown in a compact 2x3 ink/toner panel in
+         the spare area beside IPP Path / Printer Engine / Debug, filled
+         in the colour the printer itself reports.
+       - The main window stays at 520px wide. The GadTools controls were
+         rearranged to make better use of the existing space, with Unit
+         across the top row and DPI/Sides sharing the lower option rows.
 
 1.2.2  Real AmigaOS $VER: driver versioning, driver revision 41.1.
 
