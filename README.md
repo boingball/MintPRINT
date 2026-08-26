@@ -28,6 +28,94 @@ printers (JPEG, PostScript, PWG Raster, or PDF; no driver-specific software
 on the printer side) straight from Amiga applications, via a real `DEVS:Printers/`
 printer.device driver plus a GUI setup tool.
 
+## What's new in 1.2.1
+
+MintPRINT 1.2.1 currently carries **driver revision 41**, adding a new engine
+and the following Wordsworth strip-printing fixes:
+
+- **PRT: text/URF and cross-engine margin fixes** (driver rev 41, not yet
+  physically re-tested). Two bugs found reviewing revisions 35-40 before
+  merge: `PRT:`/`CMD_WRITE` plain-text printing had no `ENGINE=urf` case in
+  `command_table.c`'s own engine dispatch, so it silently fell through to
+  JPEG and submitted `image/jpeg` - which fails outright on a URF-only
+  printer such as the OKI B412 (the whole reason this engine exists).
+  Separately, the rev 37-39 top-margin restoration computes and writes
+  leading whitespace for *any* `SPECIAL_NOFORMFEED` job regardless of
+  engine, but the helper it called (`mp_job_reserve_page()`/
+  `mp_job_pad_page()`) only understood PWG and URF, silently writing into
+  the unopened PWG encoder instead of whichever encoder a JPEG, PDF or
+  PostScript job actually used. Both now dispatch across all five engines.
+- **Wordsworth page borders** (driver rev 39). The driver now processes and
+  accumulates pre-dump `aIND`, `aNEL` and literal line-feed movement using
+  printer.device's 1/216-inch VMI, then emits the corresponding leading white
+  raster rows. A rev 37 trace had proved that
+  Wordsworth clears margins and sends only a 70-line form length, not its
+  separate Print Borders values through the margin commands; rev 38 therefore
+  added a form-length/physical-media fallback which restores the documented
+  0.50-inch top border (150 rows at 300 DPI) when no real vertical movement or
+  explicit `aSTBM` placement appears. The media-height finalizer supplies the
+  remaining bottom border.
+- **Complete legacy layout diagnostics** (driver rev 40). Debug logs now
+  record every printer layout command from `aVERP0` through `aCAM`, both
+  parameter slots, live line/VMI/CRLF state, and every raster band's complete
+  `IODRPReq` source/destination geometry. This exposes any placement signal
+  outside the commands already observed without changing rev 39's output.
+- **Wordsworth logical page boundaries** (driver rev 36). A terminal short
+  strip now ends the application's printable page before the physical-media
+  padding, preventing the first 443 rows of the next page from being pulled
+  onto the previous sheet.
+
+- **Apple Raster (`ENGINE=urf`) engine.** A new backend for printers that
+  advertise `image/urf` but none of MintPRINT's other formats (JPEG,
+  PostScript, PWG Raster, PDF) - reported for the OKI B412 in
+  [issue #60](https://github.com/boingball/MintPRINT/issues/60). See
+  `docs/URF_ENGINE.md`. One-sided printing confirmed physically (Brother
+  MFC-J6930DW, driver rev 30); the OKI B412 report that motivated it is
+  still pending its own confirmation.
+- **URF duplex** (driver rev 31, three bugs found and fixed by rev 34).
+  `ENGINE=urf` now supports two-sided printing the same way PWG Raster
+  does - one multi-page stream, submitted once from `DriverClose()` -
+  using Apple Raster's own duplex/tumble page header byte. Unlike PWG
+  Raster, no backside row/column reversal is performed (Apple Raster's
+  page header has no equivalent transform fields); see
+  `docs/DUPLEX_PRINTING.md`. Its first three real tests (Brother
+  MFC-J6930DW) each hit a real bug rather than confirming duplex itself,
+  every one rejected by the printer before any paper came out: first, URF
+  had no strip-printing band accumulator, so a strip-printed document
+  turned into dozens of bogus single-band "duplex pages" (62 instead of a
+  handful) - fixed in rev 32 by extending PWG Raster's own accumulator to
+  cover URF; then, once fixed, the two resulting real pages came out at
+  different heights (front content naturally overshot the media-derived
+  target while the back only got padded to it) - fixed in rev 33 by
+  flooring every later page's target at the tallest page the job has
+  finalized so far; then, with both pages byte-perfect and an exactly
+  matching height, the printer still rejected the job - the duplex/tumble
+  byte itself was wrong (1/2/3 for no-duplex/short/long instead of the
+  correct 0/1/2, caught by cross-checking a second, independent real-world
+  URF reverse-engineering against an HP DesignJet T230) - fixed in rev 34.
+  A fourth test on rev 34 hit the same strip-accumulator page-boundary bug
+  PWG Raster hit (see the strip-printing fixes below); once revs 35-36
+  landed, **two-sided long-edge duplex over `ENGINE=urf` is physically
+  confirmed** on this same Brother MFC-J6930DW.
+- **Strip-printing page-boundary fixes** (driver revs 35-36). Found
+  testing PWG Raster one-sided on the same printer, not URF or duplex
+  specifically: a two-page Wordworth document printed with no IPP error at
+  all, but visibly corrupted - the page boundary the accumulator chose fell
+  in the middle of real content (confirmed by decoding and rendering the
+  job file: a character cut off at the top of the second sheet). The
+  rev-35 accumulator split at the 3505-row physical A4 boundary, but a real
+  retest proved Wordworth's page cycle ends earlier at 3062 rows (thirty
+  100-row bands plus a 62-row terminal remainder); rev 35 therefore still
+  stole 443 rows from page 2. Rev 36 recognises that short terminal band as
+  the logical printable-page boundary, including when it arrives as a narrow
+  auxiliary dump, finalises/pads the physical page there, and retains the
+  media-height split as a fallback for applications without that signal.
+  Affects PWG Raster and URF identically, one-sided or duplex. Revs 37-39
+  then restored the top margin that pagination fix had exposed as missing
+  (see the Wordsworth page borders bullet above); **a physical retest on
+  rev 40 confirmed Wordsworth's PWG Raster page boundaries and margins now
+  print correctly**.
+
 ## What's new in 1.2.0
 
 MintPRINT 1.2.0 is a substantial driver update, with **driver revision 29**.
@@ -58,8 +146,9 @@ still selected by default where available.
 
 - **`driver/`** - `DEVS:Printers/MintPRINT`, the printer.device driver.
   Handles both graphics raster callbacks and plain-text `PRT:`/`CMD_WRITE`
-  output, converts the result into streamed JPEG, PostScript, PWG Raster, or
-  PDF documents, and submits them to the printer's IPP `Print-Job` endpoint.
+  output, converts the result into streamed JPEG, PostScript, PWG Raster,
+  PDF, or Apple Raster (URF) documents, and submits them to the printer's
+  IPP `Print-Job` endpoint.
   See `docs/PRINTER_DEVICE_SPIKE.md` (and its follow-ups) for how it was built,
   and `docs/PWG_RASTER.md`/`docs/DRIVER_SPOOL_PROCESS.md` for two of the most
   significant pieces of its design.
@@ -92,14 +181,16 @@ printer's IP/host, IPP path, and document format in MintPrint Settings.
 
 ## Supported document formats
 
-`image/jpeg`, `application/postscript`, `image/pwg-raster`, and
-`application/pdf`.
+`image/jpeg`, `application/postscript`, `image/pwg-raster`,
+`application/pdf`, and `image/urf` (Apple Raster).
 Any IPP Everywhere or AirPrint-certified printer
 (most network printers from roughly the last decade) 
 is required to accept PWG Raster, so most printers should already
 work with that alone. PostScript and PDF cover older or partially-compliant
 IPP printers whose network support fronts an existing office-printer
-interpreter and which reject raster formats.
+interpreter and which reject raster formats. Apple Raster (URF) covers the
+rarer case of a printer that accepts neither - see
+`docs/URF_ENGINE.md`.
 
 ## Building
 
@@ -135,8 +226,8 @@ be added with its AmigaOS version, TCP/IP stack, engine and exact print options.
 
 ## Status
 
-MintPRINT is now a real, working app: version **1.2.0** GUI with **driver
-revision 29**, with multiple printers confirmed fully working over IPP/AirPrint
+MintPRINT is now a real, working app: version **1.2.1** GUI with **driver
+revision 41**, with multiple printers confirmed fully working over IPP/AirPrint
 from real Amiga hardware. It's still actively developed and not every printer
 is confirmed yet, so check the
 [printer compatibility page](docs/PRINTER_COMPATIBILITY.md) for your specific

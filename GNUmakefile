@@ -11,7 +11,7 @@
 # never reach `%:` (while a non-phony `driver` is shadowed by the real driver/
 # source directory in this repository).
 FORWARD_TARGETS := gui test test-http test-dpi test-jpeg test-ipp-enum \
-                   test-postscript driver driver31 driver-symbols \
+                   test-postscript test-urf driver driver31 driver-symbols \
                    driver-symbols31 help
 
 .PHONY: all release release31 release-all clean $(FORWARD_TARGETS)

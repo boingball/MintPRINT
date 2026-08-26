@@ -1,6 +1,6 @@
 # MintPRINT PWG Raster backend
 
-`DEVS:Printers/MintPRINT` has four document backends, selected by Unit0's
+`DEVS:Printers/MintPRINT` has five document backends, selected by Unit0's
 `ENGINE=` (set from MintPrint Settings' **Printer Engine** control):
 
 - `ENGINE=jpeg` (default) - the original, already-proven JPEG path.
@@ -10,6 +10,7 @@
   instead, via `driver/pwg_writer.c`.
 - `ENGINE=pdf` - a minimal single-page PDF (`application/pdf`), see
   `docs/PDF_ENGINE.md`.
+- `ENGINE=urf` - Apple Raster (`image/urf`), see `docs/URF_ENGINE.md`.
 
 All paths share the same row source (`mp_job_write_row` in
 `driver/driver_core.c`, unchanged) and the same low-memory, one-row-at-a-time

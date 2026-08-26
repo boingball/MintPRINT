@@ -37,6 +37,7 @@ int main(void)
 {
     unsigned long x = 0, y = 0;
     unsigned long width = 2478UL, height, row;
+    unsigned long logical_rows, logical_pages, band_rows;
     unsigned long scratch_size;
     unsigned char *scratch, *rgb;
     struct TestSink sink;
@@ -117,6 +118,73 @@ int main(void)
     assert(mp_media_page_complete(3170UL, 285UL, 3437UL));
     assert(!mp_media_page_complete(2100UL, 962UL, 3505UL));
     assert(!mp_media_page_complete(3507UL, 0UL, 0UL));
+
+    /* Rev35 still split this Wordsworth job at physical A4 row 3505 even
+     * though the application's printable page ended at 3062: thirty
+     * 100-row bands plus a final 62-row remainder. The following 443 rows
+     * were therefore stolen from page 2. A short final full-width band and
+     * the same short final auxiliary band must both delimit the logical page.
+     * A full-sized band, an early short band, or unknown media must not. */
+    assert(mp_short_strip_completes_logical_page(3062UL, 0UL, 3505UL,
+                                                  100UL, 62UL));
+    assert(mp_short_strip_completes_logical_page(700UL, 2362UL, 3505UL,
+                                                  100UL, 62UL));
+    assert(!mp_short_strip_completes_logical_page(3000UL, 0UL, 3505UL,
+                                                   100UL, 100UL));
+    assert(!mp_short_strip_completes_logical_page(2100UL, 0UL, 3505UL,
+                                                   100UL, 62UL));
+    assert(!mp_short_strip_completes_logical_page(3062UL, 0UL, 0UL,
+                                                   100UL, 62UL));
+
+    /* Wordsworth's 0.50-inch top border is sent through printer.device as
+     * DEC top-margin line 4 at the normal 1/6-inch (36/216-inch) VMI. The
+     * driver must turn the three preceding lines into 150 white rows at
+     * 300 DPI before writing the application's 3062-row printable raster. */
+    assert(mp_text_top_margin_rows(4UL, 36UL, 300UL) == 150UL);
+    assert(mp_text_top_margin_rows(5UL, 27UL, 300UL) == 150UL);
+    assert(mp_text_top_margin_rows(1UL, 36UL, 300UL) == 0UL);
+    assert(mp_text_top_margin_rows(0UL, 36UL, 300UL) == 0UL);
+    assert(mp_text_top_margin_rows(4UL, 0UL, 300UL) == 0UL);
+    assert(mp_text_top_margin_rows(4UL, 36UL, 0UL) == 0UL);
+    assert(mp_text_top_margin_rows(4UL, 36UL, 300UL) + 3062UL == 3212UL);
+    assert(3505UL -
+           (mp_text_top_margin_rows(4UL, 36UL, 300UL) + 3062UL) == 293UL);
+
+    /* The rev37 trace proved Wordsworth does not send aSTBM: it sends aCAM
+     * followed by aSLPP 70, then a 3062-row printable raster. Seventy lines
+     * at 6 LPI is 3500 rows at 300 DPI, matching the width-derived 3505-row
+     * A4 sheet within rounding. Restore the documented 0.50-inch top border
+     * only for that matching form/media signature. */
+    assert(mp_wordsworth_top_margin_rows(70UL, 3505UL, 300UL) == 150UL);
+    assert(mp_wordsworth_top_margin_rows(66UL, 3300UL, 300UL) == 150UL);
+    assert(mp_wordsworth_top_margin_rows(70UL, 7010UL, 600UL) == 300UL);
+    assert(mp_wordsworth_top_margin_rows(70UL, 3505UL, 300UL) + 3062UL ==
+           3212UL);
+    assert(!mp_wordsworth_top_margin_rows(70UL, 3300UL, 300UL));
+    assert(!mp_wordsworth_top_margin_rows(0UL, 3505UL, 300UL));
+    assert(!mp_wordsworth_top_margin_rows(70UL, 0UL, 300UL));
+    assert(!mp_wordsworth_top_margin_rows(70UL, 3505UL, 0UL));
+
+    /* Three ordinary 1/6-inch advances are Wordsworth's 0.50-inch top
+     * position when it communicates the placement through aIND/aNEL/LF. */
+    assert(mp_vertical_advance_rows(3UL * 36UL, 300UL) == 150UL);
+    assert(mp_vertical_advance_rows(3UL * 36UL, 600UL) == 300UL);
+    assert(mp_vertical_advance_rows(4UL * 27UL, 300UL) == 150UL);
+    assert(!mp_vertical_advance_rows(0UL, 300UL));
+    assert(!mp_vertical_advance_rows(108UL, 0UL));
+
+    logical_rows = 0;
+    logical_pages = 0;
+    for (row = 0; row < 31UL; ++row) {
+        band_rows = row == 30UL ? 62UL : 100UL;
+        logical_rows += band_rows;
+        if (mp_short_strip_completes_logical_page(
+                logical_rows, 0UL, 3505UL, 100UL, band_rows)) {
+            ++logical_pages;
+            logical_rows = 0;
+        }
+    }
+    assert(logical_pages == 1UL && logical_rows == 0UL);
 
     /* The fixed Wordworth path starts PWG at the complete media height,
      * then writes/pads exactly that many rows. Its header must therefore

@@ -64,4 +64,42 @@ int mp_media_page_complete(unsigned long raster_rows,
                            unsigned long auxiliary_rows,
                            unsigned long target_rows);
 
+/* Strip printers normally use a fixed-height band and finish a logical
+ * printable page with one shorter remainder band. Some applications keep
+ * SPECIAL_NOFORMFEED set across that boundary, so the short band is the only
+ * reliable page delimiter left in the Render stream. Accept it only when the
+ * accumulated raster plus discarded auxiliary height is already close to the
+ * physical media height; this keeps an unusually short intermediate band
+ * from prematurely ejecting a page. */
+int mp_short_strip_completes_logical_page(unsigned long raster_rows,
+                                          unsigned long auxiliary_rows,
+                                          unsigned long target_rows,
+                                          unsigned long nominal_band_rows,
+                                          unsigned long current_band_rows);
+
+/* Convert the DEC aSTBM top-margin parameter to raster rows. The parameter
+ * names a one-based text line, while VMI is expressed in 1/216-inch units;
+ * therefore line 4 at the normal 1/6-inch VMI means three blank lines, or
+ * exactly 0.5 inch. A zero/default parameter or missing VMI is deliberately
+ * left unresolved rather than inventing an application margin. */
+unsigned long mp_text_top_margin_rows(unsigned long top_line_parameter,
+                                      unsigned long vmi_216ths,
+                                      unsigned long dpi);
+
+/* Wordsworth clears printer margins and sends only the complete form length
+ * before its NOFORMFEED raster strips; its separate Print Borders values are
+ * not present in IODRPReq or the command stream. Recognise that form-length
+ * signature only when it agrees with the configured physical page at the
+ * standard six lines per inch, then restore the documented 0.50-inch top
+ * border. Returns zero when the form and media do not agree. */
+unsigned long mp_wordsworth_top_margin_rows(unsigned long form_length_lines,
+                                            unsigned long target_rows,
+                                            unsigned long dpi);
+
+/* Convert accumulated printer vertical-motion units (VMI is 1/216 inch)
+ * into device-resolution rows. Used for aIND, aNEL and literal line feeds
+ * observed before a graphics dump. */
+unsigned long mp_vertical_advance_rows(unsigned long units_216ths,
+                                       unsigned long dpi);
+
 #endif

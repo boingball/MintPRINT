@@ -5,7 +5,7 @@ version, TCP/IP stack, document engine and the settings needed to reproduce a
 working print. It deliberately distinguishes physical output from an IPP job
 that merely reports success.
 
-Last reviewed: **22 August 2026**
+Last reviewed: **26 August 2026**
 
 ## Status key
 
@@ -24,12 +24,13 @@ accepts a job and silently discards it.
 
 | Printer and machine | Status | AmigaOS | TCP/IP stack | Confirmed engine/result | Required or known settings |
 |---|---|---|---|---|---|
-| **Brother MFC-J6930DW** | ✅ Working | 3.2.3 | Roadshow | PWG Raster | Port `631`; path `/ipp/print`; `300 dpi`; A4; tray `auto`; scaling `auto`; quality `draft`; colour |
+| **Brother MFC-J6930DW** | ✅ Working | 3.2.3 | Roadshow | PWG Raster and URF, one-sided and duplex; PWG page boundaries/margins and URF two-sided long-edge duplex confirmed (driver rev 40) | Port `631`; path `/ipp/print`; `300 dpi`; A4; tray `auto`; scaling `auto`; quality `draft`; colour |
 | **Brother HL-L2350DW** on A500 PiStorm, Wi-Fi | ✅ Working | 3.2.3 | Roadshow | Original Aminet release reported as working perfectly; exact engine was not recorded | No printer-specific override reported |
 | **Brother HL-L2350DW** on A4000, CSMkII 060/50 and Ariadne-II, wired | ✅ Working | 3.2.3 | Roadshow | Multi-page printing fully fixed - confirmed in issue #8 after a beta build, and fully in released 1.1.0 | 1.1.0; scaling `auto` |
 | **Canon TS8360** (IPP identifies it as **TS8300 series**) | ✅ Working | 3.2.3 | Not reported | PWG Raster text and colour pictures physically confirmed; JPEG pictures also work | Port `631`; path `/ipp/print`; PWG Raster; **`300* dpi` compatibility mode**; A4; source `auto`; scaling as required. Printer advertises only 600 DPI but accepts 300 DPI |
 | **HP OfficeJet 8014e** on A4000, 68060, Wi-Fi | ✅ Working | 3.2.3 | Not reported | Detection/Query and Test Print fully fixed - confirmed in issue #30 after a beta build, and fully in released 1.1.0 | Port `631`; path `/ipp/print`; advertises both JPEG and PWG Raster - a fresh add now defaults to PWG Raster |
 | **Samsung C480W / C48x Series** | 🟡 Partial (PostScript only) | 3.9 Boing Bag 2; Kickstart 3.1 | Not reported | JPEG is silently discarded; PWG Raster and PDF are rejected. PostScript engine confirmed physically printing, but is slow since this printer only accepts PostScript | Port `631`; path `/ipp/print`; `300 dpi`; A4; tray `tray-1`; normal quality; scaling `auto`; allow 3–4 minutes for PostScript |
+| **OKI B412** | 🧪 Testing | Not reported | Not reported | Advertises only `application/octet-stream, application/vnd.hp-PCL, image/urf` - none of MintPRINT's four existing engines. Motivated the new `ENGINE=urf` Apple Raster backend ([docs/URF_ENGINE.md](URF_ENGINE.md)); not yet physically test-printed | Port `631`; path `/ipp/print`; Engine `urf` (auto-selected after Query, since no other MintPRINT engine is advertised) |
 
 “Not recorded” is intentional. Do not assume Roadshow, AmiTCP or Miami from
 the presence of `bsdsocket.library`; reports should name the actual stack and
@@ -56,6 +57,113 @@ Print mode:  color
 The recorded driver run completed the PWG document and received a successful
 HTTP/IPP response. The AmigaOS release and TCP/IP stack were not written into
 the test record and still need adding.
+
+**URF (Apple Raster) also confirmed**, driver revision 30: this printer
+advertises both `image/pwg-raster` and `image/urf`, so it doubled as the
+first real-hardware confirmation for the new `ENGINE=urf` backend
+(`docs/URF_ENGINE.md`), added for the OKI B412 report
+([issue #60](https://github.com/boingball/MintPRINT/issues/60)). A full
+A4 (2480x3508 @ 300dpi) test page printed correctly with `ENGINE=urf`
+explicitly selected; the driver log showed `URF end rows/expected/failed
+3508 3508 0` and a successful IPP result, and the retained
+`T:MintPRINT-job.urf` decodes cleanly to the expected header and all 3508
+rows. `pwg-sheet-back=rotated`; scaling `auto`; quality `high`; color;
+source `auto`.
+
+This printer also advertises `two-sided-long-edge`/`two-sided-short-edge`,
+making it the printer that first tested URF duplex - so far across three
+attempts, every one rejected by the printer before any paper came out,
+each exposing a different real bug:
+
+1. **Driver revision 31.** The test document was strip-printed
+   (`SPECIAL_NOFORMFEED`), and URF's duplex implementation at that revision
+   had no strip-printing accumulator (PWG-only at the time), so every small
+   band became its own bogus single-band "duplex page" - the driver log
+   showed 62 pages queued for what should have been a handful. Rejected
+   with `IPP duplex Print-Job error/http/status -16 200 1288`
+   (`server-error-job-canceled`). Fixed in driver revision 32 by extending
+   the same strip-printing accumulator PWG Raster already had to also
+   cover URF.
+2. **Driver revision 32.** The accumulator now correctly built two real
+   pages, but decoding the retained `T:MintPRINT-job.urf` showed them at
+   different heights - page 1 (front) 3562 rows, page 2 (back) 3505 rows,
+   both otherwise byte-perfect - and the printer rejected the job again
+   with the identical IPP status. A physical duplex sheet's two sides have
+   to share one height; real strip-printed content naturally overshot the
+   media-derived target on the front while the back only got padded to
+   the plain target. Fixed in driver revision 33 by flooring every later
+   page's target at the tallest page the duplex job has finalized so far
+   (`g_duplex_max_page_height`), converging same-sized pages onto one
+   height without ever truncating real content.
+3. **Driver revision 33.** Both pages now came out byte-perfect and an
+   exactly matching 3562 rows each - and the printer *still* rejected the
+   job with the identical IPP status, immediately and synchronously. The
+   cause was the duplex/tumble byte itself (page header offset 2): the
+   original CUPS-source-derived implementation used 1/2/3 for no-duplex/
+   short-side/long-side; cross-checking against a second, independent,
+   real-world URF reverse-engineering (against an HP DesignJet T230) found
+   the correct values are 0/1/2 - meaning this printer was being sent byte
+   value 3 for a `two-sided-long-edge` job, which isn't a defined value in
+   that second source at all. Fixed in driver revision 34 - see
+   `docs/URF_ENGINE.md`'s "Format layout" section for the corrected table
+   and citation.
+
+See `docs/URF_ENGINE.md` for all three fixes in detail. Apple Raster
+two-sided long-edge duplex is now physically confirmed on this printer (see
+the driver revision 40 retest note below); still unconfirmed is whether
+Apple Raster's lack of a backside-transform mechanism (unlike PWG's
+`pwg-sheet-back=rotated` above) produces a correctly-oriented backside on
+other printers/duplex units, and two-sided short-edge duplex has not
+specifically been retested.
+
+**A fourth, separate bug was found testing PWG Raster on this same
+printer** (driver revision 34), unrelated to duplex or to URF specifically:
+a genuine two-page Wordworth document (real letter text and graphics, with
+its own 0.5in top / 1.0in bottom page margins) printed one-sided with no
+IPP error at all, but the output was visibly corrupted - decoding the
+retained job file to an image showed a graphic cut off at the very top of
+the second physical sheet, with fragments of it recurring further down.
+`IPP duplex Print-Job error/http/status 0 200 0` on a retest confirmed PWG
+Raster duplex itself now works end to end on this printer, but reproduced
+the identical visible corruption on both sides. Root cause: the
+strip-printing accumulator only checked whether a page had *reached* its
+target height after accepting a whole `SPECIAL_NOFORMFEED` band, never
+whether accepting that band would *overshoot* it - so up to ~100 rows that
+belonged to the next page (including, in this case, its own top margin)
+were silently welded onto the bottom of the page that had just filled up.
+This affects PWG Raster and URF identically, one-sided or duplex, and
+predates this URF duplex work entirely (the accumulator logic itself was
+unchanged; URF only inherited it in driver revision 32 above). Revision 35
+added a media-height split, but its real retest proved Wordworth's logical
+page ends at a short 62-row remainder after 3062 printable rows, before the
+3505-row physical A4 boundary; rev 35 consequently still stole 443 rows
+from page 2. Revision 36 recognises that terminal short band for both normal
+and narrow auxiliary dumps, pads/finalises the sheet at the logical boundary,
+and keeps the media-height split as a fallback - see `docs/URF_ENGINE.md`'s
+"Duplex and strip-printing accumulation" section for the full mechanism.
+The rev 36 physical retest then showed that the 443 missing physical rows were
+all appended at the bottom: pagination was correct, but the configured
+0.50-inch top border was lost. Revision 37 added support and diagnostics for
+printer.device's standard `aSTBM` command, but its real trace proved Wordsworth
+does not send that command: it clears margins, sets a 70-line A4 form, then
+sends only the 3062-row printable raster. Revision 38 recognises that matching
+form-length/physical-media strip signature and restores the documented
+0.50-inch top border (150 rows at 300 DPI); final media padding continues to
+supply the remaining bottom border. Revision 39 also processes pre-dump
+`aIND`, `aNEL`, and literal LF movement at the active VMI as the stronger,
+genuine vertical-position signal; the rev 38 form-length reconstruction now
+acts only as a fallback when no such movement or explicit `aSTBM` margin is
+present.
+Revision 40 adds full diagnostics without changing that placement behaviour:
+every layout command from `aVERP0` through `aCAM` is logged with parameters and
+live line/VMI state, along with each band's `IODRPReq` source and destination
+geometry. This is intended to find any undocumented Wordsworth placement clue
+before treating the form-length reconstruction as permanent behaviour.
+
+**A physical retest on driver revision 40 confirmed both fixes**: Wordsworth's
+PWG Raster page boundaries and top/bottom margins now print correctly, and
+Apple Raster (URF) two-sided long-edge duplex completes and prints
+correctly end to end on this printer.
 
 ### Brother HL-L2350DW
 
@@ -192,6 +300,39 @@ Do not declare failure after a short wait. Its IPP job byte/impression counters
 also remain zero for jobs that physically print, so the device billing counter
 or actual paper is the reliable test.
 
+### OKI B412
+
+Reported in [issue #60](https://github.com/boingball/MintPRINT/issues/60)
+via `windows_ipp_probe.py` output. The printer reports:
+
+```text
+Port/path:       631 /ipp/print
+Formats:         application/octet-stream, application/vnd.hp-PCL, image/urf
+Media default:   iso_a4_210x297mm
+Source default:  tray-1
+Sides supported: one-sided, two-sided-long-edge, two-sided-short-edge
+Colour supported: no (monochrome only)
+```
+
+None of MintPRINT's engines at the time (JPEG, PostScript, PWG Raster, PDF)
+matched any of the three advertised formats - this printer is Apple Raster
+(URF) only among the formats MintPRINT can produce. `application/vnd.hp-PCL`
+was also considered but not pursued, since Apple Raster reuses the row
+compression already proven by the PWG Raster backend rather than requiring a
+new page-description language. See `docs/URF_ENGINE.md` for the resulting
+`ENGINE=urf` backend, added specifically for this report.
+
+The `ENGINE=urf` backend itself is now confirmed physically printing (see
+the Brother MFC-J6930DW entry above), but not yet on this specific
+printer - still needs an OKI B412 test report to close out issue #60.
+
+This printer also advertises duplex sides (`two-sided-long-edge`,
+`two-sided-short-edge`). MintPRINT duplex originally required
+`ENGINE=pwg-raster`, which this printer does not advertise - but `ENGINE=urf`
+now supports duplex too (driver revision 34, see `docs/DUPLEX_PRINTING.md`
+and `docs/URF_ENGINE.md`), so duplex is expected to be reachable here once
+this printer's own URF printing is confirmed, one-sided first.
+
 ## AmigaOS and TCP/IP stack status
 
 | Environment | Status |
@@ -293,10 +434,13 @@ graphics dumps to assemble one physical page.
 
 ### Wordworth 7 Print Setup
 
-Use driver revision **16** or newer (included in MintPRINT 1.0.3b). Revision 16
-preserves Wordworth's strip printing as one media-sized PWG page, separates
-complete multi-page output correctly, and prevents trailing narrow graphics
-dumps from becoming a second IPP job.
+Use driver revision **40** or newer for the current diagnostic strip-printing
+path.
+Revision 16 first preserved Wordworth's strip printing as one media-sized PWG
+page and prevented trailing narrow graphics dumps from becoming a second IPP
+job. Revision 36 additionally separates logical pages before physical media
+padding; revision 39 restores pre-dump vertical movement when supplied and
+otherwise retains revision 38's documented Wordsworth form-length fallback.
 
 Set Wordworth 7's **Print Setup** window to:
 

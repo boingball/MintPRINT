@@ -139,7 +139,7 @@ static struct MPTestPrintJob test_print_job;
 
 // Define the USED macro for GCC
 #define USED __attribute__((used))
-#define MINTPRINT_SETTINGS_VERSION "1.2.0"
+#define MINTPRINT_SETTINGS_VERSION "1.2.1"
 #define MINTPRINT_DRIVER_DEST ((CONST_STRPTR)"DEVS:Printers/MintPRINT")
 #define MINTPRINT_DRIVER_SRC  ((CONST_STRPTR)"PROGDIR:MintPRINT")
 
@@ -156,7 +156,7 @@ static BOOL mp_read_driver_revision(CONST_STRPTR path, UWORD *revision_out);
 
 /* Visible both to AmigaOS's Version command and in the About requester. */
 static const char USED mintprint_version[] =
-    "$VER: MintPrintSettings " MINTPRINT_SETTINGS_VERSION " (24.08.2026)";
+    "$VER: MintPrintSettings " MINTPRINT_SETTINGS_VERSION " (26.08.2026)";
 
 // Simple extension check
 BOOL has_extension(const char *filename, const char *ext) {
@@ -398,13 +398,20 @@ static BOOL mp_supported_side(const char *value) {
 
 static BOOL mp_duplex_transport_supported(void) {
     int i;
+    const char *format_mime;
 
-    /* MintPRINT duplex is one multi-page PWG Raster document in one ordinary
-     * Print-Job. This works on printers such as the Brother MFC-J6930DW that
-     * advertise duplex but explicitly reject multi-document IPP Jobs. */
-    if (strcmp(driver_engine_buffer, "pwg-raster") != 0) return FALSE;
+    /* MintPRINT duplex is one multi-page PWG Raster or Apple Raster (URF)
+     * document in one ordinary Print-Job. This works on printers such as
+     * the Brother MFC-J6930DW that advertise duplex but explicitly reject
+     * multi-document IPP Jobs. */
+    if (strcmp(driver_engine_buffer, "pwg-raster") == 0)
+        format_mime = "image/pwg-raster";
+    else if (strcmp(driver_engine_buffer, "urf") == 0)
+        format_mime = "image/urf";
+    else
+        return FALSE;
     for (i = 0; i < num_supported_formats; ++i) {
-        if (strcmp(supported_formats[i], "image/pwg-raster") == 0)
+        if (strcmp(supported_formats[i], format_mime) == 0)
             return TRUE;
     }
     return FALSE;
@@ -539,26 +546,27 @@ static BOOL driver_engine_explicit = FALSE;
  * under someone who really did mean to pick JPEG. Reset alongside
  * driver_engine_explicit whenever a Unit's config is (re)loaded. */
 static BOOL driver_engine_pwg_offer_shown = FALSE;
-#define MP_ENGINE_MAX 4
+#define MP_ENGINE_MAX 5
 
 static const char *mp_engine_all_labels[MP_ENGINE_MAX] = {
-    "JPEG", "PostScript", "PWG Raster", "PDF"
+    "JPEG", "PostScript", "PWG Raster", "PDF", "Apple Raster"
 };
 static const char *mp_engine_all_values[MP_ENGINE_MAX] = {
-    "jpeg", "postscript", "pwg-raster", "pdf"
+    "jpeg", "postscript", "pwg-raster", "pdf", "urf"
 };
 static const char *mp_engine_all_mimes[MP_ENGINE_MAX] = {
-    "image/jpeg", "application/postscript", "image/pwg-raster", "application/pdf"
+    "image/jpeg", "application/postscript", "image/pwg-raster", "application/pdf",
+    "image/urf"
 };
 
 /* This array address stays fixed for the lifetime of the GadTools Cycle. */
 static STRPTR engine_labels[MP_ENGINE_MAX + 1] = {
-    "JPEG", "PostScript", "PWG Raster", "PDF", NULL
+    "JPEG", "PostScript", "PWG Raster", "PDF", "Apple Raster", NULL
 };
 
 /* Maps the currently-visible Cycle index to MintPRINT's internal value. */
 static const char *mp_engine_value_map[MP_ENGINE_MAX] = {
-    "jpeg", "postscript", "pwg-raster", "pdf"
+    "jpeg", "postscript", "pwg-raster", "pdf", "urf"
 };
 static int mp_engine_count = MP_ENGINE_MAX;
 char driver_media_buffer[MAX_ATTR_LEN] = "";
@@ -764,6 +772,7 @@ static const char *engine_mime_type(const char *engine) {
     if (strcmp(engine, "postscript") == 0) return "application/postscript";
     if (strcmp(engine, "pwg-raster") == 0) return "image/pwg-raster";
     if (strcmp(engine, "pdf") == 0) return "application/pdf";
+    if (strcmp(engine, "urf") == 0) return "image/urf";
     return "image/jpeg";
 }
 
@@ -782,7 +791,8 @@ static ULONG mp_engine_active_index(void) {
 /* Every document-format this driver's engines can actually produce. Kept
  * in sync with engine_mime_type()'s cases. */
 static const char *mp_supported_engine_mimes[] = {
-    "image/jpeg", "application/postscript", "image/pwg-raster", "application/pdf"
+    "image/jpeg", "application/postscript", "image/pwg-raster", "application/pdf",
+    "image/urf"
 };
 #define MP_SUPPORTED_ENGINE_MIME_COUNT \
     (sizeof(mp_supported_engine_mimes) / sizeof(mp_supported_engine_mimes[0]))
@@ -817,7 +827,8 @@ static void mp_check_any_engine_supported(struct Window *win) {
     es.es_Title = (UBYTE *)"MintPrint Settings";
     es.es_TextFormat = (UBYTE *)
         "This printer did not advertise any document format\n"
-        "MintPRINT can produce JPEG, PostScript, PWG Raster, or PDF.\n\n"
+        "MintPRINT can produce JPEG, PostScript, PWG Raster, PDF,\n"
+        "or Apple Raster (URF).\n\n"
         "It is likely not supported yet. To help add support,\n"
         "please log an issue at github.com/boingball/MintPRINT -\n"
         "run windows_ipp_probe.py (from a Windows PC on the same\n"
@@ -1155,6 +1166,8 @@ static BOOL load_driver_config(void) {
                 strcpy(driver_engine_buffer, "pdf");
             else if (strcmp(line + 7, "postscript") == 0)
                 strcpy(driver_engine_buffer, "postscript");
+            else if (strcmp(line + 7, "urf") == 0)
+                strcpy(driver_engine_buffer, "urf");
             else
                 strcpy(driver_engine_buffer, "jpeg");
             /* Matches driver_resolution_explicit's own precedent just above:
@@ -1741,9 +1754,10 @@ static BOOL mintprint_test_page(struct Window *win) {
         test_print_job.request->io_Special =
             SPECIAL_MILCOLS | SPECIAL_MILROWS;
     } else {
-        /* JPEG, PWG Raster and PDF all reach this branch identically:
-         * same source bitmap, same source dimensions, same configured-
-         * media-derived destination, same SPECIAL_ASPECT|SPECIAL_CENTER.
+        /* JPEG, PWG Raster, PDF and Apple Raster (URF) all reach this
+         * branch identically: same source bitmap, same source dimensions,
+         * same configured-media-derived destination, same
+         * SPECIAL_ASPECT|SPECIAL_CENTER.
          * printer.device does not derive the destination from the
          * configured media when DestCols/DestRows are left at 0 - a real
          * test print showed ~3113x3015px, unrelated to iso_a4_210x297mm -
@@ -2082,7 +2096,7 @@ static void update_sides_dropdown(struct Window *win) {
     if (!transport_ok &&
         (mp_supported_side("two-sided-long-edge") ||
          mp_supported_side("two-sided-short-edge"))) {
-        printf("Duplex requires the PWG Raster engine; select PWG Raster.\n");
+        printf("Duplex requires the PWG Raster or Apple Raster engine.\n");
     }
 }
 
@@ -2164,13 +2178,31 @@ static void mp_rebuild_engine_options_from_query(void) {
      * with real capability data (use_query) - nothing to prefer yet from
      * an unqueried printer's "all three visible" list. */
     if (use_query && !driver_engine_explicit) {
+        BOOL preferred = FALSE;
         for (i = 0; i < out; ++i) {
             if (strcmp(mp_engine_value_map[i], "pwg-raster") == 0) {
                 if (strcmp(driver_engine_buffer, "pwg-raster") != 0) {
                     strcpy(driver_engine_buffer, "pwg-raster");
                 }
                 current_found = TRUE;
+                preferred = TRUE;
                 break;
+            }
+        }
+        /* No PWG Raster on this printer (the common case for a
+         * URF-only device like the OKI B412 - issue #60): Apple Raster
+         * uses the same cheap PackBits-style row compression PWG Raster
+         * does, so prefer it over JPEG/PDF's per-pixel DCT cost for the
+         * same reason, whenever it's actually advertised. */
+        if (!preferred) {
+            for (i = 0; i < out; ++i) {
+                if (strcmp(mp_engine_value_map[i], "urf") == 0) {
+                    if (strcmp(driver_engine_buffer, "urf") != 0) {
+                        strcpy(driver_engine_buffer, "urf");
+                    }
+                    current_found = TRUE;
+                    break;
+                }
             }
         }
     }
@@ -5505,7 +5537,8 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
         ng.ng_TopEdge = row2_top;
     }
 
-    // Printer document engine: JPEG, PostScript, PWG Raster, or PDF.
+    // Printer document engine: JPEG, PostScript, PWG Raster, PDF, or
+    // Apple Raster (URF).
     // LeftEdge is nudged right of the other rows' shared 130 - this is the
     // longest label at this column ("Printer Engine:", 15 chars) and at 130
     // it renders with no left margin at all, clipping against the window

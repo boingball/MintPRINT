@@ -2,8 +2,8 @@
  * MintPRINT printer.device integration working driver path.
  *
  * Converts printer.device raster rows into a low-memory streaming document
- * (JPEG, PWG Raster, PDF, or PostScript per Unit0's ENGINE= setting) and
- * submits it to
+ * (JPEG, PWG Raster, PDF, PostScript, or Apple Raster/URF per Unit0's
+ * ENGINE= setting) and submits it to
  * the configured IPP Print-Job endpoint.
  *
  * Trace output: T:MintPRINT-driver.log
@@ -11,6 +11,7 @@
  * Debug PWG Raster: T:MintPRINT-job.pwg
  * Debug PDF:        T:MintPRINT-job.pdf
  * Debug PostScript: T:MintPRINT-job.ps
+ * Debug URF:        T:MintPRINT-job.urf
  */
 
 #include <exec/types.h>
@@ -31,6 +32,7 @@
 #include "pwg_writer.h"
 #include "pdf_writer.h"
 #include "postscript_writer.h"
+#include "urf_writer.h"
 #include "ipp_client.h"
 #include "media_size.h"
 #include "spool.h"
@@ -40,7 +42,7 @@
  * exactly which build produced it, rather than relying on whoever's
  * reading it to separately check About or remember what they last
  * copied to DEVS:Printers/. */
-#define MP_DRIVER_REV 29
+#define MP_DRIVER_REV 41
 
 struct ExecBase *SysBase = NULL;
 struct DosLibrary *DOSBase = NULL;
@@ -68,6 +70,7 @@ struct TagItem DriverTags[] = {
 #define MP_JOB_FILE_PWG  ((CONST_STRPTR)"T:MintPRINT-job.pwg")
 #define MP_JOB_FILE_PDF  ((CONST_STRPTR)"T:MintPRINT-job.pdf")
 #define MP_JOB_FILE_PS   ((CONST_STRPTR)"T:MintPRINT-job.ps")
+#define MP_JOB_FILE_URF  ((CONST_STRPTR)"T:MintPRINT-job.urf")
 #define MP_JOB_FILE_BACK ((CONST_STRPTR)"T:MintPRINT-back.rgb")
 
 /* Multiple Render(status=0 begin -> rows -> status=4 end) cycles inside one
@@ -98,7 +101,8 @@ enum {
     MP_ENGINE_JPEG = 0,
     MP_ENGINE_PWG = 1,
     MP_ENGINE_PDF = 2,
-    MP_ENGINE_POSTSCRIPT = 3
+    MP_ENGINE_POSTSCRIPT = 3,
+    MP_ENGINE_URF = 4
 };
 
 static ULONG g_page_width = 0;
@@ -128,6 +132,23 @@ static ULONG g_aux_height = 0;
  * width band arrives, materialise the pending height as white PWG rows. */
 static ULONG g_leading_aux_height = 0;
 static ULONG g_page_target_height = 0;
+/* A strip-printing application normally renders fixed-height bands and ends
+ * its logical printable page with one shorter remainder band. Wordworth
+ * keeps SPECIAL_NOFORMFEED set even across that boundary, so rev35's
+ * media-height-only splitter took the first 443 rows of page 2 to finish the
+ * 3505-row A4 raster. Keep the normal band height and mark the current band
+ * when it is shorter; case 4 confirms enough logical page height has accrued
+ * before treating it as a page delimiter. */
+static ULONG g_strip_nominal_band_height = 0;
+static BOOL g_strip_current_band_short = FALSE;
+/* Set by case 0 when a continuation band would push the accumulating page
+ * past g_page_target_height: only the first g_split_at_row of that band's
+ * rows belong to the page being finished, the rest start a fresh one. See
+ * the case-1 split point and mp_begin_split_page() - without this, the
+ * overshooting rows (and any of the next page's own leading margin caught
+ * up in them) silently landed on the wrong physical page. */
+static BOOL g_split_pending = FALSE;
+static ULONG g_split_at_row = 0;
 static BOOL g_runaway_tripped = FALSE;
 static BOOL g_page_had_noformfeed = FALSE;
 static BOOL g_discard_aux_band = FALSE;
@@ -140,6 +161,18 @@ static BOOL g_discard_leading_aux_band = FALSE;
  * captured value rather than trusting case 4's x, since only case 5's has
  * been directly verified in this codebase. */
 static ULONG g_current_special = 0;
+/* Graphics-oriented applications can set their page borders with the
+ * standard DEC aSTBM command before issuing PRD_DUMPRPORT bands. MintPRINT
+ * used to discard that command in DoSpecial(), so the printable raster had
+ * the right height but was written at physical row zero. Keep the command's
+ * one-based top line and current VMI until the first strip band can convert
+ * them to device-resolution rows. */
+static ULONG g_text_top_margin_line = 0;
+static ULONG g_text_margin_vmi = 0;
+static ULONG g_text_form_length_lines = 0;
+static BOOL g_text_margins_cleared = FALSE;
+static ULONG g_text_vertical_units = 0;
+static ULONG g_text_vertical_advances = 0;
 static BOOL g_sizing_pass = FALSE;
 
 static BOOL g_job_open = FALSE;
@@ -153,6 +186,8 @@ static UBYTE *g_pdf_scratch = NULL;
 static ULONG g_pdf_scratch_bytes = 0;
 static UBYTE *g_postscript_scratch = NULL;
 static ULONG g_postscript_scratch_bytes = 0;
+static UBYTE *g_urf_scratch = NULL;
+static ULONG g_urf_scratch_bytes = 0;
 static ULONG g_job_rows_written = 0;
 static BOOL g_job_failed = FALSE;
 static int g_engine = MP_ENGINE_JPEG;
@@ -160,24 +195,48 @@ static MPJpegEncoder g_jpeg;
 static MPPwgEncoder g_pwg;
 static MPPdfEncoder g_pdf;
 static MPPostScriptEncoder g_postscript;
+static MPUrfEncoder g_urf;
 static struct MPConfig g_config;
 static LONG g_config_source = MP_CONFIG_SOURCE_DEFAULTS;
 static BOOL g_duplex_job_failed = FALSE;
 static ULONG g_duplex_page_count = 0;
+/* Tallest REAL accumulated height any strip-printed page in this duplex
+ * job has finalized at so far (mp_page_finalize(), below). A physical
+ * duplex sheet's front and back must share one height - real strip-printed
+ * content can legitimately land above the media-derived target on one
+ * side (its bands just don't divide evenly into the target) while another
+ * side falls short and gets padded to only the target, producing a
+ * front/back mismatch a real duplex unit can reject outright. Using this
+ * as an extra floor alongside the media target for every later page keeps
+ * the whole job converging on one consistent height without ever
+ * truncating real content - see the strip-target computation in
+ * Render()'s case 0. Reset per job in DriverOpen(); never decreases. */
+static ULONG g_duplex_max_page_height = 0;
 static ULONG g_job_file_bytes = 0;
 static ULONG g_pwg_page_header_offset = 0;
+/* Byte offset of the URF file header's page-count placeholder, patched
+ * with the true total once a duplex job's last page is known - see
+ * DriverClose(). Set once per job (the file header itself, unlike
+ * g_urf_page_header_offset below, is written only once). */
+static ULONG g_urf_file_header_offset = 0;
+/* Byte offset of the CURRENT URF page's own 32-byte header - refreshed at
+ * the start of every page, exactly like g_pwg_page_header_offset. Used to
+ * patch that page's height field once a strip-printed page's true
+ * accumulated height is known - see mp_page_finalize(). */
+static ULONG g_urf_page_header_offset = 0;
 static BOOL g_pwg_defer_rows = FALSE;
 static BOOL g_pwg_reverse_x = FALSE;
 static BOOL g_pwg_reverse_y = FALSE;
 static BOOL g_pwg_aux_open = FALSE;
 static ULONG g_pwg_aux_bytes = 0;
 
-/* config.c only writes one of the four known engine literal strings. */
+/* config.c only writes one of the five known engine literal strings. */
 static int mp_detect_engine(const struct MPConfig *cfg)
 {
     if (cfg->engine[0] == 'p' && cfg->engine[1] == 'w') return MP_ENGINE_PWG;
     if (cfg->engine[0] == 'p' && cfg->engine[1] == 'd') return MP_ENGINE_PDF;
     if (cfg->engine[0] == 'p' && cfg->engine[1] == 'o') return MP_ENGINE_POSTSCRIPT;
+    if (cfg->engine[0] == 'u' && cfg->engine[1] == 'r') return MP_ENGINE_URF;
     return MP_ENGINE_JPEG;
 }
 
@@ -187,6 +246,7 @@ static CONST_STRPTR mp_job_filename(void)
         case MP_ENGINE_PWG: return MP_JOB_FILE_PWG;
         case MP_ENGINE_PDF: return MP_JOB_FILE_PDF;
         case MP_ENGINE_POSTSCRIPT: return MP_JOB_FILE_PS;
+        case MP_ENGINE_URF: return MP_JOB_FILE_URF;
         default:            return MP_JOB_FILE_JPEG;
     }
 }
@@ -198,13 +258,28 @@ static CONST_STRPTR mp_document_format(void)
         case MP_ENGINE_PDF: return (CONST_STRPTR)"application/pdf";
         case MP_ENGINE_POSTSCRIPT:
             return (CONST_STRPTR)"application/postscript";
+        case MP_ENGINE_URF: return (CONST_STRPTR)"image/urf";
         default:            return (CONST_STRPTR)"image/jpeg";
     }
 }
 
 static BOOL mp_duplex_requested(void)
 {
-    return g_engine == MP_ENGINE_PWG && g_config.sides[0] == 't';
+    return (g_engine == MP_ENGINE_PWG || g_engine == MP_ENGINE_URF) &&
+           g_config.sides[0] == 't';
+}
+
+/* PWG Raster and URF are the only two engines whose page header declares a
+ * growable height that can be patched after the fact (mp_pwg_grow()/
+ * mp_urf_grow(), MP_PWG_HEIGHT_HEADER_OFFSET/MP_URF_HEIGHT_FIELD_OFFSET) -
+ * so they're the only two that can safely accumulate several
+ * SPECIAL_NOFORMFEED bands into one physical page. JPEG/PDF/PostScript
+ * remain single-band: a NOFORMFEED band under those engines finalizes
+ * immediately as its own (usually wrong) page, exactly as before this
+ * predicate existed. */
+static BOOL mp_engine_supports_strip_accumulation(void)
+{
+    return g_engine == MP_ENGINE_PWG || g_engine == MP_ENGINE_URF;
 }
 
 static ULONG mp_strlen(const char *s)
@@ -361,11 +436,16 @@ static void mp_job_release_buffers(void)
         FreeMem(g_postscript_scratch, g_postscript_scratch_bytes);
         g_postscript_scratch = NULL;
     }
+    if (g_urf_scratch) {
+        FreeMem(g_urf_scratch, g_urf_scratch_bytes);
+        g_urf_scratch = NULL;
+    }
     g_rgb_row_bytes = 0;
     g_jpeg_scratch_bytes = 0;
     g_pwg_scratch_bytes = 0;
     g_pdf_scratch_bytes = 0;
     g_postscript_scratch_bytes = 0;
+    g_urf_scratch_bytes = 0;
 }
 
 static void mp_pwg_close_aux(void)
@@ -422,7 +502,13 @@ static BOOL mp_job_begin(ULONG width, ULONG height)
                                 "two-sided-short-edge");
     backside = duplex && ((g_duplex_page_count + 1UL) & 1UL) == 0;
 
-    if (backside) {
+    /* PWG-only: Apple Raster's compact page header has no
+     * CrossFeedTransform/FeedTransform-equivalent fields for describing a
+     * pre-mirrored backside (see urf_writer.h), so a URF backside is never
+     * reversed here - it streams in the same natural row/column order as
+     * any front page, trusting the printer's own duplex mechanism to
+     * orient it from the page header's duplex/tumble byte alone. */
+    if (backside && g_engine == MP_ENGINE_PWG) {
         mp_pwg_backside_transform(g_config.sides,
                                   g_config.pwg_sheet_back,
                                   &cross_feed, &feed);
@@ -450,6 +536,7 @@ static BOOL mp_job_begin(ULONG width, ULONG height)
         case MP_ENGINE_PWG: need = mp_pwg_scratch_size(width); break;
         case MP_ENGINE_PDF: need = mp_pdf_scratch_size(width); break;
         case MP_ENGINE_POSTSCRIPT: need = mp_postscript_scratch_size(width); break;
+        case MP_ENGINE_URF: need = mp_urf_scratch_size(width); break;
         default:            need = mp_jpeg_scratch_size(width); break;
     }
     if (!need) {
@@ -482,6 +569,15 @@ static BOOL mp_job_begin(ULONG width, ULONG height)
             g_postscript_scratch = (UBYTE *)AllocMem(need, MEMF_PUBLIC);
             if (!g_postscript_scratch) {
                 mp_log_text("PostScript scratch allocation failed");
+                mp_job_cleanup();
+                return FALSE;
+            }
+            break;
+        case MP_ENGINE_URF:
+            g_urf_scratch_bytes = need;
+            g_urf_scratch = (UBYTE *)AllocMem(need, MEMF_PUBLIC);
+            if (!g_urf_scratch) {
+                mp_log_text("URF scratch allocation failed");
                 mp_job_cleanup();
                 return FALSE;
             }
@@ -587,6 +683,29 @@ static BOOL mp_job_begin(ULONG width, ULONG height)
             mp_log_3("PostScript page points width/height/dpi",
                      (LONG)page_width_points, (LONG)page_height_points,
                      (LONG)g_config.resolution);
+            break;
+        }
+        case MP_ENGINE_URF: {
+            /* write_file_header only for this job's very first page - the
+             * 12-byte file header (including the duplex page-count
+             * placeholder) is written exactly once, mirroring PWG's
+             * write_sync just above. */
+            BOOL write_file_header = g_job_file_bytes == 0 ? TRUE : FALSE;
+            if (write_file_header)
+                g_urf_file_header_offset = g_job_file_bytes;
+            g_urf_page_header_offset = g_job_file_bytes +
+                                       (write_file_header ? 12UL : 0UL);
+            if (!mp_urf_begin_page(&g_urf, width, height, g_config.resolution,
+                                   write_file_header, duplex, tumble,
+                                   g_urf_scratch, g_urf_scratch_bytes,
+                                   mp_job_file_write, NULL)) {
+                mp_log_text("URF encoder begin failed");
+                g_job_failed = TRUE;
+                mp_job_cleanup();
+                return FALSE;
+            }
+            mp_log_3("URF begin width/height/scratch",
+                     (LONG)width, (LONG)height, (LONG)g_urf_scratch_bytes);
             break;
         }
         default:
@@ -744,6 +863,16 @@ static BOOL mp_job_write_row(struct PrtInfo *pi, ULONG row_number)
                 return FALSE;
             }
             break;
+        case MP_ENGINE_URF:
+            if (!mp_urf_write_scanline(&g_urf, g_rgb_row)) {
+                mp_log_3("URF scanline failed row/written/expected",
+                         (LONG)row_number, (LONG)g_job_rows_written,
+                         (LONG)g_page_height);
+                g_job_failed = TRUE;
+                if (mp_duplex_requested()) g_duplex_job_failed = TRUE;
+                return FALSE;
+            }
+            break;
         default:
             if (!mp_jpeg_write_scanline(&g_jpeg, g_rgb_row)) {
                 mp_log_3("JPEG scanline failed row/written/expected",
@@ -775,6 +904,7 @@ static BOOL mp_job_finish(ULONG expected_rows)
             case MP_ENGINE_POSTSCRIPT:
                 ok = mp_postscript_finish(&g_postscript) ? TRUE : FALSE;
                 break;
+            case MP_ENGINE_URF: ok = mp_urf_finish(&g_urf) ? TRUE : FALSE; break;
             default:            ok = mp_jpeg_finish(&g_jpeg) ? TRUE : FALSE; break;
         }
         if (!ok) g_job_failed = TRUE;
@@ -788,6 +918,7 @@ static BOOL mp_job_finish(ULONG expected_rows)
         case MP_ENGINE_POSTSCRIPT:
             label = "PostScript end rows/expected/failed";
             break;
+        case MP_ENGINE_URF: label = "URF end rows/expected/failed"; break;
         default:            label = "JPEG end rows/expected/failed"; break;
     }
     mp_log_3(label, (LONG)g_job_rows_written, (LONG)expected_rows,
@@ -805,32 +936,87 @@ static BOOL mp_job_finish(ULONG expected_rows)
     return ok;
 }
 
-/* Ensures the currently-open PWG encoder can accept total_rows. A
- * media-sized strip job usually has the full row cap from its first band;
- * unknown media can still grow safely as more same-width bands arrive. */
-static BOOL mp_job_reserve_pwg(ULONG total_rows)
+/* Ensures the currently-open encoder can accept total_rows. PWG and URF
+ * offer a growable-declared-height contract (mp_pwg_grow()/mp_urf_grow()):
+ * a media-sized strip job usually has the full row cap from its first band,
+ * but unknown media (or - since driver revision 40 - the leading-margin
+ * restoration below, which is not gated to any one engine) can still need
+ * to grow it as more rows are accounted for. JPEG/PDF/PostScript have no
+ * such contract - mp_job_begin() must have already sized them for
+ * total_rows up front (which every current caller does: case 0 folds any
+ * leading margin into encoder_height before calling mp_job_begin(), for
+ * every engine, precisely so this never needs to grow one of them) - so
+ * total_rows exceeding what they were already sized for is a real error,
+ * not something this function can fix up after the fact. */
+static BOOL mp_job_reserve_page(ULONG total_rows)
 {
     if (!g_job_open || g_job_failed) return FALSE;
-    if (total_rows <= g_pwg.height) return TRUE;
-    if (!mp_pwg_grow(&g_pwg, total_rows - g_pwg.height)) {
-        mp_log_text("PWG grow failed (accumulated page too tall)");
-        g_job_failed = TRUE;
-        return FALSE;
+    switch (g_engine) {
+        case MP_ENGINE_URF:
+            if (total_rows <= g_urf.height) return TRUE;
+            if (!mp_urf_grow(&g_urf, total_rows - g_urf.height)) {
+                mp_log_text("URF grow failed (accumulated page too tall)");
+                g_job_failed = TRUE;
+                return FALSE;
+            }
+            return TRUE;
+        case MP_ENGINE_PWG:
+            if (total_rows <= g_pwg.height) return TRUE;
+            if (!mp_pwg_grow(&g_pwg, total_rows - g_pwg.height)) {
+                mp_log_text("PWG grow failed (accumulated page too tall)");
+                g_job_failed = TRUE;
+                return FALSE;
+            }
+            return TRUE;
+        case MP_ENGINE_PDF:
+            if (total_rows <= g_pdf.height) return TRUE;
+            mp_log_text("PDF page too tall for its declared height");
+            g_job_failed = TRUE;
+            return FALSE;
+        case MP_ENGINE_POSTSCRIPT:
+            if (total_rows <= g_postscript.height) return TRUE;
+            mp_log_text("PostScript page too tall for its declared height");
+            g_job_failed = TRUE;
+            return FALSE;
+        default: /* MP_ENGINE_JPEG */
+            if (total_rows <= g_jpeg.height) return TRUE;
+            mp_log_text("JPEG page too tall for its declared height");
+            g_job_failed = TRUE;
+            return FALSE;
     }
-    return TRUE;
 }
 
-static BOOL mp_job_pad_pwg(ULONG target_rows)
+static BOOL mp_job_pad_page(ULONG target_rows)
 {
     ULONG i;
 
     if (!g_job_open || g_job_failed || !g_rgb_row) return FALSE;
-    if (!mp_job_reserve_pwg(target_rows)) return FALSE;
+    if (!mp_job_reserve_page(target_rows)) return FALSE;
 
     for (i = 0; i < g_rgb_row_bytes; ++i) g_rgb_row[i] = 255;
     while (g_job_rows_written < target_rows) {
-        if (!mp_pwg_accept_row(g_rgb_row)) {
-            mp_log_text("PWG blank page padding failed");
+        BOOL ok;
+
+        switch (g_engine) {
+            case MP_ENGINE_URF:
+                ok = mp_urf_write_scanline(&g_urf, g_rgb_row) ? TRUE : FALSE;
+                break;
+            case MP_ENGINE_PWG:
+                ok = mp_pwg_accept_row(g_rgb_row);
+                break;
+            case MP_ENGINE_PDF:
+                ok = mp_pdf_write_scanline(&g_pdf, g_rgb_row) ? TRUE : FALSE;
+                break;
+            case MP_ENGINE_POSTSCRIPT:
+                ok = mp_postscript_write_scanline(&g_postscript, g_rgb_row)
+                    ? TRUE : FALSE;
+                break;
+            default: /* MP_ENGINE_JPEG */
+                ok = mp_jpeg_write_scanline(&g_jpeg, g_rgb_row) ? TRUE : FALSE;
+                break;
+        }
+        if (!ok) {
+            mp_log_text("Blank page padding failed");
             g_job_failed = TRUE;
             return FALSE;
         }
@@ -926,7 +1112,7 @@ static LONG mp_page_submit_and_track(ULONG rows_for_streak)
         result.http_status = 0;
         result.ipp_status = 0;
         result.document_bytes = g_job_file_bytes;
-        mp_log_3("PWG duplex page queued pages/rows/bytes",
+        mp_log_3("Duplex page queued pages/rows/bytes",
                  (LONG)g_duplex_page_count, (LONG)rows_for_streak,
                  (LONG)g_job_file_bytes);
     } else {
@@ -990,7 +1176,7 @@ static BOOL mp_page_finalize(void)
          * 2478x2100 is advertised as landscape and printers auto-rotate it. */
         if (g_page_had_noformfeed && g_pwg.height > g_accum_height) {
             ULONG before = g_accum_height;
-            if (!mp_job_pad_pwg(g_pwg.height)) {
+            if (!mp_job_pad_page(g_pwg.height)) {
                 g_job_failed = TRUE;
             } else {
                 g_accum_height = g_pwg.height;
@@ -1029,6 +1215,36 @@ static BOOL mp_page_finalize(void)
             g_job_failed = TRUE;
             g_duplex_job_failed = TRUE;
         }
+    } else if (g_engine == MP_ENGINE_URF && !g_job_failed) {
+        UBYTE be[4];
+
+        /* Same strip-page padding PWG needs above, using URF's own
+         * growable height (mp_urf_grow(), via mp_job_pad_page()). */
+        if (g_page_had_noformfeed && g_urf.height > g_accum_height) {
+            ULONG before = g_accum_height;
+            if (!mp_job_pad_page(g_urf.height)) {
+                g_job_failed = TRUE;
+            } else {
+                g_accum_height = g_urf.height;
+                mp_log_3("URF padded strip page rows/from/to",
+                         (LONG)(g_accum_height - before),
+                         (LONG)before, (LONG)g_accum_height);
+            }
+        }
+
+        /* Patch this page's own height field with the final accumulated
+         * total - URF has no PageSizeY-equivalent second field, and no
+         * backside replay (see urf_writer.h: no row/column reversal is
+         * ever performed for a URF backside). */
+        be[0] = (UBYTE)(g_accum_height >> 24);
+        be[1] = (UBYTE)(g_accum_height >> 16);
+        be[2] = (UBYTE)(g_accum_height >> 8);
+        be[3] = (UBYTE)g_accum_height;
+        if (!mp_spool_job_patch(g_urf_page_header_offset +
+                                MP_URF_HEIGHT_FIELD_OFFSET, be, 4)) {
+            mp_log_text("Failed to patch accumulated URF page height");
+            g_job_failed = TRUE;
+        }
     }
 
     job_ok = mp_job_finish(g_accum_height);
@@ -1036,7 +1252,51 @@ static BOOL mp_page_finalize(void)
         if (mp_duplex_requested()) g_duplex_job_failed = TRUE;
         return FALSE;
     }
+    if (mp_duplex_requested() && g_accum_height > g_duplex_max_page_height)
+        g_duplex_max_page_height = g_accum_height;
     return mp_page_submit_and_track(g_accum_height) == 0;
+}
+
+/* Starts the page that holds a split band's overshoot rows - the part of a
+ * SPECIAL_NOFORMFEED band that didn't fit on the page mp_page_finalize()
+ * just closed (see the case-1 split point in Render()). Mirrors case 0's
+ * own "begin new page" path (media/duplex-floor target, mp_job_begin(),
+ * the g_page_pending/g_accum_width/g_accum_height/g_page_target_height
+ * reset), minus the leading-whitespace and tiny-auxiliary-band handling
+ * that never applies here - a split page always starts with real content
+ * rows already in hand, never a leading blank band still to be
+ * discovered. */
+static BOOL mp_begin_split_page(ULONG width, ULONG remaining_height)
+{
+    ULONG encoder_height = remaining_height;
+    ULONG media_height = 0;
+
+    g_page_width = width;
+    g_page_height = remaining_height;
+    g_recenter_clamped_page = FALSE;
+
+    if (mp_detect_engine(&g_config) == MP_ENGINE_PWG ||
+        mp_detect_engine(&g_config) == MP_ENGINE_URF) {
+        media_height = mp_media_target_height(g_config.media, width,
+                                              g_config.resolution);
+        if (mp_duplex_requested() && g_duplex_max_page_height > media_height)
+            media_height = g_duplex_max_page_height;
+        if (media_height > encoder_height)
+            encoder_height = media_height;
+    }
+
+    if (!mp_job_begin(width, encoder_height)) {
+        if (mp_duplex_requested()) g_duplex_job_failed = TRUE;
+        return FALSE;
+    }
+
+    g_page_pending = TRUE;
+    g_accum_width = width;
+    g_accum_height = remaining_height;
+    g_aux_height = 0;
+    g_page_target_height = media_height;
+    g_page_had_noformfeed = TRUE;
+    return TRUE;
 }
 
 static void mp_log_row(struct PrtInfo *pi, ULONG row)
@@ -1137,6 +1397,12 @@ int PRT_STDARGS DriverOpen(struct IORequest *ior)
     g_recenter_clamped_page = FALSE;
     g_sizing_pass = FALSE;
     g_current_special = 0;
+    g_text_top_margin_line = 0;
+    g_text_margin_vmi = 0;
+    g_text_form_length_lines = 0;
+    g_text_margins_cleared = FALSE;
+    g_text_vertical_units = 0;
+    g_text_vertical_advances = 0;
     g_page_had_noformfeed = FALSE;
     g_discard_aux_band = FALSE;
     g_discard_aux_band_has_ink = FALSE;
@@ -1144,10 +1410,17 @@ int PRT_STDARGS DriverOpen(struct IORequest *ior)
     g_aux_height = 0;
     g_leading_aux_height = 0;
     g_page_target_height = 0;
+    g_strip_nominal_band_height = 0;
+    g_strip_current_band_short = FALSE;
+    g_split_pending = FALSE;
+    g_split_at_row = 0;
     g_duplex_job_failed = FALSE;
     g_duplex_page_count = 0;
+    g_duplex_max_page_height = 0;
     g_job_file_bytes = 0;
     g_pwg_page_header_offset = 0;
+    g_urf_file_header_offset = 0;
+    g_urf_page_header_offset = 0;
     /* Loaded once per Open() bracket (i.e. once per print job) rather than
      * per-page inside Render() case 0: case 5, which sets the PED
      * resolution/MaxDots fields below, fires BEFORE case 0 on every job's
@@ -1155,8 +1428,9 @@ int PRT_STDARGS DriverOpen(struct IORequest *ior)
      * here already, not just Init()'s one-time compiled-in default. */
     g_config_source = mp_spool_config_load(&g_config);
     g_engine = mp_detect_engine(&g_config);
-    if (g_config.sides[0] == 't' && g_engine != MP_ENGINE_PWG) {
-        mp_log_text("Duplex requires PWG Raster; using one-sided");
+    if (g_config.sides[0] == 't' &&
+        g_engine != MP_ENGINE_PWG && g_engine != MP_ENGINE_URF) {
+        mp_log_text("Duplex requires PWG Raster or URF; using one-sided");
         g_config.sides[0] = 0;
     }
     mp_log_config(&g_config, g_config_source);
@@ -1175,27 +1449,45 @@ VOID PRT_STDARGS DriverClose(struct IORequest *ior)
      * silently discarding its last (possibly only) bands. */
     if (g_page_pending) mp_page_finalize();
 
-    /* Duplex pages have been appended to one PWG Raster stream. Close the
-     * local file before reopening it for the one normal IPP Print-Job that
-     * carries sides=. A failed page invalidates the complete stream rather
-     * than printing a misleading partial document. */
+    /* Duplex pages have been appended to one multi-page PWG Raster or URF
+     * stream. Close the local file before reopening it for the one normal
+     * IPP Print-Job that carries sides=. A failed page invalidates the
+     * complete stream rather than printing a misleading partial
+     * document. */
     if (g_duplex_page_count > 0) {
+        /* URF's page count lives once in the file header, written as an
+         * "unknown/streaming" placeholder when the first page began (see
+         * urf_writer.h) - patch in the true total now that it's known,
+         * while the file is still open (mp_spool_job_patch() rewrites
+         * bytes in the currently-open job file). PWG needs no equivalent:
+         * its per-page header carries no file-wide page count at all. */
+        if (g_engine == MP_ENGINE_URF && g_job_open && !g_duplex_job_failed) {
+            UBYTE be[4];
+            be[0] = (UBYTE)(g_duplex_page_count >> 24);
+            be[1] = (UBYTE)(g_duplex_page_count >> 16);
+            be[2] = (UBYTE)(g_duplex_page_count >> 8);
+            be[3] = (UBYTE)g_duplex_page_count;
+            if (!mp_spool_job_patch(g_urf_file_header_offset +
+                                    MP_URF_PAGECOUNT_FIELD_OFFSET, be, 4)) {
+                mp_log_text("Failed to patch URF duplex page count");
+                g_duplex_job_failed = TRUE;
+            }
+        }
         if (g_job_open) {
             mp_spool_job_close();
             g_job_open = FALSE;
         }
         if (!g_duplex_job_failed) {
-            ipp_rc = mp_spool_ipp_submit(&g_config, MP_JOB_FILE_PWG,
-                                          (CONST_STRPTR)"image/pwg-raster",
-                                          &result);
+            ipp_rc = mp_spool_ipp_submit(&g_config, mp_job_filename(),
+                                          mp_document_format(), &result);
             mp_log_3("IPP duplex Print-Job error/http/status",
                      result.error, result.http_status,
                      (LONG)result.ipp_status);
             if (ipp_rc != 0) g_duplex_job_failed = TRUE;
         } else {
-            mp_log_text("PWG duplex job discarded after page failure");
+            mp_log_text("Duplex job discarded after page failure");
         }
-        if (!g_config.debug) mp_spool_job_delete(MP_JOB_FILE_PWG);
+        if (!g_config.debug) mp_spool_job_delete(mp_job_filename());
     }
     mp_job_cleanup();
     mp_log_text("Close");
@@ -1206,15 +1498,104 @@ LONG PRT_STDARGS DoSpecial(UWORD *command, UBYTE output_buffer[],
                            BYTE *current_line_spacing,
                            BYTE *crlf_flag, STRPTR params)
 {
-    (void)command;
     (void)output_buffer;
-    (void)current_line_position;
-    (void)current_line_spacing;
-    (void)crlf_flag;
-    (void)params;
 
-    /* No text-printer escape language yet. Graphics is the first milestone. */
+    /* Keep a complete trace of the page-layout command range. Several old
+     * applications maintain document borders in their own UI but expose only
+     * some subset of this state to printer.device. Logging every command and
+     * both parameter slots, plus printer.device's live layout state, makes
+     * missing information distinguishable from information MintPRINT merely
+     * failed to interpret. Commands 55..66 are aVERP0 through aCAM. */
+    if (command && *command >= aVERP0 && *command <= aCAM) {
+        mp_log_3("Text layout command id/param0/param1",
+                 (LONG)*command,
+                 params ? (LONG)((UBYTE *)params)[0] : -1,
+                 params ? (LONG)((UBYTE *)params)[1] : -1);
+        mp_log_3("Text layout state linePos/VMI/crlf",
+                 current_line_position ?
+                     (LONG)*current_line_position : -1,
+                 current_line_spacing ?
+                     (LONG)(UBYTE)*current_line_spacing : -1,
+                 crlf_flag ? (LONG)*crlf_flag : -1);
+    }
+
+    /* Wordsworth uses the printer.device command stream to position its
+     * graphics printable area. aSTBM's first parameter is a one-based top
+     * line; current_line_spacing is VMI in 1/216-inch units. Retaining both
+     * lets Render case 0 prepend the exact physical top border before the
+     * first raster band. The bottom parameter need not be stored: the
+     * media-height finalizer already supplies all remaining white rows at
+     * the bottom after the logical printable page ends. */
+    if (command && *command == aVERP0) {
+        g_text_margin_vmi = 27UL; /* 1/8 inch = 27/216 inch */
+        if (current_line_spacing) *current_line_spacing = 27;
+        mp_log_3("Text VMI command/id/units", (LONG)*command, 27, 0);
+    } else if (command && *command == aVERP1) {
+        g_text_margin_vmi = 36UL; /* 1/6 inch = 36/216 inch */
+        if (current_line_spacing) *current_line_spacing = 36;
+        mp_log_3("Text VMI command/id/units", (LONG)*command, 36, 0);
+    } else if (command && *command == aSTBM && params && current_line_spacing) {
+        g_text_top_margin_line = (ULONG)((UBYTE *)params)[0];
+        g_text_margin_vmi = (ULONG)(UBYTE)*current_line_spacing;
+        g_text_margins_cleared = FALSE;
+        mp_log_3("Text page margins topLine/VMI/bottomLine",
+                 (LONG)g_text_top_margin_line,
+                 (LONG)g_text_margin_vmi,
+                 (LONG)((UBYTE *)params)[1]);
+    } else if (command && *command == aCAM) {
+        g_text_top_margin_line = 0;
+        g_text_margin_vmi = 0;
+        g_text_margins_cleared = TRUE;
+        mp_log_text("Text page margins cleared");
+    } else if (command && *command == aSLPP && params) {
+        g_text_form_length_lines = (ULONG)((UBYTE *)params)[0];
+        mp_log_3("Text form length lines/VMI/marginsCleared",
+                 (LONG)g_text_form_length_lines,
+                 current_line_spacing ?
+                     (LONG)(UBYTE)*current_line_spacing : -1,
+                 g_text_margins_cleared ? 1 : 0);
+    } else if (command &&
+               (*command == aTMS || *command == aBMS ||
+                *command == aPERF ||
+                *command == aPERF0)) {
+        mp_log_3("Text page command id/param0/VMI",
+                 (LONG)*command,
+                 params ? (LONG)((UBYTE *)params)[0] : -1,
+                 current_line_spacing ?
+                     (LONG)(UBYTE)*current_line_spacing : -1);
+    }
+
+    /* No physical escape language is emitted: raster and captured-text jobs
+     * are submitted through IPP instead of a parallel/serial transport. */
     return 0;
+}
+
+/* Called by command_table.c for aIND/aNEL and literal LF traffic. Keep the
+ * physical vertical motion separate from captured text: a graphics-oriented
+ * application can advance the paper before PRD_DUMPRPORT without ever
+ * emitting printable characters. A zero VMI means printer.device supplied no
+ * current spacing; use the last explicit VMI, then the normal 1/6-inch
+ * default. */
+VOID MintPRINTNoteVerticalAdvance(ULONG vmi_216ths)
+{
+    ULONG vmi = vmi_216ths;
+
+    if (!vmi) vmi = g_text_margin_vmi;
+    if (!vmi) vmi = 36UL;
+    if (g_text_vertical_units <= 0xffffffffUL - vmi) {
+        g_text_vertical_units += vmi;
+        ++g_text_vertical_advances;
+    }
+    mp_log_3("Text vertical advance count/VMI/units",
+             (LONG)g_text_vertical_advances, (LONG)vmi,
+             (LONG)g_text_vertical_units);
+}
+
+VOID MintPRINTResetVerticalAdvances(void)
+{
+    g_text_vertical_units = 0;
+    g_text_vertical_advances = 0;
+    mp_log_text("Text vertical position reset");
 }
 
 LONG PRT_STDARGS Render(LONG ct, LONG x, LONG y, LONG status, ...)
@@ -1245,10 +1626,12 @@ LONG PRT_STDARGS Render(LONG ct, LONG x, LONG y, LONG status, ...)
             ULONG encoder_height;
             ULONG media_height = 0;
             ULONG leading_height = 0;
+            struct IODRPReq *request = (struct IODRPReq *)ct;
             g_rows_seen = 0;
             g_discard_aux_band = FALSE;
             g_discard_aux_band_has_ink = FALSE;
             g_discard_leading_aux_band = FALSE;
+            g_strip_current_band_short = FALSE;
             /* g_config was already loaded once for this job in DriverOpen()
              * - case 5 (which fires before this on the job's first page)
              * needs it that early for the PED resolution fields below. */
@@ -1258,6 +1641,20 @@ LONG PRT_STDARGS Render(LONG ct, LONG x, LONG y, LONG status, ...)
              * See the "multiple Render(0) cycles inside one Open/Close"
              * investigation in the project history around this line. */
             mp_log_3("Render begin width/height/ct", x, y, ct);
+            if (request) {
+                mp_log_3("IODRP source x/y/width",
+                         (LONG)request->io_SrcX,
+                         (LONG)request->io_SrcY,
+                         (LONG)request->io_SrcWidth);
+                mp_log_3("IODRP sourceHeight/destCols/destRows",
+                         (LONG)request->io_SrcHeight,
+                         request->io_DestCols,
+                         request->io_DestRows);
+                mp_log_3("IODRP special/modes/command",
+                         (LONG)request->io_Special,
+                         (LONG)request->io_Modes,
+                         (LONG)request->io_Command);
+            }
 
             /* SPECIAL_NOPRINT: a sizing-only pass (RKM) - the app is
              * asking how big its dump would be, not asking for output.
@@ -1281,7 +1678,7 @@ LONG PRT_STDARGS Render(LONG ct, LONG x, LONG y, LONG status, ...)
              * rows (10.6mm at 600dpi) from the document's top margin. Keep
              * suppressing the impossible-width raster itself, but case 4
              * retains its height until the first normal-width page begins. */
-            if (!g_page_pending && g_engine == MP_ENGINE_PWG &&
+            if (!g_page_pending && mp_engine_supports_strip_accumulation() &&
                 (g_current_special & SPECIAL_NOFORMFEED) &&
                 mp_is_tiny_leading_auxiliary_band((ULONG)x)) {
                 g_discard_aux_band = TRUE;
@@ -1297,12 +1694,15 @@ LONG PRT_STDARGS Render(LONG ct, LONG x, LONG y, LONG status, ...)
              * already being accumulated. They cannot be appended as
              * horizontal rows to the full-width PWG raster, so ignore their
              * pixels but retain their height as page-boundary evidence. */
-            if (g_page_pending && g_engine == MP_ENGINE_PWG &&
+            if (g_page_pending && mp_engine_supports_strip_accumulation() &&
                 (g_current_special & SPECIAL_NOFORMFEED) &&
                 mp_is_tiny_auxiliary_band(g_accum_width, (ULONG)x)) {
                 g_discard_aux_band = TRUE;
                 g_page_height = (ULONG)y;
                 g_page_had_noformfeed = TRUE;
+                g_strip_current_band_short =
+                    g_strip_nominal_band_height && (ULONG)y > 0 &&
+                    (ULONG)y < g_strip_nominal_band_height;
                 mp_log_3("Ignoring tiny NOFORMFEED auxiliary band width/height/pageWidth",
                          x, y, (LONG)g_accum_width);
                 return PDERR_NOERR;
@@ -1311,7 +1711,7 @@ LONG PRT_STDARGS Render(LONG ct, LONG x, LONG y, LONG status, ...)
             /* Same width as the page currently being accumulated -> this
              * is another band of it, not a new page - matches whatever
              * case 4 decided last time it saw SPECIAL_NOFORMFEED (below). */
-            continuation = g_page_pending && g_engine == MP_ENGINE_PWG &&
+            continuation = g_page_pending && mp_engine_supports_strip_accumulation() &&
                            (ULONG)x == g_accum_width;
 
             if (g_page_pending && !continuation) {
@@ -1323,12 +1723,38 @@ LONG PRT_STDARGS Render(LONG ct, LONG x, LONG y, LONG status, ...)
             }
 
             if (continuation) {
+                ULONG new_total = g_accum_height + (ULONG)y;
                 g_page_width = (ULONG)x;
                 g_page_height = (ULONG)y;
-                if (!mp_job_reserve_pwg(g_accum_height + (ULONG)y))
+                g_strip_current_band_short =
+                    g_strip_nominal_band_height && (ULONG)y > 0 &&
+                    (ULONG)y < g_strip_nominal_band_height;
+                if ((ULONG)y > g_strip_nominal_band_height)
+                    g_strip_nominal_band_height = (ULONG)y;
+                /* A band that would carry the page past its target isn't
+                 * wholly this page's - accepting all of it (the previous
+                 * behaviour) silently stole however many rows overshot,
+                 * including any of the NEXT page's own leading margin
+                 * caught up in the same band, and welded them onto the
+                 * bottom of this one. Only reserve up to target here; the
+                 * remainder starts a fresh page at the case-1 split point
+                 * below once this band's rows actually arrive. */
+                if (g_page_target_height &&
+                    g_accum_height < g_page_target_height &&
+                    new_total > g_page_target_height) {
+                    g_split_pending = TRUE;
+                    g_split_at_row = g_page_target_height - g_accum_height;
+                    if (!mp_job_reserve_page(g_page_target_height))
+                        return PDERR_BUFFERMEMORY;
+                    mp_log_3("Strip band will split at row/bandHeight/target",
+                             (LONG)g_split_at_row, y,
+                             (LONG)g_page_target_height);
+                    return PDERR_NOERR;
+                }
+                if (!mp_job_reserve_page(new_total))
                     return PDERR_BUFFERMEMORY;
-                g_accum_height += (ULONG)y;
-                mp_log_3("PWG band appended width/thisHeight/accumHeight",
+                g_accum_height = new_total;
+                mp_log_3("Strip band appended width/thisHeight/accumHeight",
                          x, y, (LONG)g_accum_height);
                 return PDERR_NOERR;
             }
@@ -1336,6 +1762,7 @@ LONG PRT_STDARGS Render(LONG ct, LONG x, LONG y, LONG status, ...)
             g_page_width = (ULONG)x;
             g_page_height = (ULONG)y;
             g_recenter_clamped_page = FALSE;
+            g_strip_nominal_band_height = (ULONG)y;
 
             /* printer.device's own page width for a DUMPRPORT source (no
              * SPECIAL_NOFORMFEED - a single-shot page, e.g. MintPrint
@@ -1385,19 +1812,81 @@ LONG PRT_STDARGS Render(LONG ct, LONG x, LONG y, LONG status, ...)
             }
 
             leading_height = g_leading_aux_height;
+            if (g_current_special & SPECIAL_NOFORMFEED) {
+                ULONG dpi = g_config.resolution ?
+                            g_config.resolution : 300UL;
+                ULONG target_height = mp_media_target_height(
+                    g_config.media, g_page_width, dpi);
+                ULONG vertical_margin = mp_vertical_advance_rows(
+                    g_text_vertical_units, dpi);
+                ULONG command_margin = mp_text_top_margin_rows(
+                    g_text_top_margin_line, g_text_margin_vmi,
+                    dpi);
+
+                /* Actual paper movement is the strongest placement signal.
+                 * aSTBM is next; Wordsworth's form-length reconstruction is
+                 * used only when neither appeared. Reject implausibly large
+                 * pre-dump movement so ordinary captured text cannot consume
+                 * most of a graphics page. */
+                if (vertical_margin && target_height &&
+                    vertical_margin <= target_height / 4UL) {
+                    command_margin = vertical_margin;
+                    mp_log_3("Restoring vertical advance rows/count/units",
+                             (LONG)vertical_margin,
+                             (LONG)g_text_vertical_advances,
+                             (LONG)g_text_vertical_units);
+                } else if (!command_margin && g_text_margins_cleared) {
+                    command_margin = mp_wordsworth_top_margin_rows(
+                        g_text_form_length_lines, target_height,
+                        dpi);
+                }
+
+                /* A narrow leading control band and aSTBM can describe the
+                 * same physical whitespace. Use the larger observation,
+                 * never their sum, so applications which provide both do
+                 * not get a doubled top margin. */
+                if (command_margin > leading_height)
+                    leading_height = command_margin;
+                if (command_margin > 0)
+                    mp_log_3("Restoring top margin rows/line/formLength",
+                             (LONG)command_margin,
+                             (LONG)g_text_top_margin_line,
+                             (LONG)g_text_form_length_lines);
+            }
+            /* A vertical movement positions only the next new graphics page,
+             * never every continuation band. Later pages can supply their
+             * own advances; if Wordsworth does not, its form-length fallback
+             * above still restores the documented border consistently. */
+            g_text_vertical_units = 0;
+            g_text_vertical_advances = 0;
             if (leading_height > 0xffffffffUL - g_page_height) {
-                mp_log_text("Leading PWG whitespace height overflow");
+                mp_log_text("Leading strip whitespace height overflow");
                 g_leading_aux_height = 0;
                 return PDERR_BUFFERMEMORY;
             }
             encoder_height = leading_height + g_page_height;
-            if (mp_detect_engine(&g_config) == MP_ENGINE_PWG &&
+            if ((mp_detect_engine(&g_config) == MP_ENGINE_PWG ||
+                 mp_detect_engine(&g_config) == MP_ENGINE_URF) &&
                 (g_current_special & SPECIAL_NOFORMFEED)) {
                 media_height = mp_media_target_height(
                     g_config.media, g_page_width, g_config.resolution);
+                /* A physical duplex sheet's two sides must share one
+                 * height. Real strip-printed content can legitimately
+                 * overshoot the media-derived target on one side (its
+                 * bands just don't divide evenly into it) while another
+                 * side falls short and only gets padded to the plain
+                 * target - a front/back mismatch a real duplex unit can
+                 * reject outright. Flooring every page's target at the
+                 * tallest page this duplex job has finalized so far keeps
+                 * the whole job converging on one height without ever
+                 * truncating real content - see g_duplex_max_page_height. */
+                if (mp_duplex_requested() &&
+                    g_duplex_max_page_height > media_height) {
+                    media_height = g_duplex_max_page_height;
+                }
                 if (media_height > encoder_height) {
                     encoder_height = media_height;
-                    mp_log_3("PWG strip target width/bandHeight/pageHeight",
+                    mp_log_3("Strip target width/bandHeight/pageHeight",
                              (LONG)g_page_width, (LONG)g_page_height,
                              (LONG)encoder_height);
                 }
@@ -1413,12 +1902,12 @@ LONG PRT_STDARGS Render(LONG ct, LONG x, LONG y, LONG status, ...)
              * Pending bands alone never open a job, so an all-auxiliary
              * sequence still cannot resurrect the old blank-page storm. */
             if (leading_height > 0) {
-                if (!mp_job_pad_pwg(leading_height)) {
+                if (!mp_job_pad_page(leading_height)) {
                     g_leading_aux_height = 0;
                     if (mp_duplex_requested()) g_duplex_job_failed = TRUE;
                     return PDERR_BUFFERMEMORY;
                 }
-                mp_log_3("PWG restored leading whitespace rows/pending/pageHeight",
+                mp_log_3("Restored leading whitespace rows/pending/pageHeight",
                          (LONG)leading_height, 0, (LONG)encoder_height);
             }
             g_leading_aux_height = 0;
@@ -1454,6 +1943,32 @@ LONG PRT_STDARGS Render(LONG ct, LONG x, LONG y, LONG status, ...)
             if (g_discard_aux_band) {
                 if (mp_row_has_ink(pi)) g_discard_aux_band_has_ink = TRUE;
                 return PDERR_NOERR;
+            }
+
+            /* The split point case 0 flagged when this band was announced:
+             * row g_split_at_row is the first one that belongs on a new
+             * page, not this one. Close the current page out at exactly
+             * its target height (no overshoot, so no padding needed
+             * either), then start the new page before writing this row -
+             * mp_job_write_row() below always writes into whichever
+             * encoder is current. */
+            if (g_split_pending && (ULONG)y == g_split_at_row) {
+                ULONG split_width = g_accum_width;
+                ULONG remaining = g_page_height - g_split_at_row;
+
+                g_split_pending = FALSE;
+                g_accum_height = g_page_target_height;
+                if (g_job_failed || g_job_rows_written != g_accum_height ||
+                    !mp_page_finalize()) {
+                    g_job_failed = TRUE;
+                    if (mp_duplex_requested()) g_duplex_job_failed = TRUE;
+                    return PDERR_CANCEL;
+                }
+                if (!mp_begin_split_page(split_width, remaining))
+                    return PDERR_CANCEL;
+                mp_log_3("Strip page split rows/newPageHeight/target",
+                         (LONG)g_split_at_row, (LONG)remaining,
+                         (LONG)g_page_target_height);
             }
 
             if (!g_job_failed && !mp_job_write_row(pi, (ULONG)y))
@@ -1511,10 +2026,21 @@ LONG PRT_STDARGS Render(LONG ct, LONG x, LONG y, LONG status, ...)
                 g_discard_aux_band = FALSE;
                 g_discard_aux_band_has_ink = FALSE;
                 g_discard_leading_aux_band = FALSE;
+                if (g_page_pending && !g_job_failed &&
+                    g_strip_current_band_short &&
+                    mp_short_strip_completes_logical_page(
+                        g_accum_height, g_aux_height,
+                        g_page_target_height,
+                        g_strip_nominal_band_height, g_page_height)) {
+                    mp_log_3("Strip logical boundary rows/aux/shortBand",
+                             (LONG)g_accum_height, (LONG)g_aux_height,
+                             (LONG)g_page_height);
+                    return mp_page_finalize() ? PDERR_NOERR : PDERR_CANCEL;
+                }
                 if (g_page_pending && !g_job_failed && mp_media_page_complete(
                         g_accum_height, g_aux_height,
                         g_page_target_height)) {
-                    mp_log_3("PWG media boundary reached rows/aux/target",
+                    mp_log_3("Strip media boundary reached rows/aux/target",
                              (LONG)g_accum_height, (LONG)g_aux_height,
                              (LONG)g_page_target_height);
                     return mp_page_finalize() ? PDERR_NOERR : PDERR_CANCEL;
@@ -1529,15 +2055,26 @@ LONG PRT_STDARGS Render(LONG ct, LONG x, LONG y, LONG status, ...)
 
             /* SPECIAL_NOFORMFEED: "here's another band of the same page,
              * don't eject/submit yet" (RKM: "multiple graphics dump on a
-             * page oriented printer"). Only PWG can stay pending across
-             * bands (see mp_job_reserve_pwg/mp_page_finalize) - JPEG/PDF/PostScript
-             * always finalize below exactly as before this change. */
-            if (g_engine == MP_ENGINE_PWG &&
+             * page oriented printer"). Only PWG and URF can stay pending
+             * across bands (see mp_job_reserve_page/mp_page_finalize) -
+             * JPEG/PDF/PostScript always finalize below exactly as before
+             * this change. */
+            if (mp_engine_supports_strip_accumulation() &&
                 (g_current_special & SPECIAL_NOFORMFEED)) {
                 g_page_had_noformfeed = TRUE;
+                if (g_strip_current_band_short &&
+                    mp_short_strip_completes_logical_page(
+                        g_accum_height, g_aux_height,
+                        g_page_target_height,
+                        g_strip_nominal_band_height, g_page_height)) {
+                    mp_log_3("Strip logical boundary rows/aux/shortBand",
+                             (LONG)g_accum_height, (LONG)g_aux_height,
+                             (LONG)g_page_height);
+                    return mp_page_finalize() ? PDERR_NOERR : PDERR_CANCEL;
+                }
                 if (mp_media_page_complete(g_accum_height, g_aux_height,
                                            g_page_target_height)) {
-                    mp_log_3("PWG media boundary reached rows/aux/target",
+                    mp_log_3("Strip media boundary reached rows/aux/target",
                              (LONG)g_accum_height, (LONG)g_aux_height,
                              (LONG)g_page_target_height);
                     return mp_page_finalize() ? PDERR_NOERR : PDERR_CANCEL;

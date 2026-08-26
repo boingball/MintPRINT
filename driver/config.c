@@ -194,6 +194,8 @@ LONG mp_config_load(struct MPConfig *cfg)
                 mp_cfg_copy(cfg->engine, sizeof(cfg->engine), "pdf");
             } else if (mp_cfg_starts(value, "postscript") && mp_cfg_len(value) == 10) {
                 mp_cfg_copy(cfg->engine, sizeof(cfg->engine), "postscript");
+            } else if (mp_cfg_starts(value, "urf") && mp_cfg_len(value) == 3) {
+                mp_cfg_copy(cfg->engine, sizeof(cfg->engine), "urf");
             } else {
                 mp_cfg_copy(cfg->engine, sizeof(cfg->engine), "jpeg");
             }

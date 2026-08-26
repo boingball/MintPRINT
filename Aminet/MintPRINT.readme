@@ -2,7 +2,7 @@ Short:        IPP/AirPrint driver and setup tool
 Author:       Darren Banfi (boingball)
 Uploader:     boingball@gmail.com
 Type:         driver/print
-Version:      1.2.0
+Version:      1.2.1
 Requires:     68000+; AmigaOS 3.0+; TCP/IP stack providing bsdsocket.library
 Architecture: m68k-amigaos >= 3.0.0
 
@@ -183,12 +183,125 @@ commercially, provided the copyright notice is kept.
 Credits
 -------
 
-Driver, GUI, IPP client, and the JPEG/PostScript/PWG Raster/PDF document encoders
-by Darren Banfi (boingball), developed with assistance from Anthropic
-Claude.
+Driver, GUI, IPP client, and the JPEG/PostScript/PWG Raster/PDF/Apple Raster
+document encoders by Darren Banfi (boingball), developed with assistance
+from Anthropic Claude.
 
 History
 -------
+
+1.2.1  Added Apple Raster (URF) engine and duplex, driver revision 41.
+
+       - Added a fifth output engine, Apple Raster (ENGINE=urf, image/urf),
+         for printers that advertise none of MintPRINT's other formats
+         (JPEG, PostScript, PWG Raster, PDF) - reported for the OKI B412 in
+         issue #60. Reuses the PWG Raster encoder's proven row compression
+       - One-sided URF printing confirmed physically on a Brother
+         MFC-J6930DW; the OKI B412 report that motivated this engine is
+         still pending its own confirmation
+       - Added duplex support to the URF engine: one multi-page stream
+         submitted once from DriverClose(), same as PWG Raster, using
+         Apple Raster's own duplex/tumble page-header byte and a
+         patched-in-after-the-fact page count (its file header declares
+         the total up front, unlike PWG's per-page header). Unlike PWG
+         Raster, no backside row/column reversal is performed - Apple
+         Raster's page header has no equivalent transform fields, so the
+         printer's own duplex mechanism is trusted to orient the backside
+       - Fixed a real bug found on the first URF duplex test (Brother
+         MFC-J6930DW, driver revision 31): strip-printed documents had no
+         accumulator for URF (PWG-only until now), so every small
+         SPECIAL_NOFORMFEED band became its own "duplex page" - 62 queued
+         for what should have been a handful - and the printer rejected the
+         job. Fixed in revision 32 by extending PWG Raster's existing
+         strip-printing accumulator (growable declared height, tiny-band
+         discarding, post-hoc height-field patch) to also cover URF
+       - Fixed a second real bug found immediately after (same Brother
+         test, driver revision 32): the accumulator now built two real
+         pages, but they came out different heights - front content
+         naturally overshot the media-derived target while the back only
+         got padded to it - and the printer rejected the job again, since
+         a physical duplex sheet needs matching front/back geometry. Fixed
+         in revision 33 by flooring every later page's target at the
+         tallest page the duplex job has finalized so far, converging
+         same-sized pages onto one height without ever truncating real
+         content
+       - Fixed a third real bug found immediately after (same Brother
+         test, driver revision 33): with both pages now byte-perfect and
+         an exactly matching height, the printer still rejected the job,
+         immediately and synchronously. The duplex/tumble byte itself
+         (page header offset 2) was wrong - the original implementation
+         used 1/2/3 for no-duplex/short-side/long-side, paraphrased from
+         CUPS source, but cross-checking against a second, independent,
+         real-world URF reverse-engineering (tested against an HP
+         DesignJet T230) found the correct values are 0/1/2, meaning this
+         printer was being sent an undefined byte value (3) for every
+         two-sided-long-edge job. Fixed in revision 34; backside
+         orientation still remains unconfirmed
+       - Fixed a fourth real bug, found testing PWG Raster one-sided on
+         the same printer rather than URF or duplex specifically (driver
+         revision 34): a two-page Wordworth document printed with no IPP
+         error, but visibly corrupted - decoding the retained job file
+         showed a graphic cut off at the top of the second physical
+         sheet. The strip-printing accumulator only checked whether a
+         page had reached its target height after accepting a whole
+         SPECIAL_NOFORMFEED band, never whether accepting it would
+         overshoot the target, so up to ~100 rows belonging to the next
+         page (including its own top margin) got silently welded onto
+         the page that just filled up. Affects PWG Raster and URF alike,
+         one-sided or duplex, and predates this URF duplex work entirely.
+         Revision 35 split an overshooting band at the physical media
+         height, but a real retest proved Wordworth's printable page ends
+         earlier: 3062 rows (thirty 100-row bands plus a final 62-row
+         remainder), not the 3505-row A4 raster. It therefore still took
+         443 rows from page 2. Revision 36 recognises the short terminal
+         band as the logical page boundary, including narrow auxiliary
+         dumps, and pads/finalises the physical sheet there; the media
+         height split remains as a fallback for other applications
+       - Fixed the top margin going missing on Wordsworth pages once
+         revision 36 started trusting the application's own logical page
+         boundary instead of always padding to the physical media height
+         (driver revisions 37-38): a real trace showed Wordsworth clears
+         its margins and sends only a 70-line form length, not its
+         separate Print Borders values, through the margin commands.
+         Revision 37 restores the top border in strip pages from that
+         signal; revision 38 adds a form-length/physical-media fallback
+         that restores the documented 0.50-inch top border (150 rows at
+         300 DPI) whenever no real vertical movement or explicit aSTBM
+         placement is present. The media-height finalizer still supplies
+         the matching bottom border
+       - Restored real pre-dump vertical movement as the strongest margin
+         placement signal (driver revision 39): the driver now processes
+         and accumulates the aIND/aNEL and literal line-feed movement
+         Wordsworth issues before a graphics dump, converts it from
+         printer.device's 1/216-inch VMI, and emits the corresponding
+         leading white raster rows ahead of the revision 38 form-length
+         fallback
+       - Added complete legacy page layout diagnostics (driver revision
+         40): debug logs now record every printer layout command from
+         aVERP0 through aCAM, both parameter slots, live line/VMI/CRLF
+         state, and each raster band's complete IODRPReq source/
+         destination geometry, to expose any placement signal outside the
+         commands already handled - without changing revision 39's output
+       - Physically confirmed on a Brother MFC-J6930DW: Wordsworth's PWG
+         Raster page boundaries/margins print correctly, and Apple Raster
+         (URF) two-sided long-edge duplex completes and prints
+       - Fixed PRT:/CMD_WRITE text printing silently submitting image/jpeg
+         instead of image/urf when ENGINE=urf is selected: the text path's
+         own engine dispatch had no URF case and fell through to JPEG,
+         which fails outright on a URF-only printer such as the OKI B412.
+         command_table.c now recognises engine=urf and encodes/submits
+         text pages as Apple Raster like the graphics path already does
+       - Fixed the revision 37-39 top-margin restoration corrupting
+         non-PWG/URF strip-printed pages: it computes and writes leading
+         whitespace rows for any NOFORMFEED job regardless of engine, but
+         the helper it called only understood PWG and URF, silently
+         writing into the (unopened) PWG encoder for a JPEG, PDF or
+         PostScript job instead of the one actually in use.
+         mp_job_reserve_page()/mp_job_pad_page() now dispatch to whichever
+         encoder the job is actually using for all five engines. Neither
+         fix has been physically re-tested yet
+       - Driver build revision is now 41 so MintPrint Settings can detect
+         and offer the updated driver automatically
 
 1.2.0  Faster JPEG, PRT: text printing, and PostScript compatibility fixes.
 

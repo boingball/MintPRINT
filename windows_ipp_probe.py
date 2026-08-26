@@ -20,7 +20,7 @@ import sys
 import urllib.parse
 from collections import defaultdict
 
-VERSION = "2.1"
+VERSION = "2.2"
 
 # IPP operations
 OP_PRINT_JOB = 0x0002
@@ -328,11 +328,18 @@ def build_validate_job(printer_uri, mime, request_id):
     return bytes(body)
 
 
-def build_print_job(printer_uri, mime, job_name, request_id):
+def build_print_job(printer_uri, mime, job_name, request_id, sides=None):
     body = base_request(OP_PRINT_JOB, request_id, printer_uri)
     body += attr(TAG_NAME, "requesting-user-name", safe_username())
     body += attr(TAG_NAME, "job-name", job_name)
     body += attr(TAG_MIME_MEDIA_TYPE, "document-format", mime)
+    if sides:
+        # job-attributes-tag (0x02), matching MintPRINT's own driver
+        # (driver/ipp_client.c) so a --print-file test reproduces the same
+        # request a real duplex job sends, including the "sides" attribute
+        # a duplex URF/PWG stream depends on the printer actually honouring.
+        body += bytes([0x02])
+        body += attr(TAG_KEYWORD, "sides", sides)
     body += bytes([TAG_END_OF_ATTRIBUTES])
     return bytes(body)
 
@@ -692,6 +699,7 @@ def report(parsed, target, http_status, http_reason, response_bytes, dump_all=Fa
     lines.append("  %-27s %s" % ("PostScript:", "YES" if "application/postscript" in formats else "NO"))
     lines.append("  %-27s %s" % ("PWG Raster:", "YES" if "image/pwg-raster" in formats else "NO"))
     lines.append("  %-27s %s" % ("PDF (application/pdf):", "YES" if "application/pdf" in formats else "NO"))
+    lines.append("  %-27s %s" % ("Apple Raster (image/urf):", "YES" if "image/urf" in formats else "NO"))
     add_list(lines, "JPEG size limit", all_values(parsed, "jpeg-k-octets-supported"), max_items=10)
     add_list(lines, "JPEG width limit", all_values(parsed, "jpeg-x-dimension-supported"), max_items=10)
     add_list(lines, "JPEG height limit", all_values(parsed, "jpeg-y-dimension-supported"), max_items=10)
@@ -768,9 +776,10 @@ def report(parsed, target, http_status, http_reason, response_bytes, dump_all=Fa
     if http_status >= 400:
         warnings.append("HTTP transport returned an error.")
     if formats and not any(x in formats for x in (
-        "image/jpeg", "application/postscript", "image/pwg-raster", "application/pdf"
+        "image/jpeg", "application/postscript", "image/pwg-raster", "application/pdf",
+        "image/urf"
     )):
-        warnings.append("Printer advertises none of MintPRINT's JPEG/PostScript/PWG/PDF engines.")
+        warnings.append("Printer advertises none of MintPRINT's JPEG/PostScript/PWG/PDF/URF engines.")
     if not formats:
         warnings.append("Printer did not report document-format-supported.")
     if "image/jpeg" in formats and not jpeg_constraints:
@@ -868,7 +877,7 @@ def main():
     )
     parser.add_argument(
         "--validate-mintprint", action="store_true",
-        help="run non-printing Validate-Job checks for JPEG, PostScript, PWG Raster and PDF"
+        help="run non-printing Validate-Job checks for JPEG, PostScript, PWG Raster, PDF and URF"
     )
     parser.add_argument(
         "--print-file",
@@ -877,6 +886,12 @@ def main():
     parser.add_argument(
         "--mime", default="image/jpeg",
         help="MIME type for --print-file (default: image/jpeg)"
+    )
+    parser.add_argument(
+        "--sides",
+        help="optional sides Job Template attribute for --print-file "
+             "(e.g. two-sided-long-edge) - needed to reproduce a duplex "
+             "job exactly as MintPRINT's own driver sends it"
     )
     args = parser.parse_args()
 
@@ -915,7 +930,8 @@ def main():
         extra.append("Validate-Job checks (no page should be printed)")
         extra.append("-" * 66)
         for idx, mime in enumerate(
-            ("image/jpeg", "application/postscript", "image/pwg-raster", "application/pdf"), start=10
+            ("image/jpeg", "application/postscript", "image/pwg-raster", "application/pdf",
+             "image/urf"), start=10
         ):
             try:
                 req = build_validate_job(target["printer_uri"], mime, idx)
@@ -939,7 +955,8 @@ def main():
                 payload = fh.read()
             req = build_print_job(
                 target["printer_uri"], args.mime,
-                os.path.basename(args.print_file), 100
+                os.path.basename(args.print_file), 100,
+                sides=args.sides
             )
             hs, hr, resp = send_ipp(
                 target, req, payload=payload,
@@ -948,8 +965,18 @@ def main():
             val = parse_ipp_response(resp)
             extra.append("  File:                       %s" % args.print_file)
             extra.append("  MIME:                       %s" % args.mime)
+            if args.sides:
+                extra.append("  Sides:                      %s" % args.sides)
             extra.append("  Bytes:                      %d" % len(payload))
             extra.append("  Result:                     %s" % result_line("", hs, hr, val).lstrip(": "))
+            message = first_value(val, "status-message")
+            if isinstance(message, dict):
+                message = message.get("text")
+            if message:
+                extra.append("  status-message:             %s" % message)
+            reasons = flat_strings(all_values(val, "job-state-reasons"))
+            if reasons:
+                extra.append("  job-state-reasons:          %s" % ", ".join(reasons))
         except Exception as exc:
             extra.append("  ERROR: %s" % exc)
 

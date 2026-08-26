@@ -180,3 +180,72 @@ int mp_media_page_complete(unsigned long raster_rows,
      * input cannot wrap an unsigned long and hide a completed page. */
     return auxiliary_rows >= target_rows - raster_rows;
 }
+
+int mp_short_strip_completes_logical_page(unsigned long raster_rows,
+                                          unsigned long auxiliary_rows,
+                                          unsigned long target_rows,
+                                          unsigned long nominal_band_rows,
+                                          unsigned long current_band_rows)
+{
+    unsigned long minimum_extent;
+
+    if (!target_rows || !nominal_band_rows || !current_band_rows ||
+        current_band_rows >= nominal_band_rows)
+        return 0;
+
+    /* A terminal remainder is useful evidence only near the end of a real
+     * sheet. Three quarters allows ordinary application top/bottom margins
+     * while rejecting a short band early in a page. Compare without adding
+     * the row counts so malformed input cannot overflow an unsigned long. */
+    minimum_extent = target_rows - target_rows / 4UL;
+    if (raster_rows >= minimum_extent) return 1;
+    return auxiliary_rows >= minimum_extent - raster_rows;
+}
+
+unsigned long mp_text_top_margin_rows(unsigned long top_line_parameter,
+                                      unsigned long vmi_216ths,
+                                      unsigned long dpi)
+{
+    unsigned long zero_based_lines, units_216ths;
+
+    if (!top_line_parameter || !vmi_216ths || !dpi)
+        return 0;
+
+    zero_based_lines = top_line_parameter - 1UL;
+    if (zero_based_lines > 0xffffffffUL / vmi_216ths)
+        return 0;
+    units_216ths = zero_based_lines * vmi_216ths;
+    if (units_216ths > (0xffffffffUL - 108UL) / dpi)
+        return 0;
+
+    return (units_216ths * dpi + 108UL) / 216UL;
+}
+
+unsigned long mp_wordsworth_top_margin_rows(unsigned long form_length_lines,
+                                            unsigned long target_rows,
+                                            unsigned long dpi)
+{
+    unsigned long form_rows, difference, tolerance;
+
+    if (!form_length_lines || !target_rows || !dpi ||
+        form_length_lines > 0xffffffffUL / dpi)
+        return 0;
+
+    form_rows = (form_length_lines * dpi + 3UL) / 6UL;
+    difference = form_rows >= target_rows
+        ? form_rows - target_rows : target_rows - form_rows;
+    tolerance = dpi / 12UL; /* one twelfth of an inch */
+    if (difference > tolerance)
+        return 0;
+
+    return dpi / 2UL;
+}
+
+unsigned long mp_vertical_advance_rows(unsigned long units_216ths,
+                                       unsigned long dpi)
+{
+    if (!units_216ths || !dpi ||
+        units_216ths > (0xffffffffUL - 108UL) / dpi)
+        return 0;
+    return (units_216ths * dpi + 108UL) / 216UL;
+}
