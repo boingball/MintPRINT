@@ -32,7 +32,6 @@ typedef long ssize_t;
 #include <graphics/gfx.h>
 #include <graphics/rastport.h>
 #include <graphics/displayinfo.h>
-#include <graphics/scale.h>
 #include <devices/printer.h>
 #include <stdarg.h>
 #include <string.h>
@@ -49,6 +48,7 @@ typedef long ssize_t;
 #include "dpi_options.h"
 #include "media_size.h"
 #include "ipp_enum.h"
+#include "lodepng.h"
 
 /* All status/progress output goes to the on-screen status box, never a
  * console - the end user may have launched this from Workbench, where
@@ -515,7 +515,6 @@ struct Window *window = NULL;
 struct Gadget *glist = NULL;
 struct Library *SocketBase = NULL;
 struct Library *GadToolsBase = NULL;
-struct Library *DataTypesBase = NULL;
 struct IntuitionBase *IntuitionBase = NULL;
 struct GfxBase *GfxBase = NULL;
 char ip_buffer[256] = "192.168.0.51:80";
@@ -594,8 +593,13 @@ char printer_icon_uri[256] = "";
 #define MP_PRINTER_ICON_TOP   117
 #define MP_PRINTER_ICON_SIZE   32
 #define MP_PRINTER_ICON_TEMP  "T:MintPRINT-printer-icon.img"
-static struct BitMap *mp_printer_icon_bitmap = NULL;
-static struct BitMap *mp_printer_icon_mask_bitmap = NULL;
+#define MP_PRINTER_ICON_PIXELS (MP_PRINTER_ICON_SIZE * MP_PRINTER_ICON_SIZE)
+#define MP_PRINTER_ICON_MAX_SOURCE_DIM 1024
+static UBYTE mp_printer_icon_rgba[MP_PRINTER_ICON_PIXELS * 4];
+static UBYTE mp_printer_icon_pens[MP_PRINTER_ICON_PIXELS];
+static UBYTE mp_printer_icon_mask[MP_PRINTER_ICON_PIXELS];
+static BOOL mp_printer_icon_valid = FALSE;
+static BOOL mp_printer_icon_pens_valid = FALSE;
 
 /* Ink/toner status (RFC 3805 Printer MIB / PWG5100.13 "marker-*"
  * attributes). Each of marker-names/marker-colors/marker-types/
@@ -4421,14 +4425,10 @@ static int mp_connect_with_timeout(int sockfd, struct sockaddr_in *addr, int tim
  * failure simply leaves the preview blank.
  * ------------------------------------------------------------------ */
 static void mp_clear_printer_icon(void) {
-    if (mp_printer_icon_mask_bitmap) {
-        FreeBitMap(mp_printer_icon_mask_bitmap);
-        mp_printer_icon_mask_bitmap = NULL;
-    }
-    if (mp_printer_icon_bitmap) {
-        FreeBitMap(mp_printer_icon_bitmap);
-        mp_printer_icon_bitmap = NULL;
-    }
+    mp_printer_icon_valid = FALSE;
+    mp_printer_icon_pens_valid = FALSE;
+    memset(mp_printer_icon_rgba, 0, sizeof(mp_printer_icon_rgba));
+    memset(mp_printer_icon_mask, 0, sizeof(mp_printer_icon_mask));
     DeleteFile((CONST_STRPTR)MP_PRINTER_ICON_TEMP);
 }
 
@@ -4559,163 +4559,142 @@ static BOOL mp_fetch_printer_icon_file(const char *uri) {
     return TRUE;
 }
 
-static BOOL mp_load_printer_icon_bitmap(void) {
-    Object *dto;
-    struct BitMap *src_bitmap = NULL;
-    struct BitMapHeader *bmhd = NULL;
-    PLANEPTR src_mask = NULL;
-    struct BitMap native_mask_bitmap;
-    struct BitMap *mask_source_bitmap = NULL;
-    struct BitMap *fallback_mask_bitmap = NULL;
-    struct BitScaleArgs bsa;
-    ULONG depth;
-    int src_w;
-    int src_h;
+static BOOL mp_load_printer_icon_rgba(void) {
+    static const UBYTE png_signature[8] = { 137, 80, 78, 71, 13, 10, 26, 10 };
+    BPTR file;
+    LONG file_size;
+    UBYTE *png_data = NULL;
+    unsigned char *decoded = NULL;
+    unsigned png_w = 0;
+    unsigned png_h = 0;
+    unsigned err;
     int draw_w;
     int draw_h;
+    int off_x;
+    int off_y;
+    int dx;
+    int dy;
 
-    if (!screen)
+    file = Open((CONST_STRPTR)MP_PRINTER_ICON_TEMP, MODE_OLDFILE);
+    if (!file)
         return FALSE;
 
-    if (!DataTypesBase) {
-        DataTypesBase = OpenLibrary("datatypes.library", 39);
-        if (!DataTypesBase)
-            return FALSE;
+    if (Seek(file, 0, OFFSET_END) == -1) {
+        Close(file);
+        return FALSE;
     }
-
-    dto = NewDTObject((APTR)MP_PRINTER_ICON_TEMP,
-                      DTA_SourceType, DTST_FILE,
-                      DTA_GroupID, GID_PICTURE,
-                      PDTA_Screen, (ULONG)screen,
-                      PDTA_Remap, TRUE,
-                      PDTA_FreeSourceBitMap, TRUE,
-                      TAG_DONE);
-    if (!dto)
-        return FALSE;
-
-    if (!DoMethod(dto, DTM_PROCLAYOUT, NULL, TRUE) ||
-        !GetDTAttrs(dto,
-                    PDTA_DestBitMap, (ULONG)&src_bitmap,
-                    PDTA_BitMapHeader, (ULONG)&bmhd,
-                    TAG_DONE) ||
-        !src_bitmap || !bmhd || bmhd->bmh_Width == 0 || bmhd->bmh_Height == 0) {
-        DisposeDTObject(dto);
+    file_size = Seek(file, 0, OFFSET_BEGINNING);
+    if (file_size < 24 || file_size > MAX_BUFFER) {
+        Close(file);
         return FALSE;
     }
 
-#ifdef PDTA_MaskPlane
-    /* picture.datatype V43+ exposes a one-bit mask suitable for
-     * BltMaskBitMapRastPort().  Keep it while the datatype object lives,
-     * scale it alongside the colour bitmap, then use the scaled copy for
-     * the actual GUI blit. */
-    if (DataTypesBase->lib_Version >= 43) {
-        GetDTAttrs(dto, PDTA_MaskPlane, (ULONG)&src_mask, TAG_DONE);
+    png_data = AllocVec((ULONG)file_size, MEMF_ANY);
+    if (!png_data) {
+        Close(file);
+        return FALSE;
     }
-#endif
+    if (Read(file, png_data, file_size) != file_size) {
+        Close(file);
+        FreeVec(png_data);
+        return FALSE;
+    }
+    Close(file);
 
-    src_w = bmhd->bmh_Width;
-    src_h = bmhd->bmh_Height;
+    /* Reject non-PNG and decompression-bomb dimensions before LodePNG
+     * allocates width*height*4.  PNG's IHDR width/height live at bytes
+     * 16..23 and are big-endian. */
+    if (memcmp(png_data, png_signature, sizeof(png_signature)) != 0) {
+        FreeVec(png_data);
+        return FALSE;
+    }
+    png_w = ((unsigned)png_data[16] << 24) |
+            ((unsigned)png_data[17] << 16) |
+            ((unsigned)png_data[18] << 8) |
+            (unsigned)png_data[19];
+    png_h = ((unsigned)png_data[20] << 24) |
+            ((unsigned)png_data[21] << 16) |
+            ((unsigned)png_data[22] << 8) |
+            (unsigned)png_data[23];
+    if (png_w == 0 || png_h == 0 ||
+        png_w > MP_PRINTER_ICON_MAX_SOURCE_DIM ||
+        png_h > MP_PRINTER_ICON_MAX_SOURCE_DIM) {
+        FreeVec(png_data);
+        return FALSE;
+    }
+
+    err = lodepng_decode32(&decoded, &png_w, &png_h,
+                           png_data, (size_t)file_size);
+    FreeVec(png_data);
+    if (err || !decoded)
+        return FALSE;
+
+    memset(mp_printer_icon_rgba, 0, sizeof(mp_printer_icon_rgba));
+    memset(mp_printer_icon_mask, 0, sizeof(mp_printer_icon_mask));
+
     draw_w = MP_PRINTER_ICON_SIZE;
     draw_h = MP_PRINTER_ICON_SIZE;
-
-    if (src_w > src_h)
-        draw_h = (src_h * MP_PRINTER_ICON_SIZE) / src_w;
-    else if (src_h > src_w)
-        draw_w = (src_w * MP_PRINTER_ICON_SIZE) / src_h;
-
+    if (png_w > png_h)
+        draw_h = (int)((png_h * MP_PRINTER_ICON_SIZE) / png_w);
+    else if (png_h > png_w)
+        draw_w = (int)((png_w * MP_PRINTER_ICON_SIZE) / png_h);
     if (draw_w < 1) draw_w = 1;
     if (draw_h < 1) draw_h = 1;
+    off_x = (MP_PRINTER_ICON_SIZE - draw_w) / 2;
+    off_y = (MP_PRINTER_ICON_SIZE - draw_h) / 2;
 
-    depth = GetBitMapAttr(src_bitmap, BMA_DEPTH);
-    mp_printer_icon_bitmap = AllocBitMap(MP_PRINTER_ICON_SIZE,
-                                         MP_PRINTER_ICON_SIZE,
-                                         depth, BMF_CLEAR, src_bitmap);
-    if (!mp_printer_icon_bitmap) {
-        DisposeDTObject(dto);
-        return FALSE;
-    }
+    /* Area-average each destination pixel.  The source Brother icon is
+     * normally 128x128, so this is just a cheap 4x4 average and gives a
+     * much nicer tiny icon than nearest-neighbour.  RGB is accumulated
+     * premultiplied by alpha so transparent coloured pixels cannot bleed
+     * a red/black matte into the edges. */
+    for (dy = 0; dy < draw_h; ++dy) {
+        unsigned sy0 = (unsigned)((dy * (int)png_h) / draw_h);
+        unsigned sy1 = (unsigned)(((dy + 1) * (int)png_h) / draw_h);
+        int dx2;
+        if (sy1 <= sy0) sy1 = sy0 + 1;
+        if (sy1 > png_h) sy1 = png_h;
 
-    memset(&bsa, 0, sizeof(bsa));
-    bsa.bsa_SrcX = 0;
-    bsa.bsa_SrcY = 0;
-    bsa.bsa_SrcWidth = src_w;
-    bsa.bsa_SrcHeight = src_h;
-    bsa.bsa_XSrcFactor = src_w;
-    bsa.bsa_XDestFactor = draw_w;
-    bsa.bsa_YSrcFactor = src_h;
-    bsa.bsa_YDestFactor = draw_h;
-    bsa.bsa_DestX = (MP_PRINTER_ICON_SIZE - draw_w) / 2;
-    bsa.bsa_DestY = (MP_PRINTER_ICON_SIZE - draw_h) / 2;
-    bsa.bsa_SrcBitMap = src_bitmap;
-    bsa.bsa_DestBitMap = mp_printer_icon_bitmap;
-    bsa.bsa_Flags = 0;
-    BitMapScale(&bsa);
-    WaitBlit();
+        for (dx2 = 0; dx2 < draw_w; ++dx2) {
+            unsigned sx0 = (unsigned)((dx2 * (int)png_w) / draw_w);
+            unsigned sx1 = (unsigned)(((dx2 + 1) * (int)png_w) / draw_w);
+            unsigned sy;
+            ULONG sum_a = 0;
+            ULONG sum_ra = 0;
+            ULONG sum_ga = 0;
+            ULONG sum_ba = 0;
+            ULONG samples = 0;
+            int dest = (off_y + dy) * MP_PRINTER_ICON_SIZE + (off_x + dx2);
+            if (sx1 <= sx0) sx1 = sx0 + 1;
+            if (sx1 > png_w) sx1 = png_w;
 
-    /* Prefer the datatype's real transparency mask.  Some PNG datatypes
-     * report alpha/transparency in the BitMapHeader but do not expose
-     * PDTA_MaskPlane; for those, build a conservative fallback mask by
-     * treating the top-left decoded pixel as the transparent background.
-     * That fallback is only used when the source explicitly reports some
-     * form of masking, so normal opaque printer artwork is left alone. */
-    if (src_mask) {
-        InitBitMap(&native_mask_bitmap, 1, src_w, src_h);
-        native_mask_bitmap.Planes[0] = src_mask;
-        mask_source_bitmap = &native_mask_bitmap;
-    } else if (bmhd->bmh_Masking != 0) {
-        struct RastPort src_rp;
-        struct RastPort mask_rp;
-        LONG transparent_pixel;
-        int x;
-        int y;
-
-        fallback_mask_bitmap = AllocBitMap(src_w, src_h, 1, BMF_CLEAR, NULL);
-        if (fallback_mask_bitmap) {
-            InitRastPort(&src_rp);
-            src_rp.BitMap = src_bitmap;
-            InitRastPort(&mask_rp);
-            mask_rp.BitMap = fallback_mask_bitmap;
-            SetAPen(&mask_rp, 1);
-
-            transparent_pixel = ReadPixel(&src_rp, 0, 0);
-            for (y = 0; y < src_h; ++y) {
-                for (x = 0; x < src_w; ++x) {
-                    if (ReadPixel(&src_rp, x, y) != transparent_pixel)
-                        WritePixel(&mask_rp, x, y);
+            for (sy = sy0; sy < sy1; ++sy) {
+                unsigned sx;
+                for (sx = sx0; sx < sx1; ++sx) {
+                    const unsigned char *p = decoded + ((sy * png_w + sx) * 4U);
+                    ULONG a = p[3];
+                    sum_a += a;
+                    sum_ra += (ULONG)p[0] * a;
+                    sum_ga += (ULONG)p[1] * a;
+                    sum_ba += (ULONG)p[2] * a;
+                    ++samples;
                 }
             }
-            mask_source_bitmap = fallback_mask_bitmap;
+
+            if (samples && sum_a) {
+                UBYTE *d = mp_printer_icon_rgba + dest * 4;
+                d[0] = (UBYTE)(sum_ra / sum_a);
+                d[1] = (UBYTE)(sum_ga / sum_a);
+                d[2] = (UBYTE)(sum_ba / sum_a);
+                d[3] = (UBYTE)(sum_a / samples);
+                mp_printer_icon_mask[dest] = d[3] ? 1 : 0;
+            }
         }
     }
 
-    if (mask_source_bitmap) {
-        mp_printer_icon_mask_bitmap = AllocBitMap(MP_PRINTER_ICON_SIZE,
-                                                  MP_PRINTER_ICON_SIZE,
-                                                  1, BMF_CLEAR, NULL);
-        if (mp_printer_icon_mask_bitmap) {
-            memset(&bsa, 0, sizeof(bsa));
-            bsa.bsa_SrcX = 0;
-            bsa.bsa_SrcY = 0;
-            bsa.bsa_SrcWidth = src_w;
-            bsa.bsa_SrcHeight = src_h;
-            bsa.bsa_XSrcFactor = src_w;
-            bsa.bsa_XDestFactor = draw_w;
-            bsa.bsa_YSrcFactor = src_h;
-            bsa.bsa_YDestFactor = draw_h;
-            bsa.bsa_DestX = (MP_PRINTER_ICON_SIZE - draw_w) / 2;
-            bsa.bsa_DestY = (MP_PRINTER_ICON_SIZE - draw_h) / 2;
-            bsa.bsa_SrcBitMap = mask_source_bitmap;
-            bsa.bsa_DestBitMap = mp_printer_icon_mask_bitmap;
-            bsa.bsa_Flags = 0;
-            BitMapScale(&bsa);
-            WaitBlit();
-        }
-    }
-
-    if (fallback_mask_bitmap)
-        FreeBitMap(fallback_mask_bitmap);
-
-    DisposeDTObject(dto);
+    free(decoded); /* matching allocator used by lodepng.c */
+    mp_printer_icon_valid = TRUE;
+    mp_printer_icon_pens_valid = FALSE;
     return TRUE;
 }
 
@@ -4726,39 +4705,113 @@ static void mp_refresh_printer_icon(void) {
         return;
 
     if (mp_fetch_printer_icon_file(printer_icon_uri))
-        mp_load_printer_icon_bitmap();
+        mp_load_printer_icon_rgba();
 
     DeleteFile((CONST_STRPTR)MP_PRINTER_ICON_TEMP);
 }
 
+static UBYTE mp_printer_icon_nearest_pen(const ULONG *palette,
+                                         int pen_count,
+                                         UBYTE r, UBYTE g, UBYTE b) {
+    int i;
+    int best = 0;
+    ULONG best_distance = 0xffffffffUL;
+
+    for (i = 0; i < pen_count; ++i) {
+        LONG pr = (LONG)((palette[i * 3 + 0] >> 24) & 0xffUL);
+        LONG pg = (LONG)((palette[i * 3 + 1] >> 24) & 0xffUL);
+        LONG pb = (LONG)((palette[i * 3 + 2] >> 24) & 0xffUL);
+        LONG dr = (LONG)r - pr;
+        LONG dg = (LONG)g - pg;
+        LONG db = (LONG)b - pb;
+        ULONG distance = (ULONG)(dr * dr + dg * dg + db * db);
+        if (distance < best_distance) {
+            best_distance = distance;
+            best = i;
+            if (distance == 0)
+                break;
+        }
+    }
+    return (UBYTE)best;
+}
+
 static void mp_draw_printer_icon(void) {
+    ULONG screen_palette[3 * 256];
+    struct ColorMap *cm;
     struct RastPort *rp;
+    int screen_pen_count;
     int left = MP_PRINTER_ICON_LEFT;
     int top = g_topborder + MP_PRINTER_ICON_TOP;
+    int i;
+    LONG last_pen = -1;
 
-    if (!window)
+    if (!window || !screen)
         return;
 
     rp = window->RPort;
+    cm = screen->ViewPort.ColorMap;
+    if (!cm || cm->Count == 0)
+        return;
+
+    screen_pen_count = (int)cm->Count;
+    if (screen_pen_count > 256)
+        screen_pen_count = 256;
+    GetRGB32(cm, 0, (ULONG)screen_pen_count, screen_palette);
+
     SetDrMd(rp, JAM1);
     SetAPen(rp, 0);
     RectFill(rp, left - 1, top - 1,
              left + MP_PRINTER_ICON_SIZE, top + MP_PRINTER_ICON_SIZE);
 
-    if (mp_printer_icon_bitmap) {
-        if (mp_printer_icon_mask_bitmap &&
-            mp_printer_icon_mask_bitmap->Planes[0]) {
-            BltMaskBitMapRastPort(mp_printer_icon_bitmap, 0, 0,
-                                  rp, left, top,
-                                  MP_PRINTER_ICON_SIZE, MP_PRINTER_ICON_SIZE,
-                                  0xC0,
-                                  mp_printer_icon_mask_bitmap->Planes[0]);
-        } else {
-            BltBitMapRastPort(mp_printer_icon_bitmap, 0, 0,
-                              rp, left, top,
-                              MP_PRINTER_ICON_SIZE, MP_PRINTER_ICON_SIZE,
-                              0xC0);
+    if (!mp_printer_icon_valid)
+        return;
+
+    /* Convert RGBA to the current screen's pens once per downloaded icon,
+     * not on every refresh.  Partial alpha is composited against pen 0,
+     * which is exactly the background we just cleared the icon box with. */
+    if (!mp_printer_icon_pens_valid) {
+        UBYTE bg_r = (UBYTE)((screen_palette[0] >> 24) & 0xffUL);
+        UBYTE bg_g = (UBYTE)((screen_palette[1] >> 24) & 0xffUL);
+        UBYTE bg_b = (UBYTE)((screen_palette[2] >> 24) & 0xffUL);
+
+        for (i = 0; i < MP_PRINTER_ICON_PIXELS; ++i) {
+            const UBYTE *p = mp_printer_icon_rgba + i * 4;
+            ULONG a = p[3];
+            UBYTE r;
+            UBYTE g;
+            UBYTE b;
+
+            if (a == 0) {
+                mp_printer_icon_mask[i] = 0;
+                mp_printer_icon_pens[i] = 0;
+                continue;
+            }
+
+            r = (UBYTE)(((ULONG)p[0] * a + (ULONG)bg_r * (255UL - a) + 127UL) / 255UL);
+            g = (UBYTE)(((ULONG)p[1] * a + (ULONG)bg_g * (255UL - a) + 127UL) / 255UL);
+            b = (UBYTE)(((ULONG)p[2] * a + (ULONG)bg_b * (255UL - a) + 127UL) / 255UL);
+            mp_printer_icon_pens[i] = mp_printer_icon_nearest_pen(screen_palette,
+                                                                  screen_pen_count,
+                                                                  r, g, b);
+            mp_printer_icon_mask[i] = 1;
         }
+        mp_printer_icon_pens_valid = TRUE;
+    }
+
+    for (i = 0; i < MP_PRINTER_ICON_PIXELS; ++i) {
+        int x;
+        int y;
+        UBYTE pen;
+        if (!mp_printer_icon_mask[i])
+            continue;
+        pen = mp_printer_icon_pens[i];
+        if ((LONG)pen != last_pen) {
+            SetAPen(rp, pen);
+            last_pen = (LONG)pen;
+        }
+        x = i % MP_PRINTER_ICON_SIZE;
+        y = i / MP_PRINTER_ICON_SIZE;
+        WritePixel(rp, left + x, top + y);
     }
 }
 
@@ -7401,10 +7454,6 @@ int main(void) {
 
     // Close libraries in reverse order of opening
     mp_clear_printer_icon();
-    if (DataTypesBase) {
-        CloseLibrary(DataTypesBase);
-        DataTypesBase = NULL;
-    }
     if (SocketBase) {
         CloseLibrary(SocketBase);
         SocketBase = NULL;
