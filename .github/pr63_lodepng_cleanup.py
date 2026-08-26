@@ -24,9 +24,10 @@ new = ''' * Fetch the first HTTP URI only.  PNG decoding is handled internally b
  * This is deliberately optional: unsupported URI/download/decode failure
  * simply leaves the preview blank.
 '''
-if old not in s:
-    raise SystemExit('old datatype comment not found')
-s = s.replace(old, new, 1)
+if old in s:
+    s = s.replace(old, new, 1)
+elif new not in s:
+    raise SystemExit('printer icon decoder comment anchor not found')
 
 s = s.replace('    int dx;\n    int dy;\n', '    int dy;\n', 1)
 p.write_text(s, encoding='utf-8')
@@ -34,7 +35,7 @@ p.write_text(s, encoding='utf-8')
 # MintAMP's copy of LodePNG has one local integration hook that redirects
 # allocations through its debug-only heap guard. MintPRINT wants upstream
 # malloc/realloc/free semantics, so remove only that MintAMP-specific include
-# and comment; the PNG decoder itself remains byte-for-byte the same.
+# and comment; the PNG decoder itself remains otherwise unchanged.
 lp = Path('src/lodepng.c')
 l = lp.read_text(encoding='utf-8')
 memguard_block = '''/* Debug-only heap guard for MintAMP (see miniamp_memguard.h).  This only
