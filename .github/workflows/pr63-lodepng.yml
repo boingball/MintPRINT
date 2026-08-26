@@ -1,0 +1,54 @@
+name: PR63 LodePNG printer icon
+
+on:
+  push:
+    branches:
+      - claude/ink-toner-status-panel
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ github.actor != 'github-actions[bot]' && !contains(github.event.head_commit.message, '[lodepng-printer-icon]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: claude/ink-toner-status-panel
+          fetch-depth: 0
+
+      - name: Vendor MintAMP LodePNG and replace datatype icon path
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -L --fail --silent --show-error \
+            https://raw.githubusercontent.com/boingball/MintAMP/master/lodepng.c \
+            -o src/lodepng.c
+          curl -L --fail --silent --show-error \
+            https://raw.githubusercontent.com/boingball/MintAMP/master/lodepng.h \
+            -o src/lodepng.h
+          python3 .github/pr63_lodepng_patch.py
+
+          grep -q 'lodepng_decode32' src/MintPrintSettings.c
+          grep -q 'LODEPNG_NO_COMPILE_ENCODER' Makefile
+          grep -q 'LodePNG version 20260119' src/lodepng.h
+          ! grep -q 'mp_load_printer_icon_bitmap' src/MintPrintSettings.c
+          ! grep -q 'DataTypesBase' src/MintPrintSettings.c
+
+          git diff --check
+          git status --short
+
+      - name: Commit patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/MintPrintSettings.c src/lodepng.c src/lodepng.h Makefile
+          if git diff --cached --quiet; then
+            echo 'No source changes to commit'
+            exit 0
+          fi
+          git commit -m 'Decode IPP printer icon with LodePNG [lodepng-printer-icon]'
+          git push origin HEAD:claude/ink-toner-status-panel
