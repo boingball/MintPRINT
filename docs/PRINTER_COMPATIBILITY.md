@@ -24,7 +24,7 @@ accepts a job and silently discards it.
 
 | Printer and machine | Status | AmigaOS | TCP/IP stack | Confirmed engine/result | Required or known settings |
 |---|---|---|---|---|---|
-| **Brother MFC-J6930DW** | ✅ Working | 3.2.3 | Roadshow | PWG Raster; URF also confirmed (driver rev 30) | Port `631`; path `/ipp/print`; `300 dpi`; A4; tray `auto`; scaling `auto`; quality `draft`; colour |
+| **Brother MFC-J6930DW** | ✅ Working | 3.2.3 | Roadshow | PWG Raster and URF, one-sided and duplex; PWG page boundaries/margins and URF two-sided long-edge duplex confirmed (driver rev 40) | Port `631`; path `/ipp/print`; `300 dpi`; A4; tray `auto`; scaling `auto`; quality `draft`; colour |
 | **Brother HL-L2350DW** on A500 PiStorm, Wi-Fi | ✅ Working | 3.2.3 | Roadshow | Original Aminet release reported as working perfectly; exact engine was not recorded | No printer-specific override reported |
 | **Brother HL-L2350DW** on A4000, CSMkII 060/50 and Ariadne-II, wired | ✅ Working | 3.2.3 | Roadshow | Multi-page printing fully fixed - confirmed in issue #8 after a beta build, and fully in released 1.1.0 | 1.1.0; scaling `auto` |
 | **Canon TS8360** (IPP identifies it as **TS8300 series**) | ✅ Working | 3.2.3 | Not reported | PWG Raster text and colour pictures physically confirmed; JPEG pictures also work | Port `631`; path `/ipp/print`; PWG Raster; **`300* dpi` compatibility mode**; A4; source `auto`; scaling as required. Printer advertises only 600 DPI but accepts 300 DPI |
@@ -108,11 +108,13 @@ each exposing a different real bug:
    `docs/URF_ENGINE.md`'s "Format layout" section for the corrected table
    and citation.
 
-See `docs/URF_ENGINE.md` for all three fixes in detail. Not yet re-tested;
-still also unconfirmed once retested is whether Apple Raster's lack of a
-backside-transform mechanism (unlike PWG's `pwg-sheet-back=rotated` above)
-produces a correctly-oriented backside on this specific printer's duplex
-unit.
+See `docs/URF_ENGINE.md` for all three fixes in detail. Apple Raster
+two-sided long-edge duplex is now physically confirmed on this printer (see
+the driver revision 40 retest note below); still unconfirmed is whether
+Apple Raster's lack of a backside-transform mechanism (unlike PWG's
+`pwg-sheet-back=rotated` above) produces a correctly-oriented backside on
+other printers/duplex units, and two-sided short-edge duplex has not
+specifically been retested.
 
 **A fourth, separate bug was found testing PWG Raster on this same
 printer** (driver revision 34), unrelated to duplex or to URF specifically:
@@ -157,6 +159,11 @@ every layout command from `aVERP0` through `aCAM` is logged with parameters and
 live line/VMI state, along with each band's `IODRPReq` source and destination
 geometry. This is intended to find any undocumented Wordsworth placement clue
 before treating the form-length reconstruction as permanent behaviour.
+
+**A physical retest on driver revision 40 confirmed both fixes**: Wordsworth's
+PWG Raster page boundaries and top/bottom margins now print correctly, and
+Apple Raster (URF) two-sided long-edge duplex completes and prints
+correctly end to end on this printer.
 
 ### Brother HL-L2350DW
 

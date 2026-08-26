@@ -265,25 +265,28 @@ confirmation is still pending, since it wasn't the hardware used for the
 test above.
 
 That confirmed test was one-sided. Duplex support (see above) is new; its
-first three real tests (Brother MFC-J6930DW) each surfaced a real bug
-rather than confirming duplex itself - every time the printer canceled the
-job before any paper came out: first the missing strip-printing
-accumulator (driver revision 31, fixed in 32), then the front/back
-page-height mismatch it exposed once fixed (driver revision 32, fixed in
-33), then the duplex/tumble byte enum itself being wrong (driver revision
-33, fixed in 34 - see "Format layout" and "Duplex and strip-printing
-accumulation" above). A fourth test on revision 34, with a file confirmed
-byte-perfect end to end, hit the identical rejection anyway - see that
-section for why this now points at a possible printer-side "no duplex
-over `image/urf`" limitation rather than a remaining MintPRINT bug, and
-the `windows_ipp_probe.py --print-file --sides` diagnostic added to get
-the printer's own error text instead of guessing further from a bare
-status code. Whether URF duplex specifically can complete and print - and,
-separately, whether the "no backside row reversal" assumption holds - is
-still not physically confirmed on any printer; PWG Raster duplex, by
-contrast, *has* since been confirmed working on this same Brother printer
-(`IPP duplex Print-Job error/http/status 0 200 0`), while testing turned up
-the fifth, accumulator-overshoot bug described above (driver revision 35).
+first four real tests (Brother MFC-J6930DW) each surfaced a real bug rather
+than confirming duplex itself - every time the printer canceled the job
+before any paper came out: first the missing strip-printing accumulator
+(driver revision 31, fixed in 32), then the front/back page-height mismatch
+it exposed once fixed (driver revision 32, fixed in 33), then the
+duplex/tumble byte enum itself being wrong (driver revision 33, fixed in
+34 - see "Format layout" and "Duplex and strip-printing accumulation"
+above), then - with a file confirmed byte-perfect end to end - the same
+underlying strip-accumulator page-boundary bug PWG Raster hit (driver
+revision 34, fixed by the split/logical-boundary work in revisions 35-36
+above).
+
+**Apple Raster two-sided long-edge duplex is now physically confirmed**,
+on the same Brother MFC-J6930DW, once the strip-accumulator and
+page-boundary fixes (driver revisions 35-36) landed: a duplex job
+completes and prints correctly end to end. PWG Raster duplex is likewise
+confirmed working on this printer. Still open: two-sided *short-edge*
+duplex over URF has not specifically been retested since these fixes, and
+neither has whether the "no backside row reversal" assumption (Apple
+Raster's page header has no transform fields, unlike PWG's
+`pwg-sheet-back=rotated`) produces a correctly-oriented backside on other
+printers/duplex units.
 
 If a URF test print comes out wrong (garbled image, printer error, rejected
 job), the most useful next artifact is `T:MintPRINT-job.urf` (kept when

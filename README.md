@@ -30,9 +30,21 @@ printer.device driver plus a GUI setup tool.
 
 ## What's new in 1.2.1
 
-MintPRINT 1.2.1 currently carries **driver revision 40**, adding a new engine
+MintPRINT 1.2.1 currently carries **driver revision 41**, adding a new engine
 and the following Wordsworth strip-printing fixes:
 
+- **PRT: text/URF and cross-engine margin fixes** (driver rev 41, not yet
+  physically re-tested). Two bugs found reviewing revisions 35-40 before
+  merge: `PRT:`/`CMD_WRITE` plain-text printing had no `ENGINE=urf` case in
+  `command_table.c`'s own engine dispatch, so it silently fell through to
+  JPEG and submitted `image/jpeg` - which fails outright on a URF-only
+  printer such as the OKI B412 (the whole reason this engine exists).
+  Separately, the rev 37-39 top-margin restoration computes and writes
+  leading whitespace for *any* `SPECIAL_NOFORMFEED` job regardless of
+  engine, but the helper it called (`mp_job_reserve_page()`/
+  `mp_job_pad_page()`) only understood PWG and URF, silently writing into
+  the unopened PWG encoder instead of whichever encoder a JPEG, PDF or
+  PostScript job actually used. Both now dispatch across all five engines.
 - **Wordsworth page borders** (driver rev 39). The driver now processes and
   accumulates pre-dump `aIND`, `aNEL` and literal line-feed movement using
   printer.device's 1/216-inch VMI, then emits the corresponding leading white
@@ -81,7 +93,10 @@ and the following Wordsworth strip-printing fixes:
   byte itself was wrong (1/2/3 for no-duplex/short/long instead of the
   correct 0/1/2, caught by cross-checking a second, independent real-world
   URF reverse-engineering against an HP DesignJet T230) - fixed in rev 34.
-  Not yet re-tested.
+  A fourth test on rev 34 hit the same strip-accumulator page-boundary bug
+  PWG Raster hit (see the strip-printing fixes below); once revs 35-36
+  landed, **two-sided long-edge duplex over `ENGINE=urf` is physically
+  confirmed** on this same Brother MFC-J6930DW.
 - **Strip-printing page-boundary fixes** (driver revs 35-36). Found
   testing PWG Raster one-sided on the same printer, not URF or duplex
   specifically: a two-page Wordworth document printed with no IPP error at
@@ -95,7 +110,11 @@ and the following Wordsworth strip-printing fixes:
   the logical printable-page boundary, including when it arrives as a narrow
   auxiliary dump, finalises/pads the physical page there, and retains the
   media-height split as a fallback for applications without that signal.
-  Affects PWG Raster and URF identically, one-sided or duplex.
+  Affects PWG Raster and URF identically, one-sided or duplex. Revs 37-39
+  then restored the top margin that pagination fix had exposed as missing
+  (see the Wordsworth page borders bullet above); **a physical retest on
+  rev 40 confirmed Wordsworth's PWG Raster page boundaries and margins now
+  print correctly**.
 
 ## What's new in 1.2.0
 
@@ -208,7 +227,7 @@ be added with its AmigaOS version, TCP/IP stack, engine and exact print options.
 ## Status
 
 MintPRINT is now a real, working app: version **1.2.1** GUI with **driver
-revision 35**, with multiple printers confirmed fully working over IPP/AirPrint
+revision 41**, with multiple printers confirmed fully working over IPP/AirPrint
 from real Amiga hardware. It's still actively developed and not every printer
 is confirmed yet, so check the
 [printer compatibility page](docs/PRINTER_COMPATIBILITY.md) for your specific

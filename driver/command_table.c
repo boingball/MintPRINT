@@ -32,6 +32,7 @@
 #include "pwg_writer.h"
 #include "pdf_writer.h"
 #include "postscript_writer.h"
+#include "urf_writer.h"
 #include "ipp_client.h"
 #include "media_size.h"
 #include "spool.h"
@@ -44,12 +45,14 @@
 #define MP_TEXT_FILE_PWG  ((CONST_STRPTR)"T:MintPRINT-text.pwg")
 #define MP_TEXT_FILE_PDF  ((CONST_STRPTR)"T:MintPRINT-text.pdf")
 #define MP_TEXT_FILE_PS   ((CONST_STRPTR)"T:MintPRINT-text.ps")
+#define MP_TEXT_FILE_URF  ((CONST_STRPTR)"T:MintPRINT-text.urf")
 
 enum {
     MP_TEXT_ENGINE_JPEG = 0,
     MP_TEXT_ENGINE_PWG = 1,
     MP_TEXT_ENGINE_PDF = 2,
-    MP_TEXT_ENGINE_POSTSCRIPT = 3
+    MP_TEXT_ENGINE_POSTSCRIPT = 3,
+    MP_TEXT_ENGINE_URF = 4
 };
 
 struct MPTextBlock {
@@ -89,6 +92,7 @@ static MPJpegEncoder g_text_jpeg;
 static MPPwgEncoder g_text_pwg;
 static MPPdfEncoder g_text_pdf;
 static MPPostScriptEncoder g_text_postscript;
+static MPUrfEncoder g_text_urf;
 
 static char unsupported[] = "\377";
 
@@ -266,6 +270,8 @@ static int mp_text_engine(const struct MPConfig *cfg)
         return MP_TEXT_ENGINE_PDF;
     if (cfg->engine[0] == 'p' && cfg->engine[1] == 'o')
         return MP_TEXT_ENGINE_POSTSCRIPT;
+    if (cfg->engine[0] == 'u' && cfg->engine[1] == 'r')
+        return MP_TEXT_ENGINE_URF;
     return MP_TEXT_ENGINE_JPEG;
 }
 
@@ -275,6 +281,7 @@ static CONST_STRPTR mp_text_filename(int engine)
         case MP_TEXT_ENGINE_PWG: return MP_TEXT_FILE_PWG;
         case MP_TEXT_ENGINE_PDF: return MP_TEXT_FILE_PDF;
         case MP_TEXT_ENGINE_POSTSCRIPT: return MP_TEXT_FILE_PS;
+        case MP_TEXT_ENGINE_URF: return MP_TEXT_FILE_URF;
         default: return MP_TEXT_FILE_JPEG;
     }
 }
@@ -286,6 +293,7 @@ static CONST_STRPTR mp_text_format(int engine)
         case MP_TEXT_ENGINE_PDF: return (CONST_STRPTR)"application/pdf";
         case MP_TEXT_ENGINE_POSTSCRIPT:
             return (CONST_STRPTR)"application/postscript";
+        case MP_TEXT_ENGINE_URF: return (CONST_STRPTR)"image/urf";
         default: return (CONST_STRPTR)"image/jpeg";
     }
 }
@@ -430,6 +438,10 @@ static BOOL mp_text_begin_encoder(int engine, ULONG width, ULONG height,
                                        page_x, page_y, dpi,
                                        scratch, scratch_bytes,
                                        mp_text_file_write, NULL) ? TRUE : FALSE;
+        case MP_TEXT_ENGINE_URF:
+            return mp_urf_begin(&g_text_urf, width, height, dpi,
+                                scratch, scratch_bytes,
+                                mp_text_file_write, NULL) ? TRUE : FALSE;
         default:
             return mp_jpeg_begin(&g_text_jpeg, width, height,
                                  scratch, scratch_bytes,
@@ -446,6 +458,8 @@ static BOOL mp_text_write_scanline(int engine, const UBYTE *rgb)
             return mp_pdf_write_scanline(&g_text_pdf, rgb) ? TRUE : FALSE;
         case MP_TEXT_ENGINE_POSTSCRIPT:
             return mp_postscript_write_scanline(&g_text_postscript, rgb) ? TRUE : FALSE;
+        case MP_TEXT_ENGINE_URF:
+            return mp_urf_write_scanline(&g_text_urf, rgb) ? TRUE : FALSE;
         default:
             return mp_jpeg_write_scanline(&g_text_jpeg, rgb) ? TRUE : FALSE;
     }
@@ -460,6 +474,8 @@ static BOOL mp_text_finish_encoder(int engine)
             return mp_pdf_finish(&g_text_pdf) ? TRUE : FALSE;
         case MP_TEXT_ENGINE_POSTSCRIPT:
             return mp_postscript_finish(&g_text_postscript) ? TRUE : FALSE;
+        case MP_TEXT_ENGINE_URF:
+            return mp_urf_finish(&g_text_urf) ? TRUE : FALSE;
         default:
             return mp_jpeg_finish(&g_text_jpeg) ? TRUE : FALSE;
     }
@@ -471,6 +487,7 @@ static ULONG mp_text_scratch_size(int engine, ULONG width)
         case MP_TEXT_ENGINE_PWG: return mp_pwg_scratch_size(width);
         case MP_TEXT_ENGINE_PDF: return mp_pdf_scratch_size(width);
         case MP_TEXT_ENGINE_POSTSCRIPT: return mp_postscript_scratch_size(width);
+        case MP_TEXT_ENGINE_URF: return mp_urf_scratch_size(width);
         default: return mp_jpeg_scratch_size(width);
     }
 }

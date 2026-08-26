@@ -42,7 +42,7 @@
  * exactly which build produced it, rather than relying on whoever's
  * reading it to separately check About or remember what they last
  * copied to DEVS:Printers/. */
-#define MP_DRIVER_REV 40
+#define MP_DRIVER_REV 41
 
 struct ExecBase *SysBase = NULL;
 struct DosLibrary *DOSBase = NULL;
@@ -936,30 +936,54 @@ static BOOL mp_job_finish(ULONG expected_rows)
     return ok;
 }
 
-/* Ensures the currently-open PWG or URF encoder can accept total_rows. A
- * media-sized strip job usually has the full row cap from its first band;
- * unknown media can still grow safely as more same-width bands arrive.
- * Both encoders offer the identical growable-declared-height contract
- * (mp_pwg_grow()/mp_urf_grow()) for exactly this. */
+/* Ensures the currently-open encoder can accept total_rows. PWG and URF
+ * offer a growable-declared-height contract (mp_pwg_grow()/mp_urf_grow()):
+ * a media-sized strip job usually has the full row cap from its first band,
+ * but unknown media (or - since driver revision 40 - the leading-margin
+ * restoration below, which is not gated to any one engine) can still need
+ * to grow it as more rows are accounted for. JPEG/PDF/PostScript have no
+ * such contract - mp_job_begin() must have already sized them for
+ * total_rows up front (which every current caller does: case 0 folds any
+ * leading margin into encoder_height before calling mp_job_begin(), for
+ * every engine, precisely so this never needs to grow one of them) - so
+ * total_rows exceeding what they were already sized for is a real error,
+ * not something this function can fix up after the fact. */
 static BOOL mp_job_reserve_page(ULONG total_rows)
 {
     if (!g_job_open || g_job_failed) return FALSE;
-    if (g_engine == MP_ENGINE_URF) {
-        if (total_rows <= g_urf.height) return TRUE;
-        if (!mp_urf_grow(&g_urf, total_rows - g_urf.height)) {
-            mp_log_text("URF grow failed (accumulated page too tall)");
+    switch (g_engine) {
+        case MP_ENGINE_URF:
+            if (total_rows <= g_urf.height) return TRUE;
+            if (!mp_urf_grow(&g_urf, total_rows - g_urf.height)) {
+                mp_log_text("URF grow failed (accumulated page too tall)");
+                g_job_failed = TRUE;
+                return FALSE;
+            }
+            return TRUE;
+        case MP_ENGINE_PWG:
+            if (total_rows <= g_pwg.height) return TRUE;
+            if (!mp_pwg_grow(&g_pwg, total_rows - g_pwg.height)) {
+                mp_log_text("PWG grow failed (accumulated page too tall)");
+                g_job_failed = TRUE;
+                return FALSE;
+            }
+            return TRUE;
+        case MP_ENGINE_PDF:
+            if (total_rows <= g_pdf.height) return TRUE;
+            mp_log_text("PDF page too tall for its declared height");
             g_job_failed = TRUE;
             return FALSE;
-        }
-        return TRUE;
+        case MP_ENGINE_POSTSCRIPT:
+            if (total_rows <= g_postscript.height) return TRUE;
+            mp_log_text("PostScript page too tall for its declared height");
+            g_job_failed = TRUE;
+            return FALSE;
+        default: /* MP_ENGINE_JPEG */
+            if (total_rows <= g_jpeg.height) return TRUE;
+            mp_log_text("JPEG page too tall for its declared height");
+            g_job_failed = TRUE;
+            return FALSE;
     }
-    if (total_rows <= g_pwg.height) return TRUE;
-    if (!mp_pwg_grow(&g_pwg, total_rows - g_pwg.height)) {
-        mp_log_text("PWG grow failed (accumulated page too tall)");
-        g_job_failed = TRUE;
-        return FALSE;
-    }
-    return TRUE;
 }
 
 static BOOL mp_job_pad_page(ULONG target_rows)
@@ -971,9 +995,26 @@ static BOOL mp_job_pad_page(ULONG target_rows)
 
     for (i = 0; i < g_rgb_row_bytes; ++i) g_rgb_row[i] = 255;
     while (g_job_rows_written < target_rows) {
-        BOOL ok = g_engine == MP_ENGINE_URF
-            ? (mp_urf_write_scanline(&g_urf, g_rgb_row) ? TRUE : FALSE)
-            : mp_pwg_accept_row(g_rgb_row);
+        BOOL ok;
+
+        switch (g_engine) {
+            case MP_ENGINE_URF:
+                ok = mp_urf_write_scanline(&g_urf, g_rgb_row) ? TRUE : FALSE;
+                break;
+            case MP_ENGINE_PWG:
+                ok = mp_pwg_accept_row(g_rgb_row);
+                break;
+            case MP_ENGINE_PDF:
+                ok = mp_pdf_write_scanline(&g_pdf, g_rgb_row) ? TRUE : FALSE;
+                break;
+            case MP_ENGINE_POSTSCRIPT:
+                ok = mp_postscript_write_scanline(&g_postscript, g_rgb_row)
+                    ? TRUE : FALSE;
+                break;
+            default: /* MP_ENGINE_JPEG */
+                ok = mp_jpeg_write_scanline(&g_jpeg, g_rgb_row) ? TRUE : FALSE;
+                break;
+        }
         if (!ok) {
             mp_log_text("Blank page padding failed");
             g_job_failed = TRUE;
