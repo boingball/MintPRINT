@@ -139,11 +139,20 @@ static struct MPTestPrintJob test_print_job;
 
 // Define the USED macro for GCC
 #define USED __attribute__((used))
-#define MINTPRINT_SETTINGS_VERSION "1.2.1"
+#define MINTPRINT_SETTINGS_VERSION "1.2.2"
 #define MINTPRINT_DRIVER_DEST ((CONST_STRPTR)"DEVS:Printers/MintPRINT")
 #define MINTPRINT_DRIVER_SRC  ((CONST_STRPTR)"PROGDIR:MintPRINT")
 
-static BOOL mp_read_driver_revision(CONST_STRPTR path, UWORD *revision_out);
+/* The driver's own build version, read out of its "$VER: MintPRINT
+ * <version>.<revision>" string - see mp_read_driver_version() near the
+ * other driver-install helpers for how. A plain struct (not just a
+ * forward-declared opaque type) because callers like the test page below
+ * need it as a value, not just a pointer. */
+struct MPDriverVersion {
+    UWORD version;
+    UWORD revision;
+};
+static BOOL mp_read_driver_version(CONST_STRPTR path, struct MPDriverVersion *out);
 
 /* DEVS:Printers/MintPRINT install helper paths - also read by the test
  * page (mintprint_test_page) to report the installed driver revision. */
@@ -152,7 +161,7 @@ static BOOL mp_read_driver_revision(CONST_STRPTR path, UWORD *revision_out);
 
 /* Forward declaration: defined later, near the other driver-install
  * helpers, but the test page needs it earlier in the file. */
-static BOOL mp_read_driver_revision(CONST_STRPTR path, UWORD *revision_out);
+static BOOL mp_read_driver_version(CONST_STRPTR path, struct MPDriverVersion *out);
 
 /* Visible both to AmigaOS's Version command and in the About requester. */
 static const char USED mintprint_version[] =
@@ -1564,7 +1573,8 @@ static BOOL mintprint_test_page(struct Window *win) {
     LONG left = 16, right = MP_TESTPAGE_WIDTH - 17;
     LONG swatch_area, swatch_w, i;
     unsigned long media_w_100mm, media_h_100mm;
-    UWORD installed_rev = 0;
+    struct MPDriverVersion installed_ver = {0, 0};
+    BOOL have_installed_ver;
     UWORD tw;
     const char *title = "MintPRINT";
     const char *tagline = "Network Printer Test Page";
@@ -1594,14 +1604,14 @@ static BOOL mintprint_test_page(struct Window *win) {
         return FALSE;
     }
 
-    if (!mp_read_driver_revision(MINTPRINT_DRIVER_DEST, &installed_rev))
-        installed_rev = 0;
+    have_installed_ver = mp_read_driver_version(MINTPRINT_DRIVER_DEST, &installed_ver);
 
     snprintf(info_lines[num_info_lines++], sizeof(info_lines[0]),
              "Unit%d  |  Settings v%s", current_unit_index, MINTPRINT_SETTINGS_VERSION);
-    if (installed_rev)
+    if (have_installed_ver)
         snprintf(info_lines[num_info_lines++], sizeof(info_lines[0]),
-                 "Driver: rev %u installed", (unsigned)installed_rev);
+                 "Driver: v%u.%u installed",
+                 (unsigned)installed_ver.version, (unsigned)installed_ver.revision);
     else
         snprintf(info_lines[num_info_lines++], sizeof(info_lines[0]),
                  "Driver: not installed");
@@ -3057,35 +3067,37 @@ static void mp_launch_printer_prefs(void) {
     }
 }
 
-/* Reads this project's own driver build-counter out of a driver file, by
- * scanning for the literal "MPDRVREV:<decimal>" marker embedded in
- * printertag.s (see there for why: the compiled driver FILE on disk is a
- * standard AmigaDOS hunk-format load module, not a raw blob starting at
- * its code entry point, so there is no reliable FIXED BYTE OFFSET to read
- * this from - a scannable marker is the same approach AmigaOS's own
- * "Version" command uses for "$VER:" strings). Returns FALSE if the file
- * can't be opened or the marker isn't found. */
-#define MP_DRIVER_REV_MARKER "MPDRVREV:"
-#define MP_DRIVER_REV_SCAN_MAX 65536
+/* Reads this project's own driver build version out of a driver file, by
+ * scanning for the driver's own "$VER: MintPRINT <version>.<revision>"
+ * string embedded in printertag.s/printertag_classic.s (see there for why:
+ * the compiled driver FILE on disk is a standard AmigaDOS hunk-format load
+ * module, not a raw blob starting at its code entry point, so there is no
+ * reliable FIXED BYTE OFFSET to read this from - a scannable marker is
+ * exactly what AmigaOS's own "Version" command already does for "$VER:"
+ * strings, so this now scans for the real thing rather than the ad-hoc
+ * "MPDRVREV:<decimal>" prefix earlier driver revisions used). Returns
+ * FALSE if the file can't be opened or the string isn't found. */
+#define MP_DRIVER_VER_MARKER "$VER: MintPRINT "
+#define MP_DRIVER_VER_SCAN_MAX 65536
 
-static BOOL mp_read_driver_revision(CONST_STRPTR path, UWORD *revision_out) {
+static BOOL mp_read_driver_version(CONST_STRPTR path, struct MPDriverVersion *out) {
     BPTR file;
     UBYTE *buf;
     LONG got;
-    LONG marker_len = (LONG)strlen(MP_DRIVER_REV_MARKER);
+    LONG marker_len = (LONG)strlen(MP_DRIVER_VER_MARKER);
     LONG i;
     BOOL found = FALSE;
 
     file = Open(path, MODE_OLDFILE);
     if (!file) return FALSE;
 
-    buf = AllocVec(MP_DRIVER_REV_SCAN_MAX, MEMF_ANY);
+    buf = AllocVec(MP_DRIVER_VER_SCAN_MAX, MEMF_ANY);
     if (!buf) {
         Close(file);
         return FALSE;
     }
 
-    got = Read(file, buf, MP_DRIVER_REV_SCAN_MAX);
+    got = Read(file, buf, MP_DRIVER_VER_SCAN_MAX);
     Close(file);
 
     if (got < marker_len) {
@@ -3094,18 +3106,27 @@ static BOOL mp_read_driver_revision(CONST_STRPTR path, UWORD *revision_out) {
     }
 
     for (i = 0; i <= got - marker_len; i++) {
-        if (memcmp(buf + i, MP_DRIVER_REV_MARKER, marker_len) == 0) {
+        if (memcmp(buf + i, MP_DRIVER_VER_MARKER, marker_len) == 0) {
             LONG j = i + marker_len;
-            ULONG value = 0;
-            BOOL any_digit = FALSE;
+            ULONG version = 0, revision = 0;
+            BOOL have_version = FALSE, have_revision = FALSE;
 
             while (j < got && buf[j] >= '0' && buf[j] <= '9') {
-                value = value * 10UL + (ULONG)(buf[j] - '0');
-                any_digit = TRUE;
+                version = version * 10UL + (ULONG)(buf[j] - '0');
+                have_version = TRUE;
                 j++;
             }
-            if (any_digit) {
-                *revision_out = (UWORD)value;
+            if (have_version && j < got && buf[j] == '.') {
+                j++;
+                while (j < got && buf[j] >= '0' && buf[j] <= '9') {
+                    revision = revision * 10UL + (ULONG)(buf[j] - '0');
+                    have_revision = TRUE;
+                    j++;
+                }
+            }
+            if (have_version) {
+                out->version = (UWORD)version;
+                out->revision = have_revision ? (UWORD)revision : 0;
                 found = TRUE;
             }
             break;
@@ -3116,20 +3137,31 @@ static BOOL mp_read_driver_revision(CONST_STRPTR path, UWORD *revision_out) {
     return found;
 }
 
+/* TRUE if a is a newer driver build than b - version compared first, then
+ * revision within a matching version, the same precedence AmigaOS's own
+ * version.revision pairs use. */
+static BOOL mp_driver_version_newer(const struct MPDriverVersion *a,
+                                    const struct MPDriverVersion *b) {
+    if (a->version != b->version) return a->version > b->version;
+    return a->revision > b->revision;
+}
+
 static void show_about(struct Window *win) {
     struct EasyStruct es;
     char msg[512];
     char installed_str[32];
     char bundled_str[32];
-    UWORD installed_rev = 0, bundled_rev = 0;
+    struct MPDriverVersion installed_ver, bundled_ver;
 
-    if (mp_read_driver_revision(MINTPRINT_DRIVER_DEST, &installed_rev)) {
-        snprintf(installed_str, sizeof(installed_str), "rev %u", (unsigned)installed_rev);
+    if (mp_read_driver_version(MINTPRINT_DRIVER_DEST, &installed_ver)) {
+        snprintf(installed_str, sizeof(installed_str), "v%u.%u",
+                 (unsigned)installed_ver.version, (unsigned)installed_ver.revision);
     } else {
         strcpy(installed_str, "not installed / unknown");
     }
-    if (mp_read_driver_revision(MINTPRINT_DRIVER_SRC, &bundled_rev)) {
-        snprintf(bundled_str, sizeof(bundled_str), "rev %u", (unsigned)bundled_rev);
+    if (mp_read_driver_version(MINTPRINT_DRIVER_SRC, &bundled_ver)) {
+        snprintf(bundled_str, sizeof(bundled_str), "v%u.%u",
+                 (unsigned)bundled_ver.version, (unsigned)bundled_ver.revision);
     } else {
         strcpy(bundled_str, "not found");
     }
@@ -3156,8 +3188,8 @@ static void show_about(struct Window *win) {
 static void check_and_offer_driver_install(struct Window *win) {
     struct EasyStruct es;
     char msg[192];
-    UWORD src_rev, dest_rev;
-    BOOL have_src_rev, have_dest_rev;
+    struct MPDriverVersion src_ver, dest_ver;
+    BOOL have_src_ver, have_dest_ver;
 
     if (!mp_file_exists(MINTPRINT_DRIVER_SRC)) {
         printf("MintPRINT driver not found next to this program; skipping install check.\n");
@@ -3171,30 +3203,31 @@ static void check_and_offer_driver_install(struct Window *win) {
     if (mp_file_exists(MINTPRINT_DRIVER_DEST)) {
         /* Already installed - only bother the user if the copy bundled
          * next to this program is a newer build than what's installed.
-         * An installed driver with no readable MPDRVREV marker at all
-         * (predates the marker system - true for anyone who hasn't
+         * An installed driver with no readable "$VER: MintPRINT" string
+         * at all (predates version tracking - true for anyone who hasn't
          * updated since before it was added) is NOT "up to date": it's
          * unreadable because it's older, not because it's current. Only
-         * skip the prompt when the installed revision is actually known
-         * and already >= the bundled one. */
-        have_src_rev = mp_read_driver_revision(MINTPRINT_DRIVER_SRC, &src_rev);
-        have_dest_rev = mp_read_driver_revision(MINTPRINT_DRIVER_DEST, &dest_rev);
+         * skip the prompt when the installed version is actually known
+         * and already at least as new as the bundled one. */
+        have_src_ver = mp_read_driver_version(MINTPRINT_DRIVER_SRC, &src_ver);
+        have_dest_ver = mp_read_driver_version(MINTPRINT_DRIVER_DEST, &dest_ver);
 
-        if (!have_src_rev) {
+        if (!have_src_ver) {
             return; /* nothing to offer - can't even read the bundled copy */
         }
-        if (have_dest_rev && src_rev <= dest_rev) {
+        if (have_dest_ver && !mp_driver_version_newer(&src_ver, &dest_ver)) {
             return; /* installed copy is already current */
         }
 
-        if (have_dest_rev) {
+        if (have_dest_ver) {
             snprintf(msg, sizeof(msg),
-                     "A newer MintPRINT driver is available\n(installed: rev %u, bundled: rev %u).\nUpdate DEVS:Printers/MintPRINT now?",
-                     (unsigned)dest_rev, (unsigned)src_rev);
+                     "A newer MintPRINT driver is available\n(installed: v%u.%u, bundled: v%u.%u).\nUpdate DEVS:Printers/MintPRINT now?",
+                     (unsigned)dest_ver.version, (unsigned)dest_ver.revision,
+                     (unsigned)src_ver.version, (unsigned)src_ver.revision);
         } else {
             snprintf(msg, sizeof(msg),
-                     "A newer MintPRINT driver is available\n(installed driver predates version tracking, bundled: rev %u).\nUpdate DEVS:Printers/MintPRINT now?",
-                     (unsigned)src_rev);
+                     "A newer MintPRINT driver is available\n(installed driver predates version tracking, bundled: v%u.%u).\nUpdate DEVS:Printers/MintPRINT now?",
+                     (unsigned)src_ver.version, (unsigned)src_ver.revision);
         }
         es.es_TextFormat = (UBYTE *)msg;
         es.es_GadgetFormat = (UBYTE *)"Update|Later";
@@ -3202,7 +3235,8 @@ static void check_and_offer_driver_install(struct Window *win) {
         if (!EasyRequest(win, &es, NULL)) return;
 
         if (mp_copy_file(MINTPRINT_DRIVER_SRC, MINTPRINT_DRIVER_DEST)) {
-            printf("Updated MintPRINT driver to rev %u in DEVS:Printers/MintPRINT\n", (unsigned)src_rev);
+            printf("Updated MintPRINT driver to v%u.%u in DEVS:Printers/MintPRINT\n",
+                   (unsigned)src_ver.version, (unsigned)src_ver.revision);
             printf("Reboot (or otherwise unload the old driver segment) before printing.\n");
 
             es.es_TextFormat = (UBYTE *)"MintPRINT driver updated.\n\nReboot before printing - the old driver segment\nalready resident in memory will not pick up this\nfile until then.";

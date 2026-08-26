@@ -71,13 +71,14 @@ printerName:
         .even
 
 /*
- * Same update marker convention as the main driver.  This is kept primarily
- * for diagnostics; the OS3.1 release is packaged separately so Settings sees
- * the correct PROGDIR:MintPRINT binary for that release.
- *
+ * Same version marker convention as the main driver - see printertag.s for
+ * why it's a "$VER:" string rather than the earlier ad-hoc "MPDRVREV:"
+ * prefix.  This is kept primarily for diagnostics; the OS3.1 release is
+ * packaged separately so Settings sees the correct PROGDIR:MintPRINT
+ * binary for that release.
  */
-mp_driver_revision_marker:
-        .asciz  "MPDRVREV:41"
+mp_driver_version_marker:
+        .asciz  "$VER: MintPRINT 41.1 (26.08.2026)"
         .even
 
 /* Human-readable marker useful when inspecting a built driver. */
