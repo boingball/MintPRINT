@@ -18,12 +18,9 @@
 #include <proto/dos.h>
 #include <dos/dostags.h> // for SYS_Asynch (SystemTags)
 #include <proto/intuition.h>
-#include <proto/datatypes.h>
 #include <proto/gadtools.h>
 #include <proto/graphics.h>
 typedef long ssize_t;
-#include <datatypes/pictureclass.h>
-#include <datatypes/datatypesclass.h>
 #include <clib/alib_protos.h>
 #include <proto/bsdsocket.h>
 #include <intuition/intuition.h>
@@ -4418,11 +4415,13 @@ static int mp_connect_with_timeout(int sockfd, struct sockaddr_in *addr, int tim
 /* ---------------------------------------------------------------------
  * Optional printer picture advertised by IPP's printer-icons attribute.
  *
- * Fetch the first HTTP URI only. picture.datatype performs format decode
- * and remapping (Brother's AirPrint icon is PNG), then graphics.library
- * scales the bitmap into a small 32x32 preview beside the duplex hint.
- * This is deliberately optional: unsupported URI/image format/download
- * failure simply leaves the preview blank.
+ * Fetch the first HTTP URI only.  PNG decoding is handled internally by
+ * the same LodePNG decoder used by MintAMP, producing RGBA pixels with real
+ * alpha.  MintPRINT area-averages that image down to 32x32, composites the
+ * translucent edge pixels against the GUI background, then maps the result
+ * to the current screen's pens.  No picture.datatype is required.
+ * This is deliberately optional: unsupported URI/download/decode failure
+ * simply leaves the preview blank.
  * ------------------------------------------------------------------ */
 static void mp_clear_printer_icon(void) {
     mp_printer_icon_valid = FALSE;
@@ -4572,7 +4571,6 @@ static BOOL mp_load_printer_icon_rgba(void) {
     int draw_h;
     int off_x;
     int off_y;
-    int dx;
     int dy;
 
     file = Open((CONST_STRPTR)MP_PRINTER_ICON_TEMP, MODE_OLDFILE);
