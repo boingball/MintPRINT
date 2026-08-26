@@ -503,7 +503,7 @@ int safe_send(int sockfd, const void *vbuf, int len) {
         }
     }
 
-    printf("[✓] Finished sending %d bytes successfully\n", total_sent);
+    printf("[OK] Finished sending %d bytes successfully\n", total_sent);
     return total_sent;
 }
 
@@ -586,9 +586,9 @@ int current_unit_index = 0;
 char printer_make_model[128] = "";
 char printer_icon_uri[256] = "";
 
-#define MP_PRINTER_ICON_LEFT  420
+#define MP_PRINTER_ICON_LEFT  411
 #define MP_PRINTER_ICON_TOP   117
-#define MP_PRINTER_ICON_SIZE   32
+#define MP_PRINTER_ICON_SIZE   35
 #define MP_PRINTER_ICON_TEMP  "T:MintPRINT-printer-icon.img"
 #define MP_PRINTER_ICON_PIXELS (MP_PRINTER_ICON_SIZE * MP_PRINTER_ICON_SIZE)
 #define MP_PRINTER_ICON_MAX_SOURCE_DIM 1024
@@ -6580,7 +6580,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // Media dropdown
     ng.ng_LeftEdge = 130;
     ng.ng_TopEdge = 117 + topborder;
-    ng.ng_Width = 280;
+    ng.ng_Width = 270;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"Media (Tray):";
     ng.ng_GadgetID = GAD_MEDIA_DROPDOWN;
