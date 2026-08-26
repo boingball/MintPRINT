@@ -2732,6 +2732,7 @@ static void apply_cached_capabilities(struct Window *win) {
  * mp_cache_clear_capabilities() above) needs to repaint the now-empty
  * panel before that code appears in the file. */
 static void mp_draw_marker_strips(void);
+static void mp_draw_sides_hint(void);
 
 static void reload_current_unit(struct Window *win) {
     mp_cache_clear_capabilities();
@@ -2769,6 +2770,7 @@ static void reload_current_unit(struct Window *win) {
 
     GT_RefreshWindow(win, NULL);
     mp_draw_marker_strips();
+    mp_draw_sides_hint();
 }
 
 
@@ -3164,6 +3166,216 @@ int load_ilbm_to_rgb(const char *filename, unsigned char **rgb_out, int *width_o
     *height_out = data.height;
     free_jpeg_data(&data);
     return 0;
+}
+
+/* ---------------------------------------------------------------------
+ * Duplex visual hint.
+ *
+ * The 32x32 ILBM files live next to the application in PROGDIR:Art/ and
+ * are staged there by the release targets in the Makefile. Keeping them
+ * external makes them easy to replace without rebuilding MintPrintSettings
+ * and reuses the ILBM decoder already linked into this program.
+ *
+ * This is intentionally hand-drawn into spare space rather than another
+ * GadTools gadget: it is purely an explanatory picture for the Sides cycle.
+ * ------------------------------------------------------------------ */
+#define MP_SIDES_HINT_LEFT       460
+#define MP_SIDES_HINT_TOP        117
+#define MP_SIDES_HINT_SIZE        32
+#define MP_SIDES_HINT_MAX_PENS    32
+#define MP_SIDES_HINT_COUNT        3
+
+struct MPSidesHintImage {
+    unsigned char *rgb;
+    int width;
+    int height;
+    BOOL attempted;
+};
+
+struct MPSidesHintPen {
+    UBYTE r, g, b;
+    LONG pen;
+};
+
+static struct MPSidesHintImage mp_sides_hint_images[MP_SIDES_HINT_COUNT];
+static const char *mp_sides_hint_paths[MP_SIDES_HINT_COUNT] = {
+    "PROGDIR:Art/single.iff",
+    "PROGDIR:Art/longside.iff",
+    "PROGDIR:Art/shortside.iff"
+};
+
+static int mp_sides_hint_index(void) {
+    if (strcmp(driver_sides_buffer, "two-sided-long-edge") == 0)
+        return 1;
+    if (strcmp(driver_sides_buffer, "two-sided-short-edge") == 0)
+        return 2;
+    return 0;
+}
+
+static BOOL mp_load_sides_hint_image(int index) {
+    struct MPSidesHintImage *image;
+    struct jpeg_data data;
+    int pixels;
+    int i;
+
+    if (index < 0 || index >= MP_SIDES_HINT_COUNT)
+        return FALSE;
+
+    image = &mp_sides_hint_images[index];
+    if (image->attempted)
+        return image->rgb != NULL;
+
+    image->attempted = TRUE;
+    memset(&data, 0, sizeof(data));
+
+    /* Avoid load_ilbm_to_rgb() here because it logs to the GUI status box. */
+    if (load_iff_direct(mp_sides_hint_paths[index], &data) != 0)
+        return FALSE;
+
+    if (data.width <= 0 || data.height <= 0 ||
+        data.width > 64 || data.height > 64) {
+        free_jpeg_data(&data);
+        return FALSE;
+    }
+
+    pixels = data.width * data.height;
+    image->rgb = AllocVec((ULONG)pixels * 3UL, MEMF_ANY);
+    if (!image->rgb) {
+        free_jpeg_data(&data);
+        return FALSE;
+    }
+
+    for (i = 0; i < pixels; ++i) {
+        image->rgb[i * 3 + 0] = data.red[i];
+        image->rgb[i * 3 + 1] = data.green[i];
+        image->rgb[i * 3 + 2] = data.blue[i];
+    }
+    image->width = data.width;
+    image->height = data.height;
+    free_jpeg_data(&data);
+    return TRUE;
+}
+
+static LONG mp_sides_hint_pen(struct MPSidesHintPen *pens, int *count,
+                              UBYTE r, UBYTE g, UBYTE b) {
+    int i;
+    int best = -1;
+    ULONG best_distance = 0xffffffffUL;
+
+    /* Quantise first so a true-colour source icon does not exhaust pens on
+     * a classic Workbench screen. graphics.library then picks the nearest
+     * available screen pen for each cached colour. */
+    r = (UBYTE)(r & 0xe0);
+    g = (UBYTE)(g & 0xe0);
+    b = (UBYTE)(b & 0xe0);
+
+    for (i = 0; i < *count; ++i) {
+        if (pens[i].r == r && pens[i].g == g && pens[i].b == b)
+            return pens[i].pen;
+    }
+
+    if (*count < MP_SIDES_HINT_MAX_PENS) {
+        LONG pen = (LONG)ObtainBestPenA(screen->ViewPort.ColorMap,
+                                       (ULONG)r << 24,
+                                       (ULONG)g << 24,
+                                       (ULONG)b << 24,
+                                       NULL);
+        if (pen >= 0) {
+            pens[*count].r = r;
+            pens[*count].g = g;
+            pens[*count].b = b;
+            pens[*count].pen = pen;
+            ++(*count);
+            return pen;
+        }
+    }
+
+    for (i = 0; i < *count; ++i) {
+        LONG dr = (LONG)r - (LONG)pens[i].r;
+        LONG dg = (LONG)g - (LONG)pens[i].g;
+        LONG db = (LONG)b - (LONG)pens[i].b;
+        ULONG distance = (ULONG)(dr * dr + dg * dg + db * db);
+        if (best < 0 || distance < best_distance) {
+            best = i;
+            best_distance = distance;
+        }
+    }
+
+    return best >= 0 ? pens[best].pen : 1;
+}
+
+static void mp_draw_sides_hint(void) {
+    struct MPSidesHintImage *image;
+    struct MPSidesHintPen pens[MP_SIDES_HINT_MAX_PENS];
+    struct RastPort *rp;
+    int index;
+    int pen_count = 0;
+    int draw_w, draw_h;
+    int x, y;
+    int left = MP_SIDES_HINT_LEFT;
+    int top = g_topborder + MP_SIDES_HINT_TOP;
+
+    if (!window || !screen)
+        return;
+
+    rp = window->RPort;
+
+    SetDrMd(rp, JAM1);
+    SetAPen(rp, 0);
+    RectFill(rp, left - 1, top - 1,
+             left + MP_SIDES_HINT_SIZE, top + MP_SIDES_HINT_SIZE);
+    SetAPen(rp, 1);
+    RectFill(rp, left - 1, top - 1,
+             left + MP_SIDES_HINT_SIZE, top - 1);
+    RectFill(rp, left - 1, top - 1,
+             left - 1, top + MP_SIDES_HINT_SIZE);
+    RectFill(rp, left - 1, top + MP_SIDES_HINT_SIZE,
+             left + MP_SIDES_HINT_SIZE, top + MP_SIDES_HINT_SIZE);
+    RectFill(rp, left + MP_SIDES_HINT_SIZE, top - 1,
+             left + MP_SIDES_HINT_SIZE, top + MP_SIDES_HINT_SIZE);
+
+    index = mp_sides_hint_index();
+    if (!mp_load_sides_hint_image(index))
+        return;
+
+    image = &mp_sides_hint_images[index];
+    draw_w = image->width < MP_SIDES_HINT_SIZE
+           ? image->width : MP_SIDES_HINT_SIZE;
+    draw_h = image->height < MP_SIDES_HINT_SIZE
+           ? image->height : MP_SIDES_HINT_SIZE;
+
+    for (y = 0; y < draw_h; ++y) {
+        LONG last_pen = -1;
+        for (x = 0; x < draw_w; ++x) {
+            int pixel = y * image->width + x;
+            UBYTE r = image->rgb[pixel * 3 + 0];
+            UBYTE g = image->rgb[pixel * 3 + 1];
+            UBYTE b = image->rgb[pixel * 3 + 2];
+            LONG pen = mp_sides_hint_pen(pens, &pen_count, r, g, b);
+
+            if (pen != last_pen) {
+                SetAPen(rp, (UBYTE)pen);
+                last_pen = pen;
+            }
+            WritePixel(rp, left + x, top + y);
+        }
+    }
+
+    for (x = 0; x < pen_count; ++x)
+        ReleasePen(screen->ViewPort.ColorMap, (ULONG)pens[x].pen);
+}
+
+static void mp_free_sides_hint_images(void) {
+    int i;
+    for (i = 0; i < MP_SIDES_HINT_COUNT; ++i) {
+        if (mp_sides_hint_images[i].rgb) {
+            FreeVec(mp_sides_hint_images[i].rgb);
+            mp_sides_hint_images[i].rgb = NULL;
+        }
+        mp_sides_hint_images[i].width = 0;
+        mp_sides_hint_images[i].height = 0;
+        mp_sides_hint_images[i].attempted = FALSE;
+    }
 }
 
 // Creates a valid PWG header and uncompressed RGB data
@@ -5223,6 +5435,7 @@ static void perform_query_flow(struct Window *win, const char *ip_only, int port
      * re-query correctly clears a previous printer's ink levels off the
      * panel instead of leaving them looking current. */
     mp_draw_marker_strips();
+    mp_draw_sides_hint();
 }
 
 int send_pwg_print_job(const char *ip, int port, const char *media, const char *print_mode, unsigned char *pwg_data, int pwg_size) {
@@ -6266,6 +6479,25 @@ void process_window_events(struct Window *win) {
                                 driver_engine_explicit = TRUE;
                                 update_sides_dropdown(win);
                                 update_dpi_dropdown(win);
+                                mp_draw_sides_hint();
+                            }
+                        }
+                        break;
+
+                        case GAD_SIDES:
+                        {
+                            ULONG selected = 0;
+                            GT_GetGadgetAttrs(gad, win, NULL,
+                                              GTCY_Active, (ULONG)&selected,
+                                              TAG_DONE);
+                            if (selected < (ULONG)mp_sides_option_count) {
+                                strncpy(driver_sides_buffer,
+                                        mp_sides_value_storage[selected],
+                                        sizeof(driver_sides_buffer) - 1);
+                                driver_sides_buffer[
+                                    sizeof(driver_sides_buffer) - 1] = '\0';
+                                printf("Sides set to: %s\n", driver_sides_buffer);
+                                mp_draw_sides_hint();
                             }
                         }
                         break;
@@ -6408,6 +6640,7 @@ void process_window_events(struct Window *win) {
                      * opening on top of this window and closing again). */
                     redraw_output_box();
                     mp_draw_marker_strips();
+                    mp_draw_sides_hint();
                     break;
 
                     case IDCMP_MENUPICK:
@@ -6643,6 +6876,7 @@ int main(void) {
      * it invisible until the first status line happens to draw it. */
     custom_printf("CLEAR");
     mp_draw_marker_strips();
+    mp_draw_sides_hint();
 
     // Set the initial state of the print mode radio buttons
     struct Gadget *print_mode_gadget = glist;
@@ -6723,6 +6957,8 @@ int main(void) {
      * shown to the user, doesn't depend on that event ever arriving in
      * time. */
     redraw_output_box();
+    mp_draw_marker_strips();
+    mp_draw_sides_hint();
 
     // Process events
     process_window_events(window);
@@ -6741,6 +6977,8 @@ int main(void) {
             GT_ReplyIMsg(imsg);
         }
     }
+
+    mp_free_sides_hint_images();
 
     /* Correct GadTools teardown order: first detach menus and close the
      * window, then free gadgets, then release the label backing memory.

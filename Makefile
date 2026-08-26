@@ -201,6 +201,8 @@ release: gui driver
 	cp MintPrintSettings $(RELEASE_DIR)/
 	cp $(DRIVER_OUT) $(RELEASE_DIR)/MintPRINT
 	cp docs/MintPrintSettings.guide $(RELEASE_DIR)/
+	mkdir -p $(RELEASE_DIR)/Art
+	cp $(ART_DIR)/single.iff $(ART_DIR)/longside.iff $(ART_DIR)/shortside.iff $(RELEASE_DIR)/Art/
 	cp Aminet/MintPRINT.readme release/MintPRINT.readme
 	@if [ -f $(ART_DIR)/MintPrintSettings.info ]; then \
 		cp $(ART_DIR)/MintPrintSettings.info $(RELEASE_DIR)/; \
@@ -236,6 +238,8 @@ release31: gui driver31
 	cp MintPrintSettings $(RELEASE31_DIR)/
 	cp $(DRIVER31_OUT) $(RELEASE31_DIR)/MintPRINT
 	cp docs/MintPrintSettings.guide $(RELEASE31_DIR)/
+	mkdir -p $(RELEASE31_DIR)/Art
+	cp $(ART_DIR)/single.iff $(ART_DIR)/longside.iff $(ART_DIR)/shortside.iff $(RELEASE31_DIR)/Art/
 	cp Aminet/MintPRINT.readme release/MintPRINT-OS31.readme
 	@if [ -f $(ART_DIR)/MintPrintSettings.info ]; then \
 		cp $(ART_DIR)/MintPrintSettings.info $(RELEASE31_DIR)/; \
