@@ -180,3 +180,24 @@ int mp_media_page_complete(unsigned long raster_rows,
      * input cannot wrap an unsigned long and hide a completed page. */
     return auxiliary_rows >= target_rows - raster_rows;
 }
+
+int mp_short_strip_completes_logical_page(unsigned long raster_rows,
+                                          unsigned long auxiliary_rows,
+                                          unsigned long target_rows,
+                                          unsigned long nominal_band_rows,
+                                          unsigned long current_band_rows)
+{
+    unsigned long minimum_extent;
+
+    if (!target_rows || !nominal_band_rows || !current_band_rows ||
+        current_band_rows >= nominal_band_rows)
+        return 0;
+
+    /* A terminal remainder is useful evidence only near the end of a real
+     * sheet. Three quarters allows ordinary application top/bottom margins
+     * while rejecting a short band early in a page. Compare without adding
+     * the row counts so malformed input cannot overflow an unsigned long. */
+    minimum_extent = target_rows - target_rows / 4UL;
+    if (raster_rows >= minimum_extent) return 1;
+    return auxiliary_rows >= minimum_extent - raster_rows;
+}

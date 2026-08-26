@@ -64,4 +64,17 @@ int mp_media_page_complete(unsigned long raster_rows,
                            unsigned long auxiliary_rows,
                            unsigned long target_rows);
 
+/* Strip printers normally use a fixed-height band and finish a logical
+ * printable page with one shorter remainder band. Some applications keep
+ * SPECIAL_NOFORMFEED set across that boundary, so the short band is the only
+ * reliable page delimiter left in the Render stream. Accept it only when the
+ * accumulated raster plus discarded auxiliary height is already close to the
+ * physical media height; this keeps an unusually short intermediate band
+ * from prematurely ejecting a page. */
+int mp_short_strip_completes_logical_page(unsigned long raster_rows,
+                                          unsigned long auxiliary_rows,
+                                          unsigned long target_rows,
+                                          unsigned long nominal_band_rows,
+                                          unsigned long current_band_rows);
+
 #endif

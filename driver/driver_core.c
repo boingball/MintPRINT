@@ -42,7 +42,7 @@
  * exactly which build produced it, rather than relying on whoever's
  * reading it to separately check About or remember what they last
  * copied to DEVS:Printers/. */
-#define MP_DRIVER_REV 35
+#define MP_DRIVER_REV 36
 
 struct ExecBase *SysBase = NULL;
 struct DosLibrary *DOSBase = NULL;
@@ -132,6 +132,15 @@ static ULONG g_aux_height = 0;
  * width band arrives, materialise the pending height as white PWG rows. */
 static ULONG g_leading_aux_height = 0;
 static ULONG g_page_target_height = 0;
+/* A strip-printing application normally renders fixed-height bands and ends
+ * its logical printable page with one shorter remainder band. Wordworth
+ * keeps SPECIAL_NOFORMFEED set even across that boundary, so rev35's
+ * media-height-only splitter took the first 443 rows of page 2 to finish the
+ * 3505-row A4 raster. Keep the normal band height and mark the current band
+ * when it is shorter; case 4 confirms enough logical page height has accrued
+ * before treating it as a page delimiter. */
+static ULONG g_strip_nominal_band_height = 0;
+static BOOL g_strip_current_band_short = FALSE;
 /* Set by case 0 when a continuation band would push the accumulating page
  * past g_page_target_height: only the first g_split_at_row of that band's
  * rows belong to the page being finished, the rest start a fresh one. See
@@ -1342,6 +1351,8 @@ int PRT_STDARGS DriverOpen(struct IORequest *ior)
     g_aux_height = 0;
     g_leading_aux_height = 0;
     g_page_target_height = 0;
+    g_strip_nominal_band_height = 0;
+    g_strip_current_band_short = FALSE;
     g_split_pending = FALSE;
     g_split_at_row = 0;
     g_duplex_job_failed = FALSE;
@@ -1471,6 +1482,7 @@ LONG PRT_STDARGS Render(LONG ct, LONG x, LONG y, LONG status, ...)
             g_discard_aux_band = FALSE;
             g_discard_aux_band_has_ink = FALSE;
             g_discard_leading_aux_band = FALSE;
+            g_strip_current_band_short = FALSE;
             /* g_config was already loaded once for this job in DriverOpen()
              * - case 5 (which fires before this on the job's first page)
              * needs it that early for the PED resolution fields below. */
@@ -1525,6 +1537,9 @@ LONG PRT_STDARGS Render(LONG ct, LONG x, LONG y, LONG status, ...)
                 g_discard_aux_band = TRUE;
                 g_page_height = (ULONG)y;
                 g_page_had_noformfeed = TRUE;
+                g_strip_current_band_short =
+                    g_strip_nominal_band_height && (ULONG)y > 0 &&
+                    (ULONG)y < g_strip_nominal_band_height;
                 mp_log_3("Ignoring tiny NOFORMFEED auxiliary band width/height/pageWidth",
                          x, y, (LONG)g_accum_width);
                 return PDERR_NOERR;
@@ -1548,6 +1563,11 @@ LONG PRT_STDARGS Render(LONG ct, LONG x, LONG y, LONG status, ...)
                 ULONG new_total = g_accum_height + (ULONG)y;
                 g_page_width = (ULONG)x;
                 g_page_height = (ULONG)y;
+                g_strip_current_band_short =
+                    g_strip_nominal_band_height && (ULONG)y > 0 &&
+                    (ULONG)y < g_strip_nominal_band_height;
+                if ((ULONG)y > g_strip_nominal_band_height)
+                    g_strip_nominal_band_height = (ULONG)y;
                 /* A band that would carry the page past its target isn't
                  * wholly this page's - accepting all of it (the previous
                  * behaviour) silently stole however many rows overshot,
@@ -1579,6 +1599,7 @@ LONG PRT_STDARGS Render(LONG ct, LONG x, LONG y, LONG status, ...)
             g_page_width = (ULONG)x;
             g_page_height = (ULONG)y;
             g_recenter_clamped_page = FALSE;
+            g_strip_nominal_band_height = (ULONG)y;
 
             /* printer.device's own page width for a DUMPRPORT source (no
              * SPECIAL_NOFORMFEED - a single-shot page, e.g. MintPrint
@@ -1795,6 +1816,17 @@ LONG PRT_STDARGS Render(LONG ct, LONG x, LONG y, LONG status, ...)
                 g_discard_aux_band = FALSE;
                 g_discard_aux_band_has_ink = FALSE;
                 g_discard_leading_aux_band = FALSE;
+                if (g_page_pending && !g_job_failed &&
+                    g_strip_current_band_short &&
+                    mp_short_strip_completes_logical_page(
+                        g_accum_height, g_aux_height,
+                        g_page_target_height,
+                        g_strip_nominal_band_height, g_page_height)) {
+                    mp_log_3("Strip logical boundary rows/aux/shortBand",
+                             (LONG)g_accum_height, (LONG)g_aux_height,
+                             (LONG)g_page_height);
+                    return mp_page_finalize() ? PDERR_NOERR : PDERR_CANCEL;
+                }
                 if (g_page_pending && !g_job_failed && mp_media_page_complete(
                         g_accum_height, g_aux_height,
                         g_page_target_height)) {
@@ -1820,6 +1852,16 @@ LONG PRT_STDARGS Render(LONG ct, LONG x, LONG y, LONG status, ...)
             if (mp_engine_supports_strip_accumulation() &&
                 (g_current_special & SPECIAL_NOFORMFEED)) {
                 g_page_had_noformfeed = TRUE;
+                if (g_strip_current_band_short &&
+                    mp_short_strip_completes_logical_page(
+                        g_accum_height, g_aux_height,
+                        g_page_target_height,
+                        g_strip_nominal_band_height, g_page_height)) {
+                    mp_log_3("Strip logical boundary rows/aux/shortBand",
+                             (LONG)g_accum_height, (LONG)g_aux_height,
+                             (LONG)g_page_height);
+                    return mp_page_finalize() ? PDERR_NOERR : PDERR_CANCEL;
+                }
                 if (mp_media_page_complete(g_accum_height, g_aux_height,
                                            g_page_target_height)) {
                     mp_log_3("Strip media boundary reached rows/aux/target",

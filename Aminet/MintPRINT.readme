@@ -249,13 +249,15 @@ History
          page (including its own top margin) got silently welded onto
          the page that just filled up. Affects PWG Raster and URF alike,
          one-sided or duplex, and predates this URF duplex work entirely.
-         Fixed in revision 35 by splitting an overshooting band
-         mid-stream at the exact row the target is reached, closing the
-         current page out there and starting a fresh one with the
-         remainder. Not yet re-tested; no cross-compiler was available
-         to build this fix, so it is validated only by manual review and
-         by hand-tracing the exact band sequence that exposed the bug
-       - Driver build revision is now 35 so MintPrint Settings can detect
+         Revision 35 split an overshooting band at the physical media
+         height, but a real retest proved Wordworth's printable page ends
+         earlier: 3062 rows (thirty 100-row bands plus a final 62-row
+         remainder), not the 3505-row A4 raster. It therefore still took
+         443 rows from page 2. Revision 36 recognises the short terminal
+         band as the logical page boundary, including narrow auxiliary
+         dumps, and pads/finalises the physical sheet there; the media
+         height split remains as a fallback for other applications
+       - Driver build revision is now 36 so MintPrint Settings can detect
          and offer the updated driver automatically
 
 1.2.0  Faster JPEG, PRT: text printing, and PostScript compatibility fixes.

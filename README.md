@@ -61,21 +61,20 @@ MintPRINT 1.2.1 bumps to **driver revision 35**, adding a new engine:
   correct 0/1/2, caught by cross-checking a second, independent real-world
   URF reverse-engineering against an HP DesignJet T230) - fixed in rev 34.
   Not yet re-tested.
-- **Strip-printing accumulator overshoot fix** (driver rev 35). Found
+- **Strip-printing page-boundary fixes** (driver revs 35-36). Found
   testing PWG Raster one-sided on the same printer, not URF or duplex
   specifically: a two-page Wordworth document printed with no IPP error at
   all, but visibly corrupted - the page boundary the accumulator chose fell
   in the middle of real content (confirmed by decoding and rendering the
   job file: a character cut off at the top of the second sheet). The
-  accumulator only checked whether a page had reached its target height
-  after accepting a whole band, never whether accepting it would *overshoot*
-  the target - so up to ~100 rows belonging to the next page (including its
-  own top margin) got silently welded onto the page that just filled up.
-  Affects PWG Raster and URF identically, one-sided or duplex. Fixed by
-  splitting an overshooting band mid-stream at the exact row the target is
-  reached. Not yet re-tested; no cross-compiler was available to build this
-  fix, so it's validated only by manual review and by hand-tracing the real
-  band sequence that exposed the bug.
+  rev-35 accumulator split at the 3505-row physical A4 boundary, but a real
+  retest proved Wordworth's page cycle ends earlier at 3062 rows (thirty
+  100-row bands plus a 62-row terminal remainder); rev 35 therefore still
+  stole 443 rows from page 2. Rev 36 recognises that short terminal band as
+  the logical printable-page boundary, including when it arrives as a narrow
+  auxiliary dump, finalises/pads the physical page there, and retains the
+  media-height split as a fallback for applications without that signal.
+  Affects PWG Raster and URF identically, one-sided or duplex.
 
 ## What's new in 1.2.0
 

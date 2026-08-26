@@ -131,14 +131,14 @@ belonged to the next page (including, in this case, its own top margin)
 were silently welded onto the bottom of the page that had just filled up.
 This affects PWG Raster and URF identically, one-sided or duplex, and
 predates this URF duplex work entirely (the accumulator logic itself was
-unchanged; URF only inherited it in driver revision 32 above). Fixed in
-driver revision 35 by splitting an overshooting band mid-stream at the
-exact row the target is reached, closing the current page out there and
-starting a fresh one with the remainder - see `docs/URF_ENGINE.md`'s
+unchanged; URF only inherited it in driver revision 32 above). Revision 35
+added a media-height split, but its real retest proved Wordworth's logical
+page ends at a short 62-row remainder after 3062 printable rows, before the
+3505-row physical A4 boundary; rev 35 consequently still stole 443 rows
+from page 2. Revision 36 recognises that terminal short band for both normal
+and narrow auxiliary dumps, pads/finalises the sheet at the logical boundary,
+and keeps the media-height split as a fallback - see `docs/URF_ENGINE.md`'s
 "Duplex and strip-printing accumulation" section for the full mechanism.
-Not yet re-tested; no cross-compiler was available to build this fix, so
-it has only been validated by manual code review and by hand-tracing the
-exact band sequence from the driver log that exposed the bug.
 
 ### Brother HL-L2350DW
 

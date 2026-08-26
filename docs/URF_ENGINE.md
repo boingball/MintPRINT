@@ -227,37 +227,25 @@ the same graphic's fragments recurring further down. The physical page
 boundary MintPRINT chose had landed in the middle of real content instead
 of at Wordworth's own page break.
 
-Root cause: this accumulator only checks whether the target page height has
-been *reached* once a whole `SPECIAL_NOFORMFEED` band has already been
-accepted and written - never whether accepting that band would *overshoot*
-it. When the page was already close to, but under, target and the next
-~100-row band arrived, the accumulator took the entire band anyway, letting
-the page run up to ~100 rows past its true boundary. Since Wordworth streams
-its *entire* multi-page document as one unbroken sequence of same-width
-NOFORMFEED bands with no other page-break signal, those overshoot rows are
-never spare padding - they are always the start of whatever comes next
-(here, the next page's own top margin and content), silently welded onto
-the bottom of the page that just filled up. This affects PWG Raster and URF
-identically, strip-printed one-sided or duplex - it long predates this URF
-duplex work (unchanged accumulator logic; see the driver rev 32 fix above,
-which only extended the same pre-existing behaviour to URF) and simply
-hadn't surfaced on a document whose real per-page content didn't divide
-evenly into the target height.
+Revision 35 added a safe mid-band split at `g_page_target_height`, but its
+first real retest exposed the deeper boundary signal. The captured A4 stream
+did not describe a 3505-row logical page: Wordworth ended page 1 after thirty
+100-row bands plus a 62-row remainder, exactly 3062 rows. The next 443 rows
+were already page 2, so splitting only at physical A4 height still welded
+those rows to page 1. Decoding the retained PWG confirmed this precisely:
+page 1 contained the second-page heading and most of its character graphic,
+while page 2 contained only the chopped-off remainder.
 
-Driver revision 35 fixes this: a continuation band that would overshoot
-`g_page_target_height` now only has its first `g_split_at_row` rows applied
-to the page being finished (closing it out at exactly the target, so no
-padding is needed either); the remaining rows start a fresh page instead,
-via `mp_begin_split_page()` (mirrors `Render()` case 0's own "begin new
-page" path). Rows already arrive one at a time through `Render()` case 1
-(`mp_job_write_row()`), so the split happens mid-band, at the exact row the
-target is reached, before that row is written to either encoder - no row is
-ever dropped or duplicated. Not yet re-tested on real hardware; validated
-so far only by manual review (no cross-compiler in this environment) and by
-hand-tracing the exact band sequence from the real driver log that exposed
-the bug, which the fix reproduces cleanly: page 1 finalizes at exactly 3505
-rows (the target, not 3562) and the 57 previously-stolen rows correctly
-become page 2's own leading content instead.
+Driver revision 36 records the normal strip height and treats a shorter final
+band as the application's logical printable-page delimiter once accumulated
+raster plus auxiliary height is close to the physical media height. This
+works both for a full-width terminal band (page 1's 3062-row sequence) and a
+narrow discarded auxiliary terminal band (page 2's 700 real rows plus 2362
+rows of auxiliary extent). The physical page is then padded and finalised
+before the next band arrives. The rev-35 media-height split remains as a
+fallback for applications that provide no short terminal band. The heuristic
+requires at least three quarters of the physical page extent, preventing a
+short intermediate strip near the start of a page from causing an eject.
 
 ## Status: confirmed physically printing
 
