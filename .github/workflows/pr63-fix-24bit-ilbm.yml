@@ -1,0 +1,49 @@
+name: PR63 fix 24-bit ILBM RGB bit order
+
+on:
+  push:
+    branches:
+      - claude/ink-toner-status-panel
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ github.actor != 'github-actions[bot]' && !contains(github.event.head_commit.message, '[24bit-ilbm-fixed]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: claude/ink-toner-status-panel
+          fetch-depth: 0
+
+      - name: Fix deep ILBM RGB bit significance
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('Archive/Old JPEG Decode/iff-loader.c')
+          s = p.read_text(encoding='utf-8')
+
+          old = '''                    if (planes[bit][y * bpr + (x / 8)] & mask) r |= 1 << (7 - bit);\n                    if (planes[bit + 8][y * bpr + (x / 8)] & mask) g |= 1 << (7 - bit);\n                    if (planes[bit + 16][y * bpr + (x / 8)] & mask) b |= 1 << (7 - bit);'''
+          new = '''                    /* Deep ILBM stores bitplanes least-significant first:\n                     * R0..R7, G0..G7, B0..B7. Plane 0 therefore contributes\n                     * bit 0, not bit 7. Reversing this produced recognisable\n                     * images with wildly wrong colours (notably 24-bit ILBMs\n                     * saved by Art Expression). */\n                    if (planes[bit][y * bpr + (x / 8)] & mask) r |= 1 << bit;\n                    if (planes[bit + 8][y * bpr + (x / 8)] & mask) g |= 1 << bit;\n                    if (planes[bit + 16][y * bpr + (x / 8)] & mask) b |= 1 << bit;'''
+
+          if old not in s:
+              raise SystemExit('24-bit ILBM RGB decode anchor not found')
+
+          s = s.replace(old, new, 1)
+          p.write_text(s, encoding='utf-8')
+          PY
+
+          grep -q 'r |= 1 << bit;' 'Archive/Old JPEG Decode/iff-loader.c'
+          grep -q 'g |= 1 << bit;' 'Archive/Old JPEG Decode/iff-loader.c'
+          grep -q 'b |= 1 << bit;' 'Archive/Old JPEG Decode/iff-loader.c'
+          git diff --check
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add 'Archive/Old JPEG Decode/iff-loader.c'
+          git commit -m 'Fix 24-bit ILBM RGB bit order [24bit-ilbm-fixed]'
+          git push origin HEAD:claude/ink-toner-status-panel
