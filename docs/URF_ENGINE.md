@@ -181,6 +181,42 @@ anyway because that job's IPP-level `sides=one-sided` never told the
 printer's duplexer to engage at all, so the page-embedded hint went
 unchecked; the stricter duplex path evidently does check it.
 
+**A fourth test, on driver revision 34, ruled out the duplex/tumble byte
+as the (whole) explanation.** The retained `T:MintPRINT-job.urf` was
+independently decoded byte-for-byte: 2 pages, both exactly 2478x3562,
+300dpi, `duplex=2` (the corrected "long side" value, matching the job's
+`sides=two-sided-long-edge`), every row's PackBits data decodes cleanly,
+and the file ends exactly at the last row of page 2 with zero trailing or
+missing bytes - about as byte-perfect as a duplex URF stream can be. The
+printer still rejected it with the identical `server-error-job-canceled`,
+immediately and synchronously, exactly as it did for the byte-*imperfect*
+files in the first three tests. That repetition across four structurally
+very different files is itself informative: it suggests the printer's
+rejection may not be reacting to the URF stream's content at all, and
+could instead be a blanket "no duplex over `image/urf`" policy on this
+particular printer/firmware, unrelated to anything MintPRINT controls in
+the raster stream.
+
+MintPRINT's own IPP client only records the numeric IPP status, not the
+`status-message` text a compliant printer is supposed to return alongside
+it - so the driver log alone can't say *why* the printer canceled the job,
+only that it did. `windows_ipp_probe.py` (v2.2+) can now get that text
+directly: `--print-file` accepts a `--sides` value, which reproduces the
+exact IPP request MintPRINT's own duplex path sends (including the
+`sides` Job Template attribute), and the report now prints any
+`status-message`/`job-state-reasons` the printer sends back. Run it
+against the retained `T:MintPRINT-job.urf` from a PC on the same network:
+
+    python windows_ipp_probe.py http://<printer-ip>:631/ipp/print \
+        --print-file job.urf --mime image/urf --sides two-sided-long-edge
+
+If the printer's own error text says something like "format not
+supported for two-sided printing" or similar, that confirms the "no URF
+duplex on this printer" theory above and this isn't a MintPRINT bug to
+chase further on the Brother; if it names something else (an unexpected
+attribute, a media/resolution mismatch), that reopens the search with an
+actual reason to go on instead of a bare status code.
+
 ## Status: confirmed physically printing
 
 The byte layout was written and cross-checked against the CUPS reference
@@ -206,12 +242,15 @@ accumulator (driver revision 31, fixed in 32), then the front/back
 page-height mismatch it exposed once fixed (driver revision 32, fixed in
 33), then the duplex/tumble byte enum itself being wrong (driver revision
 33, fixed in 34 - see "Format layout" and "Duplex and strip-printing
-accumulation" above). All three are now fixed, but duplex itself -
-including whether a job actually completes and prints, and the "no
-backside row reversal" assumption - is still not yet physically confirmed.
-A backside page that prints upside-down or mirrored, while the front side,
-page count and overall page geometry are otherwise correct, points there
-first.
+accumulation" above). A fourth test on revision 34, with a file confirmed
+byte-perfect end to end, hit the identical rejection anyway - see that
+section for why this now points at a possible printer-side "no duplex
+over `image/urf`" limitation rather than a remaining MintPRINT bug, and
+the `windows_ipp_probe.py --print-file --sides` diagnostic added to get
+the printer's own error text instead of guessing further from a bare
+status code. Whether URF duplex can complete and print at all - and,
+separately, whether the "no backside row reversal" assumption holds - is
+still not physically confirmed on any printer.
 
 If a URF test print comes out wrong (garbled image, printer error, rejected
 job), the most useful next artifact is `T:MintPRINT-job.urf` (kept when
