@@ -2,7 +2,7 @@ Short:        IPP/AirPrint driver and setup tool
 Author:       Darren Banfi (boingball)
 Uploader:     boingball@gmail.com
 Type:         driver/print
-Version:      1.2.3
+Version:      1.2.4
 Requires:     68000+; AmigaOS 3.0+; TCP/IP stack providing bsdsocket.library
 Architecture: m68k-amigaos >= 3.0.0
 
@@ -24,25 +24,28 @@ resulting document directly to the printer's IPP endpoint over the network.
 AmigaOS 3.0/3.1 use the separate classic pre-V44 driver build. Newer
 V44-capable AmigaOS releases use the normal extended driver build. Both use
 the same MintPrint Settings GUI and the same IPP/JPEG/PostScript/PWG/PDF
-backend.
+backend. MintPrint Settings detects which build this machine needs and
+installs the matching one automatically - see Installation below.
 
 Archive contents
 ----------------
 
-This archive contains two drawers:
+This archive contains one drawer plus an Installer script:
+
+  Install                  classic AmigaDOS Installer script (optional
+                            alternative to running MintPrintSettings)
 
   MintPRINT/
     MintPrintSettings       GUI setup, discovery and test tool
-    MintPRINT               driver for newer printer.device versions
+    Drivers/
+      MintPRINT-V44/
+        MintPRINT           driver for V44-capable AmigaOS (3.2, 3.5, 3.9+)
+      MintPRINT-OS31/
+        MintPRINT           classic AmigaOS 3.0/3.1 driver build
 
-  MintPRINT-OS31/
-    MintPrintSettings       same GUI setup, discovery and test tool
-    MintPRINT               classic AmigaOS 3.0/3.1 driver build
-
-Use MintPRINT-OS31 on AmigaOS 3.0 or 3.1.
-
-Use MintPRINT on V44-capable classic AmigaOS systems such as AmigaOS 3.2,
-3.5 and 3.9.
+Run MintPrintSettings (or the Install script) and it picks the correct
+Drivers/ subdrawer for this machine automatically - there is no separate
+archive to choose between AmigaOS versions any more.
 
 Features
 --------
@@ -63,7 +66,10 @@ Features
   - Built-in AmigaGuide help from the Help menu
   - Warns if a printer advertises none of the formats MintPRINT can
     produce, with information on reporting the printer for support
-  - Detects and offers to install or update the bundled driver
+  - Detects this machine's AmigaOS/printer.device generation and offers to
+    install or update the matching bundled driver automatically
+  - Optional classic AmigaDOS Installer script as an alternative install
+    path, with the same auto-detected driver choice
   - No printer-specific Amiga driver or vendor software required
 
 Requirements
@@ -87,20 +93,21 @@ Workbench.
 Installation
 ------------
 
-Extract the archive and choose the drawer for your AmigaOS version:
+Extract the archive and copy the MintPRINT/ drawer wherever you like, then
+run MintPrintSettings.
 
-  AmigaOS 3.0 or 3.1:
-    use MintPRINT-OS31/
+On first run MintPrintSettings detects your AmigaOS/printer.device
+generation (from exec.library's version) and tells you which bundled
+driver it picked - Drivers/MintPRINT-V44/ for AmigaOS 3.2, 3.5, 3.9 and
+later, or Drivers/MintPRINT-OS31/ for the classic pre-V44 AmigaOS 3.0/3.1
+build - before offering to install it to DEVS:Printers/MintPRINT. On later
+runs, if the matching bundled driver is newer than the installed copy, it
+offers to update it.
 
-  V44-capable AmigaOS 3.x systems (including 3.2, 3.5 and 3.9):
-    use MintPRINT/
-
-Copy the selected drawer wherever you like and run MintPrintSettings.
-
-On first run MintPrintSettings detects that DEVS:Printers/MintPRINT is
-missing and offers to install the bundled driver. On later runs, if the
-driver bundled beside MintPrintSettings is newer than the installed copy,
-it offers to update it.
+Prefer the classic Amiga install experience? Run the Install script at the
+top of the archive instead - it performs the same detection through the
+standard AmigaOS Installer, with a chance to confirm or override the
+driver choice before anything is copied.
 
 Reboot after any driver install or update. A printer driver segment that
 is already resident in memory will not pick up a replaced file until the
@@ -124,9 +131,9 @@ be stored in Unit1-Unit7 and copied to Unit0 when required.
 AmigaOS 3.0/3.1 notes
 ---------------------
 
-The MintPRINT-OS31 package uses a classic pre-V44 printer driver structure and
-a compatibility rendering path for the older printer.device raster format.
-The same ABI also covers AmigaOS 3.0. The IPP networking and
+The Drivers/MintPRINT-OS31 build uses a classic pre-V44 printer driver
+structure and a compatibility rendering path for the older printer.device
+raster format. The same ABI also covers AmigaOS 3.0. The IPP networking and
 JPEG/PostScript/PWG Raster/PDF output code is shared with the newer driver
 build.
 
@@ -189,6 +196,44 @@ from Anthropic Claude.
 
 History
 -------
+
+1.2.4  Single combined archive with automatic driver selection, driver
+       revision 41.1 (no driver change).
+
+       - Merged the separate MintPRINT / MintPRINT-OS31 release bundles
+         into one MintPRINT/ drawer, with both compiled drivers staged
+         under Drivers/MintPRINT-V44/ and Drivers/MintPRINT-OS31/. There
+         is no longer a "which archive for my AmigaOS version" choice to
+         make before downloading
+       - MintPrint Settings now detects this machine's AmigaOS/
+         printer.device generation from exec.library's version and
+         automatically installs/updates the matching bundled driver,
+         showing the detected AmigaOS version and chosen driver in the
+         install/update prompts and the About box
+       - Added an Install script (classic AmigaDOS Installer format) as an
+         alternative to running MintPrintSettings first, offering the same
+         auto-detected driver choice with a chance to override it
+       - Fixed the ink/toner level bars sometimes showing the wrong
+         colour, and sometimes losing it again. Two bugs found back to
+         back on real hardware: ObtainBestPenA() only ever reuses whatever
+         existing pen was closest to the requested colour, so on a screen
+         with few free colour registers (e.g. a default 32-colour
+         Workbench) with no true cyan/magenta already on screen, several
+         markers snapped onto the same wrong pen (both cyan and magenta
+         bars turned yellow) - fixed by trying ObtainPen() first, which
+         only succeeds by setting a genuinely free pen to the exact
+         requested colour. That then exposed a second bug: each marker
+         released its pen immediately after drawing, so the next marker's
+         ObtainPen() could reclaim the same shared colour register and
+         repaint it, instantly recolouring every bar already drawn with
+         that pen index (all four bars flashed the right colour, then
+         collapsed to whichever was requested last). Pens are now held
+         until just before the next redraw, or released at shutdown
+       - Shortened the OS-detection text in the driver install/update and
+         About requesters: EasyRequest sizes its window to the single
+         widest line with no wrapping, and the full detected-AmigaOS/
+         driver-path text on one line could push the requester wider than
+         a default low-resolution AmigaOS screen
 
 1.2.3  Printer ink/toner status is back on Query, driver revision 41.1
        (no driver change).

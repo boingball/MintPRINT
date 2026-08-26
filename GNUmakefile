@@ -14,7 +14,7 @@ FORWARD_TARGETS := gui test test-http test-dpi test-jpeg test-ipp-enum \
                    test-postscript test-urf driver driver31 driver-symbols \
                    driver-symbols31 help
 
-.PHONY: all release release31 release-all clean $(FORWARD_TARGETS)
+.PHONY: all release clean $(FORWARD_TARGETS)
 
 all:
 	$(MAKE) -f Makefile all
@@ -30,22 +30,6 @@ release:
 		printf '\000\170' | dd of=release/MintPRINT.info bs=1 seek=84 conv=notrunc 2>/dev/null; \
 		echo "Set drawer window height to 120: release/MintPRINT.info"; \
 	fi
-
-release31:
-	$(MAKE) -f Makefile release31
-	@if [ -f release/MintPRINT-OS31.info ]; then \
-		printf '\000\170' | dd of=release/MintPRINT-OS31.info bs=1 seek=84 conv=notrunc 2>/dev/null; \
-		echo "Set drawer window height to 120: release/MintPRINT-OS31.info"; \
-	fi
-
-release-all:
-	$(MAKE) -f Makefile release-all
-	@for icon in release/MintPRINT.info release/MintPRINT-OS31.info; do \
-		if [ -f "$$icon" ]; then \
-			printf '\000\170' | dd of="$$icon" bs=1 seek=84 conv=notrunc 2>/dev/null; \
-			echo "Set drawer window height to 120: $$icon"; \
-		fi; \
-	done
 
 clean:
 	$(MAKE) -f Makefile clean

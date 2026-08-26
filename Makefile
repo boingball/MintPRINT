@@ -12,9 +12,8 @@ DRIVER31_BUILD := build/driver31
 DRIVER31_OUT := $(DRIVER31_BUILD)/MintPRINT
 TEST_BUILD := build/tests
 RELEASE_DIR := release/MintPRINT
-RELEASE31_DIR := release/MintPRINT-OS31
 
-.PHONY: all gui test test-http test-dpi test-jpeg test-ipp-enum test-postscript test-urf driver driver31 driver-symbols driver-symbols31 release release31 release-all clean help
+.PHONY: all gui test test-http test-dpi test-jpeg test-ipp-enum test-postscript test-urf driver driver31 driver-symbols driver-symbols31 release clean help
 
 all: gui
 
@@ -31,9 +30,9 @@ help:
 	@echo "  make driver-symbols31 - show ABI symbols used by the OS3.1 driver"
 	@echo "  make test-postscript - host-test and Ghostscript-validate the PostScript writer"
 	@echo "  make test-urf - run host-side Apple Raster (URF) writer tests"
-	@echo "  make release  - build both and stage a distributable bundle"
-	@echo "  make release31 - stage the AmigaOS 3.1 bundle"
-	@echo "  make release-all - stage both modern and OS3.1 bundles"
+	@echo "  make release  - build both drivers and the GUI, stage one distributable"
+	@echo "                  bundle (release/MintPRINT/) with both drivers under"
+	@echo "                  Drivers/ - MintPrintSettings picks the right one at runtime"
 	@echo "  make test     - run host-side geometry regression tests"
 	@echo "  make clean"
 
@@ -184,25 +183,30 @@ test-postscript: $(POSTSCRIPT_TEST)
 
 ART_DIR := art
 
-# Stages a distributable bundle: MintPrintSettings copied next to a plain
-# "MintPRINT" driver binary, matching PROGDIR:MintPRINT - the layout
-# check_and_offer_driver_install() (src/MintPrintSettings.c) expects when
-# it offers to install/update the driver from wherever MintPrintSettings
-# itself is run from.
+# Stages ONE distributable bundle containing both driver builds under
+# Drivers/. MintPrintSettings detects this machine's AmigaOS/printer.device
+# generation at runtime (mp_driver_src_path() in src/MintPrintSettings.c)
+# and installs whichever Drivers/MintPRINT-<variant>/MintPRINT applies, so
+# there is no separate "which bundle do I download" step any more; the
+# Install script (see Install at the repository root) offers the same
+# auto-detection for anyone who prefers the classic Amiga install flow.
 #
 # Icons are copied from $(ART_DIR)/ if present there, matching AmigaOS
 # icon placement: a drawer's icon lives in its PARENT directory (so
 # MintPRINT.info lands next to $(RELEASE_DIR), not inside it), while an
-# application's icon sits right next to its binary. The driver binary
-# deliberately gets no icon at all - it is a printer.device driver
-# segment, not a runnable program, and double-clicking it is unsafe.
-release: gui driver
+# application's icon sits right next to its binary. The driver binaries
+# deliberately get no icon at all - they are printer.device driver
+# segments, not runnable programs, and double-clicking one is unsafe.
+release: gui driver driver31
 	mkdir -p $(RELEASE_DIR)
 	cp MintPrintSettings $(RELEASE_DIR)/
-	cp $(DRIVER_OUT) $(RELEASE_DIR)/MintPRINT
 	cp docs/MintPrintSettings.guide $(RELEASE_DIR)/
 	mkdir -p $(RELEASE_DIR)/Art
 	cp $(ART_DIR)/single.iff $(ART_DIR)/longside.iff $(ART_DIR)/shortside.iff $(RELEASE_DIR)/Art/
+	mkdir -p $(RELEASE_DIR)/Drivers/MintPRINT-V44 $(RELEASE_DIR)/Drivers/MintPRINT-OS31
+	cp $(DRIVER_OUT) $(RELEASE_DIR)/Drivers/MintPRINT-V44/MintPRINT
+	cp $(DRIVER31_OUT) $(RELEASE_DIR)/Drivers/MintPRINT-OS31/MintPRINT
+	cp Install release/Install
 	cp Aminet/MintPRINT.readme release/MintPRINT.readme
 	@if [ -f $(ART_DIR)/MintPrintSettings.info ]; then \
 		cp $(ART_DIR)/MintPrintSettings.info $(RELEASE_DIR)/; \
@@ -218,55 +222,20 @@ release: gui driver
 	fi
 	@echo
 	@echo "Release bundle staged in $(RELEASE_DIR)/:"
-	@echo "  MintPrintSettings       - run this to configure/install"
-	@echo "  MintPRINT                - the driver it installs from PROGDIR:"
-	@echo "                            (must stay next to MintPrintSettings;"
-	@echo "                            deliberately has no icon)"
-	@echo "  MintPrintSettings.info  - if $(ART_DIR)/ had one"
-	@echo "  MintPrintSettings.guide - Help menu > MintPrint Settings Help..."
+	@echo "  MintPrintSettings         - run this; it detects your AmigaOS/"
+	@echo "                              printer.device version and offers to"
+	@echo "                              install the matching driver below"
+	@echo "  Drivers/MintPRINT-V44/    - driver for AmigaOS 3.2, 3.5, 3.9 (V44+)"
+	@echo "  Drivers/MintPRINT-OS31/   - classic driver for AmigaOS 3.0/3.1"
+	@echo "  MintPrintSettings.info    - if $(ART_DIR)/ had one"
+	@echo "  MintPrintSettings.guide   - Help menu > MintPrint Settings Help..."
 	@echo
+	@echo "release/Install           - classic AmigaDOS Installer script, an"
+	@echo "                            alternative to running MintPrintSettings"
 	@echo "release/MintPRINT.info    - the drawer's own icon, if $(ART_DIR)/ had one"
 	@echo "release/MintPRINT.readme  - the Aminet readme, staged next to the"
 	@echo "drawer (not inside it) per Aminet convention: name it to match"
 	@echo "whatever .lha/.zip archive you make of $(RELEASE_DIR)/."
-
-# Separate OS3.1 bundle.  The driver is still named PROGDIR:MintPRINT inside
-# this drawer, so the existing Settings installer needs no OS-specific code:
-# users simply download the bundle appropriate for their AmigaOS version.
-release31: gui driver31
-	mkdir -p $(RELEASE31_DIR)
-	cp MintPrintSettings $(RELEASE31_DIR)/
-	cp $(DRIVER31_OUT) $(RELEASE31_DIR)/MintPRINT
-	cp docs/MintPrintSettings.guide $(RELEASE31_DIR)/
-	mkdir -p $(RELEASE31_DIR)/Art
-	cp $(ART_DIR)/single.iff $(ART_DIR)/longside.iff $(ART_DIR)/shortside.iff $(RELEASE31_DIR)/Art/
-	cp Aminet/MintPRINT.readme release/MintPRINT-OS31.readme
-	@if [ -f $(ART_DIR)/MintPrintSettings.info ]; then \
-		cp $(ART_DIR)/MintPrintSettings.info $(RELEASE31_DIR)/; \
-		echo "Copied $(ART_DIR)/MintPrintSettings.info -> $(RELEASE31_DIR)/"; \
-	else \
-		echo "No $(ART_DIR)/MintPrintSettings.info found - application will have no icon"; \
-	fi
-	@if [ -f $(ART_DIR)/MintPRINT.info ]; then \
-		cp $(ART_DIR)/MintPRINT.info release/MintPRINT-OS31.info; \
-		echo "Copied $(ART_DIR)/MintPRINT.info -> release/MintPRINT-OS31.info (drawer icon)"; \
-	else \
-		echo "No $(ART_DIR)/MintPRINT.info found - OS3.1 release drawer will have no icon"; \
-	fi
-	@echo
-	@echo "OS3.1 release bundle staged in $(RELEASE31_DIR)/:"
-	@echo "  MintPrintSettings       - same setup/test GUI"
-	@echo "  MintPRINT               - classic pre-V44 printer.device driver"
-	@echo "                            (4-bit gun input expanded to 8-bit internally)"
-	@echo "  MintPrintSettings.info  - if $(ART_DIR)/ had one"
-	@echo "  MintPrintSettings.guide - Help menu > MintPrint Settings Help..."
-	@echo
-	@echo "IMPORTANT: OS3.1 requires a working bsdsocket.library TCP/IP stack."
-	@echo "The classic build is new and must be test-printed before public release."
-
-release-all: release release31
-	@echo
-	@echo "Both MintPRINT release bundles are staged under release/."
 
 clean:
 	rm -rf build release MintPrintSettings

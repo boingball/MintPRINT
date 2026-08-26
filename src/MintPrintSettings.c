@@ -57,6 +57,7 @@ void custom_printf(const char *format, ...);
 #define printf custom_printf
 
 extern struct GfxBase *GfxBase;
+extern struct ExecBase *SysBase;
 #define MAX_VALUES 32
 #define MAX_ATTR_LEN 64
 #define MAX_BUFFER 256000
@@ -137,9 +138,18 @@ static struct MPTestPrintJob test_print_job;
 
 // Define the USED macro for GCC
 #define USED __attribute__((used))
-#define MINTPRINT_SETTINGS_VERSION "1.2.3"
+#define MINTPRINT_SETTINGS_VERSION "1.2.4"
 #define MINTPRINT_DRIVER_DEST ((CONST_STRPTR)"DEVS:Printers/MintPRINT")
-#define MINTPRINT_DRIVER_SRC  ((CONST_STRPTR)"PROGDIR:MintPRINT")
+
+/* MintPrint Settings now ships as a single drawer containing both bundled
+ * driver builds under Drivers/, and picks the one matching this machine's
+ * printer.device generation automatically - see mp_driver_src_path() near
+ * the other driver-install helpers. The macro is function-like so every
+ * use site (including ones earlier in this file than the function
+ * definition itself) re-evaluates the detection rather than caching a
+ * stale path. */
+#define MINTPRINT_DRIVER_SRC  (mp_driver_src_path())
+static CONST_STRPTR mp_driver_src_path(void);
 
 /* The driver's own build version, read out of its "$VER: MintPRINT
  * <version>.<revision>" string - see mp_read_driver_version() near the
@@ -150,15 +160,6 @@ struct MPDriverVersion {
     UWORD version;
     UWORD revision;
 };
-static BOOL mp_read_driver_version(CONST_STRPTR path, struct MPDriverVersion *out);
-
-/* DEVS:Printers/MintPRINT install helper paths - also read by the test
- * page (mintprint_test_page) to report the installed driver revision. */
-#define MINTPRINT_DRIVER_DEST ((CONST_STRPTR)"DEVS:Printers/MintPRINT")
-#define MINTPRINT_DRIVER_SRC  ((CONST_STRPTR)"PROGDIR:MintPRINT")
-
-/* Forward declaration: defined later, near the other driver-install
- * helpers, but the test page needs it earlier in the file. */
 static BOOL mp_read_driver_version(CONST_STRPTR path, struct MPDriverVersion *out);
 
 /* Visible both to AmigaOS's Version command and in the About requester. */
@@ -3029,12 +3030,45 @@ static void mp_marker_short_name(int index, char out[3]) {
     }
 }
 
+/* Pens obtained for the ink/toner bars must stay allocated for as long as
+ * their colour needs to remain visible, not just for the RectFill() call
+ * that used them: a pen number is only ever an index into the screen's
+ * shared colour-map, and RectFill() writes that index into the bitplanes
+ * rather than an RGB value. Releasing a pen right after drawing lets
+ * ANYTHING else - including the very next marker in the same redraw loop
+ * - reclaim that register and repaint it, which instantly recolours every
+ * pixel already drawn with that same index, not just newly drawn ones.
+ * That was the "flashes the right colours, then they all end up on
+ * whichever colour was requested last" bug from obtaining and releasing a
+ * pen per marker. Pens are now held here across redraws and only released
+ * right before the next redraw, or at shutdown via
+ * mp_release_marker_pens(). */
+static LONG mp_marker_pens[MP_MARKER_MAX_STRIPS] = {
+    -1, -1, -1, -1, -1, -1
+};
+
+static void mp_release_marker_pens(void) {
+    int i;
+    if (!screen) return;
+    for (i = 0; i < MP_MARKER_MAX_STRIPS; i++) {
+        if (mp_marker_pens[i] >= 0) {
+            ReleasePen(screen->ViewPort.ColorMap, (ULONG)mp_marker_pens[i]);
+            mp_marker_pens[i] = -1;
+        }
+    }
+}
+
 static void mp_draw_marker_strips(void) {
     struct RastPort *rp;
     int area_left, area_right, area_top, area_bottom;
     int grid_top, cell_width, count, i;
 
     if (!window || !screen || !font) return;
+
+    /* Release whatever the previous redraw held before drawing new
+     * content - see the comment above mp_marker_pens[] for why these
+     * can't just be released at the end of the loop below. */
+    mp_release_marker_pens();
 
     rp = window->RPort;
     SetFont(rp, font);
@@ -3122,11 +3156,34 @@ static void mp_draw_marker_strips(void) {
         RectFill(rp, bar_right, bar_top, bar_right, bar_bottom);
 
         have_rgb = mp_marker_rgb(marker_colors[i], &r, &g, &b);
-        pen = have_rgb
-            ? (LONG)ObtainBestPenA(screen->ViewPort.ColorMap,
-                                  (ULONG)r << 24, (ULONG)g << 24,
-                                  (ULONG)b << 24, NULL)
-            : -1;
+        pen = -1;
+        if (have_rgb) {
+            /* This is a shared PUBLIC screen (LockPubScreen(NULL) below),
+             * so on a constrained low-colour Workbench (e.g. 32 colours)
+             * most pens are usually already in use by Workbench or other
+             * apps. ObtainBestPenA() only ever reuses an EXISTING pen's
+             * colour, and with no true cyan/magenta already on screen it
+             * silently snapped several different requested marker colours
+             * onto whichever single existing pen happened to be closest
+             * (observed: cyan and magenta both landing on the same
+             * yellow-ish pen). Try ObtainPen() first - it only succeeds
+             * when it can set a genuinely free pen to this exact RGB - and
+             * fall back to the old best-match behaviour only if the
+             * screen really has no free pens left. Both allocators are
+             * released the same way, via mp_release_marker_pens(). */
+            pen = ObtainPen(screen->ViewPort.ColorMap, -1,
+                             (ULONG)r << 24, (ULONG)g << 24,
+                             (ULONG)b << 24, 0);
+            if (pen < 0) {
+                pen = (LONG)ObtainBestPenA(screen->ViewPort.ColorMap,
+                                          (ULONG)r << 24, (ULONG)g << 24,
+                                          (ULONG)b << 24, NULL);
+            }
+        }
+        /* Stored, not released here - see the comment above
+         * mp_marker_pens[] for why releasing per-marker recolours
+         * already-drawn bars sharing a reclaimed pen index. */
+        mp_marker_pens[i] = pen;
 
         if (level >= 0) {
             int inside_width;
@@ -3155,9 +3212,6 @@ static void mp_draw_marker_strips(void) {
                          bar_right - 1, bar_bottom - 1);
             }
         }
-
-        if (pen >= 0)
-            ReleasePen(screen->ViewPort.ColorMap, (ULONG)pen);
     }
 }
 
@@ -3495,10 +3549,63 @@ int convert_to_pwg(unsigned char *rgb, int w, int h, unsigned char **pwg_out, in
 /* ---------------------------------------------------------------------
  * DEVS:Printers/MintPRINT install helper
  *
- * MintPrint Settings ships next to the compiled MintPRINT printer.device
- * driver (PROGDIR:MintPRINT). If the driver is not yet installed in
- * DEVS:Printers/, offer to copy it in and point the user at Printer Prefs.
+ * MintPrint Settings ships as a single drawer holding both bundled driver
+ * builds under PROGDIR:Drivers/ (MintPRINT-V44 and MintPRINT-OS31 - see
+ * docs/OS31_SUPPORT.md for why two builds exist at all) and automatically
+ * picks the one matching this machine's printer.device generation. If the
+ * chosen driver is not yet installed in DEVS:Printers/, offer to copy it
+ * in and point the user at Printer Prefs.
  * ------------------------------------------------------------------- */
+
+/* The extended V44 printer-driver interface (PPCF_EXTENDED / PRTA_NoIO /
+ * PRTA_8BitGuns) shipped with AmigaOS 3.5, whose exec.library is v44.
+ * Every component released together with a given AmigaOS version shares
+ * that version's major library number, so exec.library's own version is a
+ * reliable stand-in for "does this machine's printer.device understand
+ * the V44 tags" without having to open printer.device just to ask. */
+#define MP_EXEC_VERSION_V44 44
+
+static BOOL mp_needs_os31_driver(void) {
+    return SysBase->LibNode.lib_Version < MP_EXEC_VERSION_V44;
+}
+
+/* Short friendly label for EasyRequest prompts and the About box - kept
+ * deliberately brief (no exec.library version number) because EasyRequest
+ * sizes its window to the single longest \n-delimited line with no
+ * wrapping, and a long line here easily pushes the whole requester off a
+ * low-resolution AmigaOS screen. The exec.library numbers below are the
+ * ones real AmigaOS 3.x releases shipped with; any version outside this
+ * list (older or a future release) still gets a short label rather than
+ * being left blank - see printf() callers for the exec.library number
+ * itself, logged separately to the on-screen output box where a longer
+ * line just wraps instead of resizing a window. */
+static void mp_describe_amiga_os(char *buf, size_t bufsize) {
+    UWORD ver = SysBase->LibNode.lib_Version;
+    const char *label;
+
+    switch (ver) {
+        case 39: label = "3.0";  break;
+        case 40: label = "3.1";  break;
+        case 44: label = "3.5";  break;
+        case 45: label = "3.9";  break;
+        case 47: label = "3.2+"; break;
+        default: label = NULL;   break;
+    }
+
+    if (label) {
+        snprintf(buf, bufsize, "AmigaOS %s", label);
+    } else {
+        snprintf(buf, bufsize, "AmigaOS (exec v%u)", (unsigned)ver);
+    }
+}
+
+/* Bundled driver source path, chosen from the two drawers under
+ * PROGDIR:Drivers/ - see mp_needs_os31_driver() above. */
+static CONST_STRPTR mp_driver_src_path(void) {
+    return mp_needs_os31_driver()
+        ? (CONST_STRPTR)"PROGDIR:Drivers/MintPRINT-OS31/MintPRINT"
+        : (CONST_STRPTR)"PROGDIR:Drivers/MintPRINT-V44/MintPRINT";
+}
 
 static BOOL mp_file_exists(CONST_STRPTR name) {
     BPTR lock = Lock(name, ACCESS_READ);
@@ -3670,30 +3777,43 @@ static void show_about(struct Window *win) {
     char msg[512];
     char installed_str[32];
     char bundled_str[32];
+    char os_desc[64];
     struct MPDriverVersion installed_ver, bundled_ver;
+    CONST_STRPTR src_path = MINTPRINT_DRIVER_SRC;
+    CONST_STRPTR variant_name = mp_needs_os31_driver() ? "OS3.0/3.1" : "V44+";
+
+    mp_describe_amiga_os(os_desc, sizeof(os_desc));
 
     if (mp_read_driver_version(MINTPRINT_DRIVER_DEST, &installed_ver)) {
         snprintf(installed_str, sizeof(installed_str), "v%u.%u",
                  (unsigned)installed_ver.version, (unsigned)installed_ver.revision);
     } else {
-        strcpy(installed_str, "not installed / unknown");
+        strcpy(installed_str, "not installed");
     }
-    if (mp_read_driver_version(MINTPRINT_DRIVER_SRC, &bundled_ver)) {
+    if (mp_read_driver_version(src_path, &bundled_ver)) {
         snprintf(bundled_str, sizeof(bundled_str), "v%u.%u",
                  (unsigned)bundled_ver.version, (unsigned)bundled_ver.revision);
     } else {
         strcpy(bundled_str, "not found");
     }
 
+    /* Deliberately short lines, and no PROGDIR: path shown here - see the
+     * comment on mp_describe_amiga_os() above for why: EasyRequest sizes
+     * its window to the single widest line with no wrapping, and this
+     * requester's own longest line was pushing the window off-screen on a
+     * default low-resolution AmigaOS display. */
     snprintf(msg, sizeof(msg),
         "MintPRINT v" MINTPRINT_SETTINGS_VERSION
         " - IPP/AirPrint printing for AmigaOS\n\n"
-        "Installed driver (DEVS:Printers/MintPRINT): %s\n"
-        "Bundled driver (next to this program): %s\n\n"
+        "Detected: %s\n"
+        "Driver build: %s\n\n"
+        "Installed driver: %s\n"
+        "Bundled driver: %s\n\n"
         "Bug reports and source:\n"
         "github.com/boingball/MintPRINT\n\n"
         "If this saved you a trip to the printer shop:\n"
         "buymeacoffee.com/boingball",
+        os_desc, variant_name,
         installed_str, bundled_str);
 
     es.es_StructSize = sizeof(struct EasyStruct);
@@ -3706,12 +3826,21 @@ static void show_about(struct Window *win) {
 
 static void check_and_offer_driver_install(struct Window *win) {
     struct EasyStruct es;
-    char msg[192];
+    char msg[256];
+    char os_desc[64];
     struct MPDriverVersion src_ver, dest_ver;
     BOOL have_src_ver, have_dest_ver;
+    CONST_STRPTR src_path = MINTPRINT_DRIVER_SRC;
+    CONST_STRPTR variant_name = mp_needs_os31_driver() ? "OS3.0/3.1" : "V44+";
 
-    if (!mp_file_exists(MINTPRINT_DRIVER_SRC)) {
-        printf("MintPRINT driver not found next to this program; skipping install check.\n");
+    mp_describe_amiga_os(os_desc, sizeof(os_desc));
+    printf("Detected %s (exec.library v%u) - using the %s driver (%s).\n",
+           os_desc, (unsigned)SysBase->LibNode.lib_Version, variant_name, src_path);
+
+    if (!mp_file_exists(src_path)) {
+        printf("Bundled driver not found at %s; skipping install check.\n", src_path);
+        printf("Check that both Drivers/MintPRINT-V44/ and Drivers/MintPRINT-OS31/\n");
+        printf("are present next to this program.\n");
         return;
     }
 
@@ -3728,7 +3857,7 @@ static void check_and_offer_driver_install(struct Window *win) {
          * unreadable because it's older, not because it's current. Only
          * skip the prompt when the installed version is actually known
          * and already at least as new as the bundled one. */
-        have_src_ver = mp_read_driver_version(MINTPRINT_DRIVER_SRC, &src_ver);
+        have_src_ver = mp_read_driver_version(src_path, &src_ver);
         have_dest_ver = mp_read_driver_version(MINTPRINT_DRIVER_DEST, &dest_ver);
 
         if (!have_src_ver) {
@@ -3740,20 +3869,28 @@ static void check_and_offer_driver_install(struct Window *win) {
 
         if (have_dest_ver) {
             snprintf(msg, sizeof(msg),
-                     "A newer MintPRINT driver is available\n(installed: v%u.%u, bundled: v%u.%u).\nUpdate DEVS:Printers/MintPRINT now?",
+                     "A newer MintPRINT driver is available.\n"
+                     "Installed: v%u.%u  Bundled: v%u.%u\n\n"
+                     "Detected: %s (%s driver)\n\n"
+                     "Update DEVS:Printers/MintPRINT now?",
                      (unsigned)dest_ver.version, (unsigned)dest_ver.revision,
-                     (unsigned)src_ver.version, (unsigned)src_ver.revision);
+                     (unsigned)src_ver.version, (unsigned)src_ver.revision,
+                     os_desc, variant_name);
         } else {
             snprintf(msg, sizeof(msg),
-                     "A newer MintPRINT driver is available\n(installed driver predates version tracking, bundled: v%u.%u).\nUpdate DEVS:Printers/MintPRINT now?",
-                     (unsigned)src_ver.version, (unsigned)src_ver.revision);
+                     "A newer MintPRINT driver is available.\n"
+                     "Installed: pre-versioning  Bundled: v%u.%u\n\n"
+                     "Detected: %s (%s driver)\n\n"
+                     "Update DEVS:Printers/MintPRINT now?",
+                     (unsigned)src_ver.version, (unsigned)src_ver.revision,
+                     os_desc, variant_name);
         }
         es.es_TextFormat = (UBYTE *)msg;
         es.es_GadgetFormat = (UBYTE *)"Update|Later";
 
         if (!EasyRequest(win, &es, NULL)) return;
 
-        if (mp_copy_file(MINTPRINT_DRIVER_SRC, MINTPRINT_DRIVER_DEST)) {
+        if (mp_copy_file(src_path, MINTPRINT_DRIVER_DEST)) {
             printf("Updated MintPRINT driver to v%u.%u in DEVS:Printers/MintPRINT\n",
                    (unsigned)src_ver.version, (unsigned)src_ver.revision);
             printf("Reboot (or otherwise unload the old driver segment) before printing.\n");
@@ -3769,11 +3906,17 @@ static void check_and_offer_driver_install(struct Window *win) {
         return;
     }
 
-    es.es_TextFormat = (UBYTE *)"The MintPRINT printer driver is not installed in\nDEVS:Printers/. Install it now?";
+    snprintf(msg, sizeof(msg),
+             "The MintPRINT driver is not installed in\n"
+             "DEVS:Printers/.\n\n"
+             "Detected: %s (%s driver)\n\n"
+             "Install it now?",
+             os_desc, variant_name);
+    es.es_TextFormat = (UBYTE *)msg;
     es.es_GadgetFormat = (UBYTE *)"Install|Cancel";
 
     if (EasyRequest(win, &es, NULL)) {
-        if (mp_copy_file(MINTPRINT_DRIVER_SRC, MINTPRINT_DRIVER_DEST)) {
+        if (mp_copy_file(src_path, MINTPRINT_DRIVER_DEST)) {
             printf("Installed MintPRINT driver to DEVS:Printers/MintPRINT\n");
 
             es.es_TextFormat = (UBYTE *)"MintPRINT driver installed.\n\nOpen Printer preferences now and select\n'MintPRINT' as your printer, then save.\n\nReboot before printing - a driver segment already\nresident in memory will not pick up this file until then.";
@@ -7615,6 +7758,13 @@ int main(void) {
         FreeVisualInfo(vi);
         vi = NULL;
     }
+
+    /* Ink/toner bar pens are held across redraws (see mp_marker_pens[]
+     * near mp_draw_marker_strips()) rather than released immediately after
+     * drawing, so they must be explicitly freed here too - this is a
+     * SHARED public screen, and leaving pens allocated on it past exit
+     * would permanently tie up a few of its colour registers. */
+    mp_release_marker_pens();
 
     if (screen) {
         UnlockPubScreen(NULL, screen);

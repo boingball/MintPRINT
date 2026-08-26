@@ -64,20 +64,27 @@ Then select MintPRINT in Printer Preferences and reboot before the first test.
 
 For release builds use:
 
-    make release31
+    make release
 
-This stages:
+This stages a single distributable drawer:
 
-    release/MintPRINT-OS31/
+    release/MintPRINT/
 
-The classic driver is named `MintPRINT` inside that drawer, so the existing
-MintPrint Settings install/update helper continues to use
-`PROGDIR:MintPRINT` without needing runtime OS-version detection.
+containing `MintPrintSettings` and both driver builds under `Drivers/`:
 
-The normal and OS3.1 packages therefore remain intentionally separate:
+- `Drivers/MintPRINT-V44/MintPRINT` - V44+ driver for AmigaOS 3.2, 3.5, 3.9
+  and later.
+- `Drivers/MintPRINT-OS31/MintPRINT` - classic pre-V44 driver for AmigaOS
+  3.0/3.1.
 
-- `MintPRINT` - V44+ driver for newer AmigaOS releases.
-- `MintPRINT-OS31` - classic pre-V44 driver for AmigaOS 3.1.
+`mp_needs_os31_driver()` in `src/MintPrintSettings.c` checks
+`SysBase->LibNode.lib_Version` at runtime and `mp_driver_src_path()` picks
+whichever `Drivers/MintPRINT-<variant>/MintPRINT` matches, so there is no
+longer a separate bundle to choose before downloading - one archive covers
+every supported AmigaOS release, and MintPrint Settings tells the user
+which driver it picked (and why) before installing it. The `Install`
+script at the repository root offers the same auto-detect-then-confirm
+flow for anyone installing without running MintPrintSettings first.
 
 ## Important: test status
 
