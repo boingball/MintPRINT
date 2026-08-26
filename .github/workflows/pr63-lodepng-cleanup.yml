@@ -34,6 +34,7 @@ jobs:
           ! grep -q 'picture.datatype' src/MintPrintSettings.c
           ! grep -q 'proto/datatypes' src/MintPrintSettings.c
           ! grep -q 'DataTypesBase' src/MintPrintSettings.c
+          ! grep -q 'miniamp_memguard' src/lodepng.c
           grep -q 'lodepng_decode32' src/MintPrintSettings.c
           git diff --check
 
@@ -43,10 +44,10 @@ jobs:
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src/MintPrintSettings.c
+          git add src/MintPrintSettings.c src/lodepng.c
           if git diff --cached --quiet; then
             echo 'No cleanup changes to commit'
             exit 0
           fi
-          git commit -m 'Remove datatype dependency from printer icon [lodepng-clean]'
+          git commit -m 'Make vendored LodePNG standalone [lodepng-clean]'
           git push origin HEAD:claude/ink-toner-status-panel
