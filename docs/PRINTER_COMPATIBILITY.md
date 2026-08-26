@@ -152,6 +152,11 @@ supply the remaining bottom border. Revision 39 also processes pre-dump
 genuine vertical-position signal; the rev 38 form-length reconstruction now
 acts only as a fallback when no such movement or explicit `aSTBM` margin is
 present.
+Revision 40 adds full diagnostics without changing that placement behaviour:
+every layout command from `aVERP0` through `aCAM` is logged with parameters and
+live line/VMI state, along with each band's `IODRPReq` source and destination
+geometry. This is intended to find any undocumented Wordsworth placement clue
+before treating the form-length reconstruction as permanent behaviour.
 
 ### Brother HL-L2350DW
 
@@ -422,7 +427,8 @@ graphics dumps to assemble one physical page.
 
 ### Wordworth 7 Print Setup
 
-Use driver revision **39** or newer for the current strip-printing path.
+Use driver revision **40** or newer for the current diagnostic strip-printing
+path.
 Revision 16 first preserved Wordworth's strip printing as one media-sized PWG
 page and prevented trailing narrow graphics dumps from becoming a second IPP
 job. Revision 36 additionally separates logical pages before physical media

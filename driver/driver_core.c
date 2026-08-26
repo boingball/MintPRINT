@@ -42,7 +42,7 @@
  * exactly which build produced it, rather than relying on whoever's
  * reading it to separately check About or remember what they last
  * copied to DEVS:Printers/. */
-#define MP_DRIVER_REV 39
+#define MP_DRIVER_REV 40
 
 struct ExecBase *SysBase = NULL;
 struct DosLibrary *DOSBase = NULL;
@@ -1458,8 +1458,25 @@ LONG PRT_STDARGS DoSpecial(UWORD *command, UBYTE output_buffer[],
                            BYTE *crlf_flag, STRPTR params)
 {
     (void)output_buffer;
-    (void)current_line_position;
-    (void)crlf_flag;
+
+    /* Keep a complete trace of the page-layout command range. Several old
+     * applications maintain document borders in their own UI but expose only
+     * some subset of this state to printer.device. Logging every command and
+     * both parameter slots, plus printer.device's live layout state, makes
+     * missing information distinguishable from information MintPRINT merely
+     * failed to interpret. Commands 55..66 are aVERP0 through aCAM. */
+    if (command && *command >= aVERP0 && *command <= aCAM) {
+        mp_log_3("Text layout command id/param0/param1",
+                 (LONG)*command,
+                 params ? (LONG)((UBYTE *)params)[0] : -1,
+                 params ? (LONG)((UBYTE *)params)[1] : -1);
+        mp_log_3("Text layout state linePos/VMI/crlf",
+                 current_line_position ?
+                     (LONG)*current_line_position : -1,
+                 current_line_spacing ?
+                     (LONG)(UBYTE)*current_line_spacing : -1,
+                 crlf_flag ? (LONG)*crlf_flag : -1);
+    }
 
     /* Wordsworth uses the printer.device command stream to position its
      * graphics printable area. aSTBM's first parameter is a one-based top
@@ -1568,6 +1585,7 @@ LONG PRT_STDARGS Render(LONG ct, LONG x, LONG y, LONG status, ...)
             ULONG encoder_height;
             ULONG media_height = 0;
             ULONG leading_height = 0;
+            struct IODRPReq *request = (struct IODRPReq *)ct;
             g_rows_seen = 0;
             g_discard_aux_band = FALSE;
             g_discard_aux_band_has_ink = FALSE;
@@ -1582,6 +1600,20 @@ LONG PRT_STDARGS Render(LONG ct, LONG x, LONG y, LONG status, ...)
              * See the "multiple Render(0) cycles inside one Open/Close"
              * investigation in the project history around this line. */
             mp_log_3("Render begin width/height/ct", x, y, ct);
+            if (request) {
+                mp_log_3("IODRP source x/y/width",
+                         (LONG)request->io_SrcX,
+                         (LONG)request->io_SrcY,
+                         (LONG)request->io_SrcWidth);
+                mp_log_3("IODRP sourceHeight/destCols/destRows",
+                         (LONG)request->io_SrcHeight,
+                         request->io_DestCols,
+                         request->io_DestRows);
+                mp_log_3("IODRP special/modes/command",
+                         (LONG)request->io_Special,
+                         (LONG)request->io_Modes,
+                         (LONG)request->io_Command);
+            }
 
             /* SPECIAL_NOPRINT: a sizing-only pass (RKM) - the app is
              * asking how big its dump would be, not asking for output.

@@ -30,7 +30,7 @@ printer.device driver plus a GUI setup tool.
 
 ## What's new in 1.2.1
 
-MintPRINT 1.2.1 currently carries **driver revision 39**, adding a new engine
+MintPRINT 1.2.1 currently carries **driver revision 40**, adding a new engine
 and the following Wordsworth strip-printing fixes:
 
 - **Wordsworth page borders** (driver rev 39). The driver now processes and
@@ -43,6 +43,11 @@ and the following Wordsworth strip-printing fixes:
   0.50-inch top border (150 rows at 300 DPI) when no real vertical movement or
   explicit `aSTBM` placement appears. The media-height finalizer supplies the
   remaining bottom border.
+- **Complete legacy layout diagnostics** (driver rev 40). Debug logs now
+  record every printer layout command from `aVERP0` through `aCAM`, both
+  parameter slots, live line/VMI/CRLF state, and every raster band's complete
+  `IODRPReq` source/destination geometry. This exposes any placement signal
+  outside the commands already observed without changing rev 39's output.
 - **Wordsworth logical page boundaries** (driver rev 36). A terminal short
   strip now ends the application's printable page before the physical-media
   padding, preventing the first 443 rows of the next page from being pulled
