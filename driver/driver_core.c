@@ -42,7 +42,7 @@
  * exactly which build produced it, rather than relying on whoever's
  * reading it to separately check About or remember what they last
  * copied to DEVS:Printers/. */
-#define MP_DRIVER_REV 36
+#define MP_DRIVER_REV 37
 
 struct ExecBase *SysBase = NULL;
 struct DosLibrary *DOSBase = NULL;
@@ -161,6 +161,14 @@ static BOOL g_discard_leading_aux_band = FALSE;
  * captured value rather than trusting case 4's x, since only case 5's has
  * been directly verified in this codebase. */
 static ULONG g_current_special = 0;
+/* Graphics-oriented applications can set their page borders with the
+ * standard DEC aSTBM command before issuing PRD_DUMPRPORT bands. MintPRINT
+ * used to discard that command in DoSpecial(), so the printable raster had
+ * the right height but was written at physical row zero. Keep the command's
+ * one-based top line and current VMI until the first strip band can convert
+ * them to device-resolution rows. */
+static ULONG g_text_top_margin_line = 0;
+static ULONG g_text_margin_vmi = 0;
 static BOOL g_sizing_pass = FALSE;
 
 static BOOL g_job_open = FALSE;
@@ -1344,6 +1352,8 @@ int PRT_STDARGS DriverOpen(struct IORequest *ior)
     g_recenter_clamped_page = FALSE;
     g_sizing_pass = FALSE;
     g_current_special = 0;
+    g_text_top_margin_line = 0;
+    g_text_margin_vmi = 0;
     g_page_had_noformfeed = FALSE;
     g_discard_aux_band = FALSE;
     g_discard_aux_band_has_ink = FALSE;
@@ -1439,14 +1449,41 @@ LONG PRT_STDARGS DoSpecial(UWORD *command, UBYTE output_buffer[],
                            BYTE *current_line_spacing,
                            BYTE *crlf_flag, STRPTR params)
 {
-    (void)command;
     (void)output_buffer;
     (void)current_line_position;
-    (void)current_line_spacing;
     (void)crlf_flag;
-    (void)params;
 
-    /* No text-printer escape language yet. Graphics is the first milestone. */
+    /* Wordsworth uses the printer.device command stream to position its
+     * graphics printable area. aSTBM's first parameter is a one-based top
+     * line; current_line_spacing is VMI in 1/216-inch units. Retaining both
+     * lets Render case 0 prepend the exact physical top border before the
+     * first raster band. The bottom parameter need not be stored: the
+     * media-height finalizer already supplies all remaining white rows at
+     * the bottom after the logical printable page ends. */
+    if (command && *command == aSTBM && params && current_line_spacing) {
+        g_text_top_margin_line = (ULONG)((UBYTE *)params)[0];
+        g_text_margin_vmi = (ULONG)(UBYTE)*current_line_spacing;
+        mp_log_3("Text page margins topLine/VMI/bottomLine",
+                 (LONG)g_text_top_margin_line,
+                 (LONG)g_text_margin_vmi,
+                 (LONG)((UBYTE *)params)[1]);
+    } else if (command && *command == aCAM) {
+        g_text_top_margin_line = 0;
+        g_text_margin_vmi = 0;
+        mp_log_text("Text page margins cleared");
+    } else if (command &&
+               (*command == aTMS || *command == aBMS ||
+                *command == aSLPP || *command == aPERF ||
+                *command == aPERF0)) {
+        mp_log_3("Text page command id/param0/VMI",
+                 (LONG)*command,
+                 params ? (LONG)((UBYTE *)params)[0] : -1,
+                 current_line_spacing ?
+                     (LONG)(UBYTE)*current_line_spacing : -1);
+    }
+
+    /* No physical escape language is emitted: raster and captured-text jobs
+     * are submitted through IPP instead of a parallel/serial transport. */
     return 0;
 }
 
@@ -1649,6 +1686,23 @@ LONG PRT_STDARGS Render(LONG ct, LONG x, LONG y, LONG status, ...)
             }
 
             leading_height = g_leading_aux_height;
+            if (g_current_special & SPECIAL_NOFORMFEED) {
+                ULONG command_margin = mp_text_top_margin_rows(
+                    g_text_top_margin_line, g_text_margin_vmi,
+                    g_config.resolution ? g_config.resolution : 300UL);
+
+                /* A narrow leading control band and aSTBM can describe the
+                 * same physical whitespace. Use the larger observation,
+                 * never their sum, so applications which provide both do
+                 * not get a doubled top margin. */
+                if (command_margin > leading_height)
+                    leading_height = command_margin;
+                if (command_margin > 0)
+                    mp_log_3("Restoring command top margin rows/line/VMI",
+                             (LONG)command_margin,
+                             (LONG)g_text_top_margin_line,
+                             (LONG)g_text_margin_vmi);
+            }
             if (leading_height > 0xffffffffUL - g_page_height) {
                 mp_log_text("Leading strip whitespace height overflow");
                 g_leading_aux_height = 0;

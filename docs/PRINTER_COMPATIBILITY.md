@@ -139,6 +139,12 @@ from page 2. Revision 36 recognises that terminal short band for both normal
 and narrow auxiliary dumps, pads/finalises the sheet at the logical boundary,
 and keeps the media-height split as a fallback - see `docs/URF_ENGINE.md`'s
 "Duplex and strip-printing accumulation" section for the full mechanism.
+The rev 36 physical retest then showed that the 443 missing physical rows were
+all appended at the bottom: pagination was correct, but the configured
+0.50-inch top border was lost. Revision 37 retains printer.device's standard
+`aSTBM` top/bottom-margin command and converts its top line and VMI into
+leading raster rows (150 rows for 0.50 inch at 300 DPI); final media padding
+continues to supply the remaining bottom border.
 
 ### Brother HL-L2350DW
 
@@ -409,10 +415,12 @@ graphics dumps to assemble one physical page.
 
 ### Wordworth 7 Print Setup
 
-Use driver revision **16** or newer (included in MintPRINT 1.0.3b). Revision 16
-preserves Wordworth's strip printing as one media-sized PWG page, separates
-complete multi-page output correctly, and prevents trailing narrow graphics
-dumps from becoming a second IPP job.
+Use driver revision **37** or newer for the current strip-printing path.
+Revision 16 first preserved Wordworth's strip printing as one media-sized PWG
+page and prevented trailing narrow graphics dumps from becoming a second IPP
+job. Revisions 36 and 37 additionally separate logical pages before physical
+media padding and restore the standard command-stream top border ahead of the
+printable raster.
 
 Set Wordworth 7's **Print Setup** window to:
 

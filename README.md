@@ -30,7 +30,18 @@ printer.device driver plus a GUI setup tool.
 
 ## What's new in 1.2.1
 
-MintPRINT 1.2.1 bumps to **driver revision 35**, adding a new engine:
+MintPRINT 1.2.1 currently carries **driver revision 37**, adding a new engine
+and the following Wordsworth strip-printing fixes:
+
+- **Wordsworth page borders** (driver rev 37). The driver now retains the
+  standard `aSTBM` top-margin command and converts its one-based text-line/VMI
+  position into leading white raster rows. A 0.50-inch top border at 300 DPI
+  therefore becomes 150 rows before the application's printable raster; the
+  media-height finalizer supplies the remaining bottom border.
+- **Wordsworth logical page boundaries** (driver rev 36). A terminal short
+  strip now ends the application's printable page before the physical-media
+  padding, preventing the first 443 rows of the next page from being pulled
+  onto the previous sheet.
 
 - **Apple Raster (`ENGINE=urf`) engine.** A new backend for printers that
   advertise `image/urf` but none of MintPRINT's other formats (JPEG,

@@ -77,4 +77,13 @@ int mp_short_strip_completes_logical_page(unsigned long raster_rows,
                                           unsigned long nominal_band_rows,
                                           unsigned long current_band_rows);
 
+/* Convert the DEC aSTBM top-margin parameter to raster rows. The parameter
+ * names a one-based text line, while VMI is expressed in 1/216-inch units;
+ * therefore line 4 at the normal 1/6-inch VMI means three blank lines, or
+ * exactly 0.5 inch. A zero/default parameter or missing VMI is deliberately
+ * left unresolved rather than inventing an application margin. */
+unsigned long mp_text_top_margin_rows(unsigned long top_line_parameter,
+                                      unsigned long vmi_216ths,
+                                      unsigned long dpi);
+
 #endif

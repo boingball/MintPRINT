@@ -77,7 +77,7 @@ printerName:
  *
  */
 mp_driver_revision_marker:
-        .asciz  "MPDRVREV:36"
+        .asciz  "MPDRVREV:37"
         .even
 
 /* Human-readable marker useful when inspecting a built driver. */

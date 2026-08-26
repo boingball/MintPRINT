@@ -136,6 +136,20 @@ int main(void)
     assert(!mp_short_strip_completes_logical_page(3062UL, 0UL, 0UL,
                                                    100UL, 62UL));
 
+    /* Wordsworth's 0.50-inch top border is sent through printer.device as
+     * DEC top-margin line 4 at the normal 1/6-inch (36/216-inch) VMI. The
+     * driver must turn the three preceding lines into 150 white rows at
+     * 300 DPI before writing the application's 3062-row printable raster. */
+    assert(mp_text_top_margin_rows(4UL, 36UL, 300UL) == 150UL);
+    assert(mp_text_top_margin_rows(5UL, 27UL, 300UL) == 150UL);
+    assert(mp_text_top_margin_rows(1UL, 36UL, 300UL) == 0UL);
+    assert(mp_text_top_margin_rows(0UL, 36UL, 300UL) == 0UL);
+    assert(mp_text_top_margin_rows(4UL, 0UL, 300UL) == 0UL);
+    assert(mp_text_top_margin_rows(4UL, 36UL, 0UL) == 0UL);
+    assert(mp_text_top_margin_rows(4UL, 36UL, 300UL) + 3062UL == 3212UL);
+    assert(3505UL -
+           (mp_text_top_margin_rows(4UL, 36UL, 300UL) + 3062UL) == 293UL);
+
     logical_rows = 0;
     logical_pages = 0;
     for (row = 0; row < 31UL; ++row) {

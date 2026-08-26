@@ -201,3 +201,22 @@ int mp_short_strip_completes_logical_page(unsigned long raster_rows,
     if (raster_rows >= minimum_extent) return 1;
     return auxiliary_rows >= minimum_extent - raster_rows;
 }
+
+unsigned long mp_text_top_margin_rows(unsigned long top_line_parameter,
+                                      unsigned long vmi_216ths,
+                                      unsigned long dpi)
+{
+    unsigned long zero_based_lines, units_216ths;
+
+    if (!top_line_parameter || !vmi_216ths || !dpi)
+        return 0;
+
+    zero_based_lines = top_line_parameter - 1UL;
+    if (zero_based_lines > 0xffffffffUL / vmi_216ths)
+        return 0;
+    units_216ths = zero_based_lines * vmi_216ths;
+    if (units_216ths > (0xffffffffUL - 108UL) / dpi)
+        return 0;
+
+    return (units_216ths * dpi + 108UL) / 216UL;
+}
