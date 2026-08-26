@@ -55,15 +55,23 @@ testing it. Driver behaviour is unchanged (still driver revision 41.1).
   "what AmigaOS/printer.device generation is this?" with the detected
   answer pre-selected) for anyone who prefers that install path over
   running MintPrintSettings first.
-- **Ink/toner bars now use the printer's actual reported colour.** On a
-  screen with few free colour registers (e.g. a default 32-colour
-  Workbench), `ObtainBestPenA()` only reuses whatever pen already on
-  screen was closest to the requested colour - with no true cyan/magenta
-  already present, several markers could snap to the same wrong pen (seen
-  turning both cyan and magenta bars yellow). The ink/toner panel now
-  tries `ObtainPen()` first, which only succeeds by setting a genuinely
-  free pen to the exact requested RGB, and only falls back to the old
-  best-match behaviour if the screen truly has no free pens left.
+- **Ink/toner bars now use the printer's actual reported colour, and keep
+  it.** Two bugs, found back to back on real hardware. First,
+  `ObtainBestPenA()` only ever reuses whatever pen already on screen was
+  closest to the requested colour, and on a screen with few free colour
+  registers (e.g. a default 32-colour Workbench) with no true
+  cyan/magenta already present, several markers snapped to the same wrong
+  pen (both cyan and magenta bars turned yellow) - fixed by trying
+  `ObtainPen()` first, which only succeeds by setting a genuinely free pen
+  to the exact requested RGB. That fix then exposed a second, worse bug:
+  each marker released its pen immediately after drawing, so the very
+  next marker's `ObtainPen()` could reclaim that same shared colour
+  register and repaint it - instantly recolouring every bar already drawn
+  with that pen index, not just the new one (visible as all four bars
+  correctly coloured for an instant, then collapsing to whichever colour
+  was requested last). Pens are now held for as long as their colour needs
+  to stay on screen and released only just before the next redraw, or at
+  shutdown.
 - `make release` now builds both drivers and stages the single combined
   bundle in one step; the old separate `make release31`/`make release-all`
   targets are gone since there is only one bundle to build.

@@ -213,16 +213,22 @@ History
        - Added an Install script (classic AmigaDOS Installer format) as an
          alternative to running MintPrintSettings first, offering the same
          auto-detected driver choice with a chance to override it
-       - Fixed the ink/toner level bars sometimes showing the wrong colour
-         on a screen with few free colour registers (e.g. a default
-         32-colour Workbench): ObtainBestPenA() only reuses whatever
-         existing pen was closest to the requested colour, and with no
-         true cyan/magenta already on screen, several markers could snap
-         onto the same wrong pen (seen turning both cyan and magenta bars
-         yellow). The panel now tries ObtainPen() first, which only
-         succeeds by setting a genuinely free pen to the exact requested
-         colour, falling back to the old best-match behaviour only if the
-         screen truly has no free pens left
+       - Fixed the ink/toner level bars sometimes showing the wrong
+         colour, and sometimes losing it again. Two bugs found back to
+         back on real hardware: ObtainBestPenA() only ever reuses whatever
+         existing pen was closest to the requested colour, so on a screen
+         with few free colour registers (e.g. a default 32-colour
+         Workbench) with no true cyan/magenta already on screen, several
+         markers snapped onto the same wrong pen (both cyan and magenta
+         bars turned yellow) - fixed by trying ObtainPen() first, which
+         only succeeds by setting a genuinely free pen to the exact
+         requested colour. That then exposed a second bug: each marker
+         released its pen immediately after drawing, so the next marker's
+         ObtainPen() could reclaim the same shared colour register and
+         repaint it, instantly recolouring every bar already drawn with
+         that pen index (all four bars flashed the right colour, then
+         collapsed to whichever was requested last). Pens are now held
+         until just before the next redraw, or released at shutdown
        - Shortened the OS-detection text in the driver install/update and
          About requesters: EasyRequest sizes its window to the single
          widest line with no wrapping, and the full detected-AmigaOS/

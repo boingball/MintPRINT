@@ -3030,12 +3030,45 @@ static void mp_marker_short_name(int index, char out[3]) {
     }
 }
 
+/* Pens obtained for the ink/toner bars must stay allocated for as long as
+ * their colour needs to remain visible, not just for the RectFill() call
+ * that used them: a pen number is only ever an index into the screen's
+ * shared colour-map, and RectFill() writes that index into the bitplanes
+ * rather than an RGB value. Releasing a pen right after drawing lets
+ * ANYTHING else - including the very next marker in the same redraw loop
+ * - reclaim that register and repaint it, which instantly recolours every
+ * pixel already drawn with that same index, not just newly drawn ones.
+ * That was the "flashes the right colours, then they all end up on
+ * whichever colour was requested last" bug from obtaining and releasing a
+ * pen per marker. Pens are now held here across redraws and only released
+ * right before the next redraw, or at shutdown via
+ * mp_release_marker_pens(). */
+static LONG mp_marker_pens[MP_MARKER_MAX_STRIPS] = {
+    -1, -1, -1, -1, -1, -1
+};
+
+static void mp_release_marker_pens(void) {
+    int i;
+    if (!screen) return;
+    for (i = 0; i < MP_MARKER_MAX_STRIPS; i++) {
+        if (mp_marker_pens[i] >= 0) {
+            ReleasePen(screen->ViewPort.ColorMap, (ULONG)mp_marker_pens[i]);
+            mp_marker_pens[i] = -1;
+        }
+    }
+}
+
 static void mp_draw_marker_strips(void) {
     struct RastPort *rp;
     int area_left, area_right, area_top, area_bottom;
     int grid_top, cell_width, count, i;
 
     if (!window || !screen || !font) return;
+
+    /* Release whatever the previous redraw held before drawing new
+     * content - see the comment above mp_marker_pens[] for why these
+     * can't just be released at the end of the loop below. */
+    mp_release_marker_pens();
 
     rp = window->RPort;
     SetFont(rp, font);
@@ -3137,7 +3170,7 @@ static void mp_draw_marker_strips(void) {
              * when it can set a genuinely free pen to this exact RGB - and
              * fall back to the old best-match behaviour only if the
              * screen really has no free pens left. Both allocators are
-             * released the same way (ReleasePen()) below. */
+             * released the same way, via mp_release_marker_pens(). */
             pen = ObtainPen(screen->ViewPort.ColorMap, -1,
                              (ULONG)r << 24, (ULONG)g << 24,
                              (ULONG)b << 24, 0);
@@ -3147,6 +3180,10 @@ static void mp_draw_marker_strips(void) {
                                           (ULONG)b << 24, NULL);
             }
         }
+        /* Stored, not released here - see the comment above
+         * mp_marker_pens[] for why releasing per-marker recolours
+         * already-drawn bars sharing a reclaimed pen index. */
+        mp_marker_pens[i] = pen;
 
         if (level >= 0) {
             int inside_width;
@@ -3175,9 +3212,6 @@ static void mp_draw_marker_strips(void) {
                          bar_right - 1, bar_bottom - 1);
             }
         }
-
-        if (pen >= 0)
-            ReleasePen(screen->ViewPort.ColorMap, (ULONG)pen);
     }
 }
 
@@ -7724,6 +7758,13 @@ int main(void) {
         FreeVisualInfo(vi);
         vi = NULL;
     }
+
+    /* Ink/toner bar pens are held across redraws (see mp_marker_pens[]
+     * near mp_draw_marker_strips()) rather than released immediately after
+     * drawing, so they must be explicitly freed here too - this is a
+     * SHARED public screen, and leaving pens allocated on it past exit
+     * would permanently tie up a few of its colour registers. */
+    mp_release_marker_pens();
 
     if (screen) {
         UnlockPubScreen(NULL, screen);
