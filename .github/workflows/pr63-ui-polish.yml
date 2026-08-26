@@ -1,0 +1,68 @@
+name: PR63 UI polish
+
+on:
+  push:
+    branches:
+      - claude/ink-toner-status-panel
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ github.actor != 'github-actions[bot]' && !contains(github.event.head_commit.message, '[pr63-ui-polish]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: claude/ink-toner-status-panel
+          fetch-depth: 0
+
+      - name: Polish printer icon and status output
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('src/MintPrintSettings.c')
+          s = p.read_text(encoding='utf-8')
+
+          replacements = {
+              '#define MP_PRINTER_ICON_LEFT  420': '#define MP_PRINTER_ICON_LEFT  411',
+              '#define MP_PRINTER_ICON_SIZE   32': '#define MP_PRINTER_ICON_SIZE   35',
+              'ng.ng_Width = 280;\n    ng.ng_Height = 12;\n    ng.ng_GadgetText = (STRPTR)"Media (Tray):";': 'ng.ng_Width = 270;\n    ng.ng_Height = 12;\n    ng.ng_GadgetText = (STRPTR)"Media (Tray):";',
+              'printf("[✓] Finished sending %d bytes successfully\\n", total_sent);': 'printf("[OK] Finished sending %d bytes successfully\\n", total_sent);',
+          }
+
+          for old, new in replacements.items():
+              if old not in s:
+                  raise SystemExit(f'expected source anchor missing: {old!r}')
+              s = s.replace(old, new, 1)
+
+          p.write_text(s, encoding='utf-8')
+
+          # Guard the actual status-output strings against this exact class of
+          # Classic Amiga display bug: Topaz is byte-oriented, not UTF-8.
+          for lineno, line in enumerate(s.splitlines(), 1):
+              if 'printf(' in line and any(ord(ch) > 127 for ch in line):
+                  raise SystemExit(f'non-ASCII printf at line {lineno}: {line}')
+          PY
+
+          grep -q '#define MP_PRINTER_ICON_LEFT  411' src/MintPrintSettings.c
+          grep -q '#define MP_PRINTER_ICON_SIZE   35' src/MintPrintSettings.c
+          grep -q 'ng.ng_Width = 270;' src/MintPrintSettings.c
+          grep -Fq 'printf("[OK] Finished sending %d bytes successfully' src/MintPrintSettings.c
+          ! grep -Fq '[✓]' src/MintPrintSettings.c
+          git diff --check
+
+      - name: Commit patch and remove helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/pr63-ui-polish.yml
+          git add src/MintPrintSettings.c
+          git commit -m 'Polish printer preview and status text [pr63-ui-polish]'
+          git push origin HEAD:claude/ink-toner-status-panel
