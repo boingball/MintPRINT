@@ -6687,6 +6687,32 @@ int main(void) {
         printf("No cached capabilities for this endpoint - press Query\n");
     }
 
+    /* Refresh live printer state (especially ink/toner levels) on startup
+     * when this unit already has a saved endpoint. Reuse exactly the same
+     * Query flow as the button so port fallback, capability updates, cache
+     * refresh and marker redraw behaviour stay in one place. A new/blank
+     * install has an empty ip_buffer and deliberately does nothing here. */
+    if (ip_buffer[0]) {
+        char startup_ip[64];
+        int startup_port = -1;
+        char *startup_response = malloc(MAX_BUFFER);
+
+        if (!startup_response) {
+            printf("Could not allocate startup Query response buffer - skipping live refresh\n");
+        } else {
+            if (parse_ip_and_port(ip_buffer, startup_ip,
+                                  sizeof(startup_ip), &startup_port)) {
+                printf("Refreshing saved printer status on startup: %s\n", ip_buffer);
+                perform_query_flow(window, startup_ip, startup_port,
+                                   startup_response);
+            } else {
+                printf("Saved printer address '%s' is invalid - skipping startup Query\n",
+                       ip_buffer);
+            }
+            free(startup_response);
+        }
+    }
+
     /* check_and_offer_driver_install() above can pop an EasyRequest on top
      * of this window before the event loop below has even started, so any
      * IDCMP_REFRESHWINDOW that dialog's close generates sits unhandled
