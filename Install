@@ -19,8 +19,20 @@
 
 (set #mp-appname "MintPRINT")
 
-(set #exec-version (getversion "exec.library"))
-(set #is-v44 (>= #exec-version (* 44 65536)))
+; (getversion) with NO arguments returns the CURRENTLY RUNNING Kickstart/
+; exec.library version - not (getversion "exec.library"), which tells
+; Installer to scan a FILE called "exec.library" for a "$VER:" string.
+; exec.library is resident in Kickstart ROM, not a plain LIBS: file, so
+; that file-based lookup finds nothing and silently returns 0 (seen as
+; "Detected exec.library v0" - always the classic-driver branch,
+; regardless of the real system). The no-arg form returns version and
+; revision packed together (version in the high word), matching
+; SysBase->LibNode.lib_Version/lib_Revision - split it out below rather
+; than printing the raw packed integer.
+(set #exec-version (getversion))
+(set #exec-major (/ #exec-version 65536))
+(set #exec-minor (- #exec-version (* #exec-major 65536)))
+(set #is-v44 (>= #exec-major 44))
 
 (set #os-hint
     (if #is-v44
@@ -31,7 +43,7 @@
 
 (message
     "MintPRINT setup\n\n"
-    "Detected exec.library v" #exec-version " on this system.\n\n"
+    "Detected exec.library v" #exec-major "." #exec-minor " on this system.\n\n"
     #os-hint
 )
 
