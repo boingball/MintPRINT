@@ -12,6 +12,7 @@
 
 [![Aminet](https://img.shields.io/badge/Download-Aminet-005CA9)](https://aminet.net/package/driver/print/MintPRINT)
 [![Support](https://img.shields.io/badge/Support-Buy%20Me%20a%20Coffee-FFDD00?logo=buymeacoffee&logoColor=000000)](https://buymeacoffee.com/boingball)
+![Uploading MintPrintControlPanel.png…]()
 
 ![GitHub stars](https://img.shields.io/github/stars/boingball/MintPRINT)
 ![GitHub last commit](https://img.shields.io/github/last-commit/boingball/MintPRINT)
@@ -27,6 +28,9 @@ IPP/AirPrint printing for classic AmigaOS - print to modern network
 printers (JPEG, PostScript, PWG Raster, or PDF; no driver-specific software
 on the printer side) straight from Amiga applications, via a real `DEVS:Printers/`
 printer.device driver plus a GUI setup tool.
+
+<img width="525" height="327" alt="image" src="https://github.com/user-attachments/assets/ba4cfd1f-8b0f-4aee-91b9-a6b221712ca5" />
+
 
 ## What's new in 1.2.4
 
