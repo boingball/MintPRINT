@@ -239,9 +239,14 @@ int load_iff_direct(const char *filename, struct jpeg_data *data) {
                 UBYTE r = 0, g = 0, b = 0;
                 for (int bit = 0; bit < 8; bit++) {
                     int mask = 1 << (7 - (x % 8));
-                    if (planes[bit][y * bpr + (x / 8)] & mask) r |= 1 << (7 - bit);
-                    if (planes[bit + 8][y * bpr + (x / 8)] & mask) g |= 1 << (7 - bit);
-                    if (planes[bit + 16][y * bpr + (x / 8)] & mask) b |= 1 << (7 - bit);
+                    /* Deep ILBM stores bitplanes least-significant first:
+                     * R0..R7, G0..G7, B0..B7. Plane 0 therefore contributes
+                     * bit 0, not bit 7. Reversing this produced recognisable
+                     * images with wildly wrong colours (notably 24-bit ILBMs
+                     * saved by Art Expression). */
+                    if (planes[bit][y * bpr + (x / 8)] & mask) r |= 1 << bit;
+                    if (planes[bit + 8][y * bpr + (x / 8)] & mask) g |= 1 << bit;
+                    if (planes[bit + 16][y * bpr + (x / 8)] & mask) b |= 1 << bit;
                 }
                 data->red[idx] = r;
                 data->green[idx] = g;
