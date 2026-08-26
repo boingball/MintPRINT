@@ -595,6 +595,7 @@ char printer_icon_uri[256] = "";
 #define MP_PRINTER_ICON_SIZE   32
 #define MP_PRINTER_ICON_TEMP  "T:MintPRINT-printer-icon.img"
 static struct BitMap *mp_printer_icon_bitmap = NULL;
+static struct BitMap *mp_printer_icon_mask_bitmap = NULL;
 
 /* Ink/toner status (RFC 3805 Printer MIB / PWG5100.13 "marker-*"
  * attributes). Each of marker-names/marker-colors/marker-types/
@@ -4420,6 +4421,10 @@ static int mp_connect_with_timeout(int sockfd, struct sockaddr_in *addr, int tim
  * failure simply leaves the preview blank.
  * ------------------------------------------------------------------ */
 static void mp_clear_printer_icon(void) {
+    if (mp_printer_icon_mask_bitmap) {
+        FreeBitMap(mp_printer_icon_mask_bitmap);
+        mp_printer_icon_mask_bitmap = NULL;
+    }
     if (mp_printer_icon_bitmap) {
         FreeBitMap(mp_printer_icon_bitmap);
         mp_printer_icon_bitmap = NULL;
@@ -4558,6 +4563,10 @@ static BOOL mp_load_printer_icon_bitmap(void) {
     Object *dto;
     struct BitMap *src_bitmap = NULL;
     struct BitMapHeader *bmhd = NULL;
+    PLANEPTR src_mask = NULL;
+    struct BitMap native_mask_bitmap;
+    struct BitMap *mask_source_bitmap = NULL;
+    struct BitMap *fallback_mask_bitmap = NULL;
     struct BitScaleArgs bsa;
     ULONG depth;
     int src_w;
@@ -4593,6 +4602,16 @@ static BOOL mp_load_printer_icon_bitmap(void) {
         DisposeDTObject(dto);
         return FALSE;
     }
+
+#ifdef PDTA_MaskPlane
+    /* picture.datatype V43+ exposes a one-bit mask suitable for
+     * BltMaskBitMapRastPort().  Keep it while the datatype object lives,
+     * scale it alongside the colour bitmap, then use the scaled copy for
+     * the actual GUI blit. */
+    if (DataTypesBase->lib_Version >= 43) {
+        GetDTAttrs(dto, PDTA_MaskPlane, (ULONG)&src_mask, TAG_DONE);
+    }
+#endif
 
     src_w = bmhd->bmh_Width;
     src_h = bmhd->bmh_Height;
@@ -4633,6 +4652,69 @@ static BOOL mp_load_printer_icon_bitmap(void) {
     BitMapScale(&bsa);
     WaitBlit();
 
+    /* Prefer the datatype's real transparency mask.  Some PNG datatypes
+     * report alpha/transparency in the BitMapHeader but do not expose
+     * PDTA_MaskPlane; for those, build a conservative fallback mask by
+     * treating the top-left decoded pixel as the transparent background.
+     * That fallback is only used when the source explicitly reports some
+     * form of masking, so normal opaque printer artwork is left alone. */
+    if (src_mask) {
+        InitBitMap(&native_mask_bitmap, 1, src_w, src_h);
+        native_mask_bitmap.Planes[0] = src_mask;
+        mask_source_bitmap = &native_mask_bitmap;
+    } else if (bmhd->bmh_Masking != 0) {
+        struct RastPort src_rp;
+        struct RastPort mask_rp;
+        LONG transparent_pixel;
+        int x;
+        int y;
+
+        fallback_mask_bitmap = AllocBitMap(src_w, src_h, 1, BMF_CLEAR, NULL);
+        if (fallback_mask_bitmap) {
+            InitRastPort(&src_rp);
+            src_rp.BitMap = src_bitmap;
+            InitRastPort(&mask_rp);
+            mask_rp.BitMap = fallback_mask_bitmap;
+            SetAPen(&mask_rp, 1);
+
+            transparent_pixel = ReadPixel(&src_rp, 0, 0);
+            for (y = 0; y < src_h; ++y) {
+                for (x = 0; x < src_w; ++x) {
+                    if (ReadPixel(&src_rp, x, y) != transparent_pixel)
+                        WritePixel(&mask_rp, x, y);
+                }
+            }
+            mask_source_bitmap = fallback_mask_bitmap;
+        }
+    }
+
+    if (mask_source_bitmap) {
+        mp_printer_icon_mask_bitmap = AllocBitMap(MP_PRINTER_ICON_SIZE,
+                                                  MP_PRINTER_ICON_SIZE,
+                                                  1, BMF_CLEAR, NULL);
+        if (mp_printer_icon_mask_bitmap) {
+            memset(&bsa, 0, sizeof(bsa));
+            bsa.bsa_SrcX = 0;
+            bsa.bsa_SrcY = 0;
+            bsa.bsa_SrcWidth = src_w;
+            bsa.bsa_SrcHeight = src_h;
+            bsa.bsa_XSrcFactor = src_w;
+            bsa.bsa_XDestFactor = draw_w;
+            bsa.bsa_YSrcFactor = src_h;
+            bsa.bsa_YDestFactor = draw_h;
+            bsa.bsa_DestX = (MP_PRINTER_ICON_SIZE - draw_w) / 2;
+            bsa.bsa_DestY = (MP_PRINTER_ICON_SIZE - draw_h) / 2;
+            bsa.bsa_SrcBitMap = mask_source_bitmap;
+            bsa.bsa_DestBitMap = mp_printer_icon_mask_bitmap;
+            bsa.bsa_Flags = 0;
+            BitMapScale(&bsa);
+            WaitBlit();
+        }
+    }
+
+    if (fallback_mask_bitmap)
+        FreeBitMap(fallback_mask_bitmap);
+
     DisposeDTObject(dto);
     return TRUE;
 }
@@ -4664,10 +4746,19 @@ static void mp_draw_printer_icon(void) {
              left + MP_PRINTER_ICON_SIZE, top + MP_PRINTER_ICON_SIZE);
 
     if (mp_printer_icon_bitmap) {
-        BltBitMapRastPort(mp_printer_icon_bitmap, 0, 0,
-                          rp, left, top,
-                          MP_PRINTER_ICON_SIZE, MP_PRINTER_ICON_SIZE,
-                          0xC0);
+        if (mp_printer_icon_mask_bitmap &&
+            mp_printer_icon_mask_bitmap->Planes[0]) {
+            BltMaskBitMapRastPort(mp_printer_icon_bitmap, 0, 0,
+                                  rp, left, top,
+                                  MP_PRINTER_ICON_SIZE, MP_PRINTER_ICON_SIZE,
+                                  0xC0,
+                                  mp_printer_icon_mask_bitmap->Planes[0]);
+        } else {
+            BltBitMapRastPort(mp_printer_icon_bitmap, 0, 0,
+                              rp, left, top,
+                              MP_PRINTER_ICON_SIZE, MP_PRINTER_ICON_SIZE,
+                              0xC0);
+        }
     }
 }
 
