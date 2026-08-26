@@ -61,7 +61,11 @@ static LONG decompress_rle(UBYTE *src, UBYTE *dest, LONG src_len, LONG dest_len)
             }
         }
     }
-    return dest_pos;
+    /* ByteRun1 callers need the number of COMPRESSED source bytes
+     * consumed, not the number of decoded destination bytes produced.
+     * Returning dest_pos made the next row/bitplane start at the wrong
+     * BODY offset whenever compression actually saved any bytes. */
+    return src_pos;
 }
 
 static UWORD get_pixel_from_planes(UBYTE **planes, int plane_count, int bytes_per_row, int x, int y) {
@@ -197,8 +201,21 @@ int load_iff_direct(const char *filename, struct jpeg_data *data) {
         for (int y = 0; y < oh; y++) {
             for (int p = 0; p < bmhd.nPlanes; p++) {
                 int offset = y * bpr;
-                int written = decompress_rle(body_data + src, planes[p] + offset, body_size - src, bpr);
-                src += written;
+                int consumed = decompress_rle(body_data + src, planes[p] + offset, body_size - src, bpr);
+                if (consumed <= 0 || src + consumed > (int)body_size) {
+                    printf("Invalid ByteRun1 data at row %d plane %d", y, p);
+                    for (int q = 0; q < bmhd.nPlanes; q++)
+                        if (planes[q]) FreeVec(planes[q]);
+                    if (planes) FreeVec(planes);
+                    if (colormap) FreeVec(colormap);
+                    if (body_data) FreeVec(body_data);
+                    if (data->red) FreeVec(data->red);
+                    if (data->green) FreeVec(data->green);
+                    if (data->blue) FreeVec(data->blue);
+                    memset(data, 0, sizeof(*data));
+                    return -1;
+                }
+                src += consumed;
             }
         }
     } else {
