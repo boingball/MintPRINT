@@ -5785,10 +5785,10 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // being viewed/edited. Only Unit0 is what the driver actually prints
     // with; switching here reloads the rest of the form from that unit's
     // saved file.
-    ng.ng_LeftEdge = 48;
-    ng.ng_TopEdge = 4 + topborder;
-    ng.ng_Width = 344;
-    ng.ng_Height = 16;
+    ng.ng_LeftEdge = 64;
+    ng.ng_TopEdge = 5 + topborder;
+    ng.ng_Width = 328;
+    ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"Unit:";
     ng.ng_GadgetID = GAD_UNIT_DROPDOWN;
     gad = CreateGadget(CYCLE_KIND, gad, &ng,
@@ -5805,7 +5805,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // "switch which printer is active" without touching driver code.
     ng.ng_LeftEdge = 400;
     ng.ng_Width = 92;
-    ng.ng_Height = 14;
+    ng.ng_Height = 12;
     ng.ng_TopEdge = 5 + topborder;
     ng.ng_GadgetText = (STRPTR)"_Activate";
     ng.ng_GadgetID = GAD_SET_ACTIVE_BUTTON;
@@ -5820,10 +5820,10 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     ng.ng_Flags = NG_HIGHLABEL;
 
     // IP string gadget
-    ng.ng_LeftEdge = 128;
-    ng.ng_TopEdge = 24 + topborder;
-    ng.ng_Width = 128;
-    ng.ng_Height = 16;
+    ng.ng_LeftEdge = 144;
+    ng.ng_TopEdge = 25 + topborder;
+    ng.ng_Width = 144;
+    ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"_Printer IP/Host:";
     ng.ng_GadgetID = GAD_IP_STRING;
     gad = CreateGadget(STRING_KIND, gad, &ng,
@@ -5843,8 +5843,8 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // Query button - shares the Printer Model row in the compact layout.
     ng.ng_LeftEdge = 400;
     ng.ng_Width = 92;
-    ng.ng_Height = 14;
-    ng.ng_TopEdge = 44 + topborder;
+    ng.ng_Height = 12;
+    ng.ng_TopEdge = 45 + topborder;
     ng.ng_GadgetText = (STRPTR)"_Query";
     ng.ng_GadgetID = GAD_QUERY_BUTTON;
     ng.ng_Flags = 0;
@@ -5860,7 +5860,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // from the last successful Query for this unit. Not user-editable;
     // persisted via MODEL= in the unit's own config file on Save.
     ng.ng_LeftEdge = 128;
-    ng.ng_TopEdge = 44 + topborder;
+    ng.ng_TopEdge = 45 + topborder;
     ng.ng_Width = 264;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"Printer Model:";
@@ -5900,9 +5900,9 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     {
         UWORD row2_top = ng.ng_TopEdge;
         ng.ng_LeftEdge = 400;
-        ng.ng_TopEdge = 24 + topborder;
+        ng.ng_TopEdge = 25 + topborder;
         ng.ng_Width = 92;
-        ng.ng_Height = 14;
+        ng.ng_Height = 12;
         ng.ng_GadgetText = (STRPTR)"_Discover";
         ng.ng_GadgetID = GAD_DISCOVER_BUTTON;
         ng.ng_Flags = 0;
@@ -6001,7 +6001,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     ng.ng_LeftEdge = 348;
     ng.ng_Width = 100;
     ng.ng_Height = 12;
-    ng.ng_TopEdge = 168 + topborder;
+    ng.ng_TopEdge = 165 + topborder;
     ng.ng_GadgetText = (STRPTR)"DPI:";
     ng.ng_GadgetID = GAD_RESOLUTION;
     gad = CreateGadget(CYCLE_KIND, gad, &ng,
@@ -6069,7 +6069,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // Save button - same action as File -> Save Driver Settings.
     ng.ng_LeftEdge = 304;
     ng.ng_Width = 90;
-    ng.ng_TopEdge = 216 + topborder;
+    ng.ng_TopEdge = 215 + topborder;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"_Save";
     ng.ng_GadgetID = GAD_SAVE_BUTTON;
@@ -6084,7 +6084,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // Exit button
     ng.ng_LeftEdge = 408;
     ng.ng_Width = 90;
-    ng.ng_TopEdge = 216 + topborder;
+    ng.ng_TopEdge = 215 + topborder;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"_Exit";
     ng.ng_GadgetID = GAD_EXIT_BUTTON;
