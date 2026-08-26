@@ -37,9 +37,10 @@ error message.
 ```text
 offset 0-3:   sync word "UNIR"        (CUPS_RASTER_SYNCapple)
 offset 4-7:   "AST" + 0x00            (together: the well-known "UNIRAST\0" magic)
-offset 8-11:  page count, big-endian u32 (always 1 - see below)
-offset 12-43: 32-byte page header
-offset 44...: compressed rows
+offset 8-11:  page count, big-endian u32 - written once, with the first page
+offset 12-43: 32-byte page header - repeated per page
+offset 44...: compressed rows, then another page header + rows per
+              subsequent page (duplex)
 ```
 
 Page header (32 bytes), all multi-byte fields big-endian:
@@ -47,7 +48,8 @@ Page header (32 bytes), all multi-byte fields big-endian:
 ```text
 byte 0:      cupsBitsPerPixel   (24 - 8-bit sRGB, chunked RGB)
 byte 1:      colorspace         (1 - sRGB)
-byte 2:      duplex/tumble mode (1 - simplex; this encoder is single-page only)
+byte 2:      duplex/tumble mode (1 = simplex, 2 = duplex-tumble
+             [two-sided-short-edge], 3 = duplex-no-tumble [two-sided-long-edge])
 byte 3:      print quality      (0 - unspecified)
 byte 4:      media type         (0 - unspecified)
 byte 5:      media position     (0 - auto)
@@ -57,6 +59,19 @@ bytes 16-19: height in pixels
 bytes 20-23: resolution (dpi - one figure used for both axes)
 bytes 24-31: reserved, zero
 ```
+
+Unlike PWG Raster's page header, Apple Raster's compact 32-byte header has
+no CrossFeedTransform/FeedTransform-equivalent fields for describing a
+pre-mirrored backside - only the single duplex/tumble byte above, which
+doesn't distinguish front from back. There is therefore nothing for a
+sender to pre-flip: `driver/urf_writer.c` streams every page's rows in the
+same natural top-to-bottom, left-to-right order regardless of side,
+trusting the printer's own duplex mechanism to orient the backside
+correctly from the duplex/tumble hint alone. **This is the main assumption
+worth checking on an actual physical duplex print** - if a backside comes
+out upside-down or mirrored, that is where to look first (compare against
+`mp_pwg_backside_transform()` in `pwg_writer.c`, which PWG Raster needs
+precisely because its page header *does* have those transform fields).
 
 Row compression is CUPS's shared PackBits-style scheme - the same one
 `cups_raster_write()` uses for both its PWG and Apple output modes, byte
@@ -71,18 +86,36 @@ failure-prone "literal run" half (control byte 128-255, with its own
 minimum-run-length and byte-overflow edge cases) is never needed for a
 fully valid, decodable stream.
 
-## Single page only
+## Duplex, and why strip-printing accumulation still isn't supported
 
 Unlike PWG Raster's per-page header, Apple Raster declares its total page
 count once, up front, in the 12-byte file header - before any page's raster
-data exists. That's incompatible with PWG Raster's "grow the page as more
-strip-printed bands arrive" accumulator (`mp_pwg_grow()`) and its duplex
-"queue several pages, then submit" flow, both of which only know the true
-final page count after the fact. `driver/urf_writer.c` therefore starts at
-the same single-page scope PDF and PostScript already have in this
-codebase (see `driver/driver_core.c`'s single-band engine handling) - no
-duplex, no strip-printing accumulation - always writing a page count of 1.
-Duplex printing still requires `ENGINE=pwg-raster`, as before.
+data exists. `driver/urf_writer.c` handles that the same way
+`driver_core.c` already handles PWG's post-hoc height patch for
+strip-printed pages: a duplex job writes an honest "unknown/streaming"
+placeholder (`0xffffffff`, the same sentinel CUPS itself uses) for the page
+count when the first page begins, then `DriverClose()` patches in the true
+total - via `mp_spool_job_patch()`, the same primitive PWG's own
+`mp_page_finalize()` already uses - once the last page is known, just
+before closing the file.
+
+`ENGINE=urf` duplex is otherwise wired exactly like PWG Raster's: pages are
+appended to one open file across several `Render(0)/.../Render(4)` cycles
+within the same `DriverOpen()`/`DriverClose()` bracket
+(`mp_duplex_requested()` gates this for both engines identically), and the
+whole multi-page file is submitted as a single IPP Print-Job once complete.
+`sides=` in MintPrint Settings offers Long edge/Short edge whenever the
+printer advertises them **and** the selected engine's own document format
+(`image/urf` here) - see `mp_duplex_transport_supported()`.
+
+**Still PWG Raster-only:** strip-printing accumulation (`mp_pwg_grow()`,
+the `SPECIAL_NOFORMFEED`-driven band merging that lets one physical page
+span several `Render(0)` cycles, e.g. Wordworth's output) is not
+implemented for URF - only whole-page duplex is. A NOFORMFEED band under
+`ENGINE=urf` finalizes immediately as its own page/side, exactly like the
+JPEG/PDF/PostScript engines already do (no regression versus the prior
+single-page-only URF scope - it just means a strip-printing application
+combined with `ENGINE=urf` duplex is not yet a supported combination).
 
 ## Status: confirmed physically printing
 
@@ -100,6 +133,12 @@ and 3508 valid rows with no corruption. See
 **OKI B412** report that motivated this engine - that printer's own
 confirmation is still pending, since it wasn't the hardware used for the
 test above.
+
+That confirmed test was one-sided. Duplex support (see above) is new and
+not yet physically confirmed - in particular, the "no backside row
+reversal" assumption is worth checking specifically: a backside page that
+prints upside-down or mirrored, while the front side and page count are
+otherwise correct, points there first.
 
 If a URF test print comes out wrong (garbled image, printer error, rejected
 job), the most useful next artifact is `T:MintPRINT-job.urf` (kept when
@@ -127,13 +166,24 @@ Before printing:
     Delete T:MintPRINT-driver.log QUIET
     Delete T:MintPRINT-job.urf QUIET
 
-Expected trace tail on success (compare against the PWG path's equivalent
-in `docs/PWG_RASTER.md`):
+Expected trace tail on a one-sided success (compare against the PWG path's
+equivalent in `docs/PWG_RASTER.md`):
 
     MintPRINT: URF begin width/height/scratch <w> <h> <bytes>
     MintPRINT: URF end rows/expected/failed <h> <h> 0
     MintPRINT: IPP result error/http/status 0 200 0
 
+For duplex, select **Long edge** or **Short edge** under **Sides** (only
+enabled once a Query has confirmed the printer advertises it for
+`image/urf`), then print a multi-page document. Expect one `URF begin`/
+`URF end` pair and one `Duplex page queued pages/rows/bytes` line per
+page, followed by a single submission once the whole document is queued:
+
+    MintPRINT: Duplex page queued pages/rows/bytes 1 <h> <bytes>
+    MintPRINT: Duplex page queued pages/rows/bytes 2 <h> <bytes>
+    MintPRINT: IPP duplex Print-Job error/http/status 0 200 0
+
 `make test-urf` runs the host-side encoder tests (`tests/test_urf_writer.c`)
-covering the file/page header byte layout and the row compression, without
-needing AmigaOS hardware.
+covering the file/page header byte layout, the row compression, and the
+multi-page duplex file/page-header sequencing, without needing AmigaOS
+hardware.

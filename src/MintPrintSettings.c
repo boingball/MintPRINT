@@ -398,13 +398,20 @@ static BOOL mp_supported_side(const char *value) {
 
 static BOOL mp_duplex_transport_supported(void) {
     int i;
+    const char *format_mime;
 
-    /* MintPRINT duplex is one multi-page PWG Raster document in one ordinary
-     * Print-Job. This works on printers such as the Brother MFC-J6930DW that
-     * advertise duplex but explicitly reject multi-document IPP Jobs. */
-    if (strcmp(driver_engine_buffer, "pwg-raster") != 0) return FALSE;
+    /* MintPRINT duplex is one multi-page PWG Raster or Apple Raster (URF)
+     * document in one ordinary Print-Job. This works on printers such as
+     * the Brother MFC-J6930DW that advertise duplex but explicitly reject
+     * multi-document IPP Jobs. */
+    if (strcmp(driver_engine_buffer, "pwg-raster") == 0)
+        format_mime = "image/pwg-raster";
+    else if (strcmp(driver_engine_buffer, "urf") == 0)
+        format_mime = "image/urf";
+    else
+        return FALSE;
     for (i = 0; i < num_supported_formats; ++i) {
-        if (strcmp(supported_formats[i], "image/pwg-raster") == 0)
+        if (strcmp(supported_formats[i], format_mime) == 0)
             return TRUE;
     }
     return FALSE;
@@ -2089,7 +2096,7 @@ static void update_sides_dropdown(struct Window *win) {
     if (!transport_ok &&
         (mp_supported_side("two-sided-long-edge") ||
          mp_supported_side("two-sided-short-edge"))) {
-        printf("Duplex requires the PWG Raster engine; select PWG Raster.\n");
+        printf("Duplex requires the PWG Raster or Apple Raster engine.\n");
     }
 }
 

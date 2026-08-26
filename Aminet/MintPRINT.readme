@@ -190,19 +190,26 @@ from Anthropic Claude.
 History
 -------
 
-1.2.1  Added Apple Raster (URF) engine, driver revision 30.
+1.2.1  Added Apple Raster (URF) engine and duplex, driver revision 31.
 
        - Added a fifth output engine, Apple Raster (ENGINE=urf, image/urf),
          for printers that advertise none of MintPRINT's other formats
          (JPEG, PostScript, PWG Raster, PDF) - reported for the OKI B412 in
-         issue #60. Reuses the PWG Raster encoder's proven row compression;
-         single-page only, since Apple Raster declares its total page count
-         up front rather than per page
-       - Driver build revision is now 30 so MintPrint Settings can detect
+         issue #60. Reuses the PWG Raster encoder's proven row compression
+       - One-sided URF printing confirmed physically on a Brother
+         MFC-J6930DW; the OKI B412 report that motivated this engine is
+         still pending its own confirmation
+       - Added duplex support to the URF engine: one multi-page stream
+         submitted once from DriverClose(), same as PWG Raster, using
+         Apple Raster's own duplex/tumble page-header byte and a
+         patched-in-after-the-fact page count (its file header declares
+         the total up front, unlike PWG's per-page header). Unlike PWG
+         Raster, no backside row/column reversal is performed - Apple
+         Raster's page header has no equivalent transform fields, so the
+         printer's own duplex mechanism is trusted to orient the backside.
+         Not yet physically confirmed
+       - Driver build revision is now 31 so MintPrint Settings can detect
          and offer the updated driver automatically
-       - Confirmed physically printing on a Brother MFC-J6930DW; the OKI
-         B412 report that motivated this engine is still pending its own
-         confirmation
 
 1.2.0  Faster JPEG, PRT: text printing, and PostScript compatibility fixes.
 

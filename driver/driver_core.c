@@ -42,7 +42,7 @@
  * exactly which build produced it, rather than relying on whoever's
  * reading it to separately check About or remember what they last
  * copied to DEVS:Printers/. */
-#define MP_DRIVER_REV 30
+#define MP_DRIVER_REV 31
 
 struct ExecBase *SysBase = NULL;
 struct DosLibrary *DOSBase = NULL;
@@ -173,6 +173,11 @@ static BOOL g_duplex_job_failed = FALSE;
 static ULONG g_duplex_page_count = 0;
 static ULONG g_job_file_bytes = 0;
 static ULONG g_pwg_page_header_offset = 0;
+/* Byte offset of the URF file header's page-count placeholder, patched
+ * with the true total once a duplex job's last page is known - see
+ * DriverClose(). Unlike g_pwg_page_header_offset, only ever set once per
+ * job (the file header itself, not each page's own header). */
+static ULONG g_urf_file_header_offset = 0;
 static BOOL g_pwg_defer_rows = FALSE;
 static BOOL g_pwg_reverse_x = FALSE;
 static BOOL g_pwg_reverse_y = FALSE;
@@ -214,7 +219,8 @@ static CONST_STRPTR mp_document_format(void)
 
 static BOOL mp_duplex_requested(void)
 {
-    return g_engine == MP_ENGINE_PWG && g_config.sides[0] == 't';
+    return (g_engine == MP_ENGINE_PWG || g_engine == MP_ENGINE_URF) &&
+           g_config.sides[0] == 't';
 }
 
 static ULONG mp_strlen(const char *s)
@@ -437,7 +443,13 @@ static BOOL mp_job_begin(ULONG width, ULONG height)
                                 "two-sided-short-edge");
     backside = duplex && ((g_duplex_page_count + 1UL) & 1UL) == 0;
 
-    if (backside) {
+    /* PWG-only: Apple Raster's compact page header has no
+     * CrossFeedTransform/FeedTransform-equivalent fields for describing a
+     * pre-mirrored backside (see urf_writer.h), so a URF backside is never
+     * reversed here - it streams in the same natural row/column order as
+     * any front page, trusting the printer's own duplex mechanism to
+     * orient it from the page header's duplex/tumble byte alone. */
+    if (backside && g_engine == MP_ENGINE_PWG) {
         mp_pwg_backside_transform(g_config.sides,
                                   g_config.pwg_sheet_back,
                                   &cross_feed, &feed);
@@ -614,10 +626,18 @@ static BOOL mp_job_begin(ULONG width, ULONG height)
                      (LONG)g_config.resolution);
             break;
         }
-        case MP_ENGINE_URF:
-            if (!mp_urf_begin(&g_urf, width, height, g_config.resolution,
-                              g_urf_scratch,
-                              g_urf_scratch_bytes, mp_job_file_write, NULL)) {
+        case MP_ENGINE_URF: {
+            /* write_file_header only for this job's very first page - the
+             * 12-byte file header (including the duplex page-count
+             * placeholder) is written exactly once, mirroring PWG's
+             * write_sync just above. */
+            BOOL write_file_header = g_job_file_bytes == 0 ? TRUE : FALSE;
+            if (write_file_header)
+                g_urf_file_header_offset = g_job_file_bytes;
+            if (!mp_urf_begin_page(&g_urf, width, height, g_config.resolution,
+                                   write_file_header, duplex, tumble,
+                                   g_urf_scratch, g_urf_scratch_bytes,
+                                   mp_job_file_write, NULL)) {
                 mp_log_text("URF encoder begin failed");
                 g_job_failed = TRUE;
                 mp_job_cleanup();
@@ -626,6 +646,7 @@ static BOOL mp_job_begin(ULONG width, ULONG height)
             mp_log_3("URF begin width/height/scratch",
                      (LONG)width, (LONG)height, (LONG)g_urf_scratch_bytes);
             break;
+        }
         default:
             if (!mp_jpeg_begin(&g_jpeg, width, height, g_jpeg_scratch,
                                g_jpeg_scratch_bytes, mp_job_file_write, NULL)) {
@@ -787,6 +808,7 @@ static BOOL mp_job_write_row(struct PrtInfo *pi, ULONG row_number)
                          (LONG)row_number, (LONG)g_job_rows_written,
                          (LONG)g_page_height);
                 g_job_failed = TRUE;
+                if (mp_duplex_requested()) g_duplex_job_failed = TRUE;
                 return FALSE;
             }
             break;
@@ -974,7 +996,7 @@ static LONG mp_page_submit_and_track(ULONG rows_for_streak)
         result.http_status = 0;
         result.ipp_status = 0;
         result.document_bytes = g_job_file_bytes;
-        mp_log_3("PWG duplex page queued pages/rows/bytes",
+        mp_log_3("Duplex page queued pages/rows/bytes",
                  (LONG)g_duplex_page_count, (LONG)rows_for_streak,
                  (LONG)g_job_file_bytes);
     } else {
@@ -1196,6 +1218,7 @@ int PRT_STDARGS DriverOpen(struct IORequest *ior)
     g_duplex_page_count = 0;
     g_job_file_bytes = 0;
     g_pwg_page_header_offset = 0;
+    g_urf_file_header_offset = 0;
     /* Loaded once per Open() bracket (i.e. once per print job) rather than
      * per-page inside Render() case 0: case 5, which sets the PED
      * resolution/MaxDots fields below, fires BEFORE case 0 on every job's
@@ -1203,8 +1226,9 @@ int PRT_STDARGS DriverOpen(struct IORequest *ior)
      * here already, not just Init()'s one-time compiled-in default. */
     g_config_source = mp_spool_config_load(&g_config);
     g_engine = mp_detect_engine(&g_config);
-    if (g_config.sides[0] == 't' && g_engine != MP_ENGINE_PWG) {
-        mp_log_text("Duplex requires PWG Raster; using one-sided");
+    if (g_config.sides[0] == 't' &&
+        g_engine != MP_ENGINE_PWG && g_engine != MP_ENGINE_URF) {
+        mp_log_text("Duplex requires PWG Raster or URF; using one-sided");
         g_config.sides[0] = 0;
     }
     mp_log_config(&g_config, g_config_source);
@@ -1223,27 +1247,45 @@ VOID PRT_STDARGS DriverClose(struct IORequest *ior)
      * silently discarding its last (possibly only) bands. */
     if (g_page_pending) mp_page_finalize();
 
-    /* Duplex pages have been appended to one PWG Raster stream. Close the
-     * local file before reopening it for the one normal IPP Print-Job that
-     * carries sides=. A failed page invalidates the complete stream rather
-     * than printing a misleading partial document. */
+    /* Duplex pages have been appended to one multi-page PWG Raster or URF
+     * stream. Close the local file before reopening it for the one normal
+     * IPP Print-Job that carries sides=. A failed page invalidates the
+     * complete stream rather than printing a misleading partial
+     * document. */
     if (g_duplex_page_count > 0) {
+        /* URF's page count lives once in the file header, written as an
+         * "unknown/streaming" placeholder when the first page began (see
+         * urf_writer.h) - patch in the true total now that it's known,
+         * while the file is still open (mp_spool_job_patch() rewrites
+         * bytes in the currently-open job file). PWG needs no equivalent:
+         * its per-page header carries no file-wide page count at all. */
+        if (g_engine == MP_ENGINE_URF && g_job_open && !g_duplex_job_failed) {
+            UBYTE be[4];
+            be[0] = (UBYTE)(g_duplex_page_count >> 24);
+            be[1] = (UBYTE)(g_duplex_page_count >> 16);
+            be[2] = (UBYTE)(g_duplex_page_count >> 8);
+            be[3] = (UBYTE)g_duplex_page_count;
+            if (!mp_spool_job_patch(g_urf_file_header_offset +
+                                    MP_URF_PAGECOUNT_FIELD_OFFSET, be, 4)) {
+                mp_log_text("Failed to patch URF duplex page count");
+                g_duplex_job_failed = TRUE;
+            }
+        }
         if (g_job_open) {
             mp_spool_job_close();
             g_job_open = FALSE;
         }
         if (!g_duplex_job_failed) {
-            ipp_rc = mp_spool_ipp_submit(&g_config, MP_JOB_FILE_PWG,
-                                          (CONST_STRPTR)"image/pwg-raster",
-                                          &result);
+            ipp_rc = mp_spool_ipp_submit(&g_config, mp_job_filename(),
+                                          mp_document_format(), &result);
             mp_log_3("IPP duplex Print-Job error/http/status",
                      result.error, result.http_status,
                      (LONG)result.ipp_status);
             if (ipp_rc != 0) g_duplex_job_failed = TRUE;
         } else {
-            mp_log_text("PWG duplex job discarded after page failure");
+            mp_log_text("Duplex job discarded after page failure");
         }
-        if (!g_config.debug) mp_spool_job_delete(MP_JOB_FILE_PWG);
+        if (!g_config.debug) mp_spool_job_delete(mp_job_filename());
     }
     mp_job_cleanup();
     mp_log_text("Close");

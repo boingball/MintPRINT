@@ -30,15 +30,21 @@ printer.device driver plus a GUI setup tool.
 
 ## What's new in 1.2.1
 
-MintPRINT 1.2.1 bumps to **driver revision 30**, adding a new engine:
+MintPRINT 1.2.1 bumps to **driver revision 31**, adding a new engine:
 
 - **Apple Raster (`ENGINE=urf`) engine.** A new backend for printers that
   advertise `image/urf` but none of MintPRINT's other formats (JPEG,
   PostScript, PWG Raster, PDF) - reported for the OKI B412 in
   [issue #60](https://github.com/boingball/MintPRINT/issues/60). See
-  `docs/URF_ENGINE.md`. Confirmed physically printing (Brother
+  `docs/URF_ENGINE.md`. One-sided printing confirmed physically (Brother
   MFC-J6930DW, driver rev 30); the OKI B412 report that motivated it is
   still pending its own confirmation.
+- **URF duplex** (driver rev 31). `ENGINE=urf` now supports two-sided
+  printing the same way PWG Raster does - one multi-page stream, submitted
+  once from `DriverClose()` - using Apple Raster's own duplex/tumble page
+  header byte. Unlike PWG Raster, no backside row/column reversal is
+  performed (Apple Raster's page header has no equivalent transform
+  fields); see `docs/DUPLEX_PRINTING.md`. Not yet physically confirmed.
 
 ## What's new in 1.2.0
 
@@ -151,7 +157,7 @@ be added with its AmigaOS version, TCP/IP stack, engine and exact print options.
 ## Status
 
 MintPRINT is now a real, working app: version **1.2.1** GUI with **driver
-revision 30**, with multiple printers confirmed fully working over IPP/AirPrint
+revision 31**, with multiple printers confirmed fully working over IPP/AirPrint
 from real Amiga hardware. It's still actively developed and not every printer
 is confirmed yet, so check the
 [printer compatibility page](docs/PRINTER_COMPATIBILITY.md) for your specific

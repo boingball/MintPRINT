@@ -70,6 +70,13 @@ explicitly selected; the driver log showed `URF end rows/expected/failed
 rows. `pwg-sheet-back=rotated`; scaling `auto`; quality `high`; color;
 source `auto`.
 
+This printer also advertises `two-sided-long-edge`/`two-sided-short-edge`,
+making it a candidate to confirm URF duplex (driver revision 31, see
+`docs/DUPLEX_PRINTING.md`) - not yet physically tested, in particular
+whether Apple Raster's lack of a backside-transform mechanism (unlike PWG's
+`pwg-sheet-back=rotated` above) produces a correctly-oriented backside on
+this specific printer's duplex unit.
+
 ### Brother HL-L2350DW
 
 Two systems were reported against the same printer in
@@ -229,12 +236,14 @@ new page-description language. See `docs/URF_ENGINE.md` for the resulting
 
 The `ENGINE=urf` backend itself is now confirmed physically printing (see
 the Brother MFC-J6930DW entry above), but not yet on this specific
-printer - still needs an OKI B412 test report to close out issue #60. The
-printer also advertises duplex sides (`two-sided-long-edge`,
-`two-sided-short-edge`), but MintPRINT duplex still requires
-`ENGINE=pwg-raster` (see `docs/DUPLEX_PRINTING.md`), which this printer
-does not advertise - so duplex is not expected to work here even once
-this printer's own one-sided URF printing is confirmed.
+printer - still needs an OKI B412 test report to close out issue #60.
+
+This printer also advertises duplex sides (`two-sided-long-edge`,
+`two-sided-short-edge`). MintPRINT duplex originally required
+`ENGINE=pwg-raster`, which this printer does not advertise - but `ENGINE=urf`
+now supports duplex too (driver revision 31, see `docs/DUPLEX_PRINTING.md`
+and `docs/URF_ENGINE.md`), so duplex is expected to be reachable here once
+this printer's own URF printing is confirmed, one-sided first.
 
 ## AmigaOS and TCP/IP stack status
 

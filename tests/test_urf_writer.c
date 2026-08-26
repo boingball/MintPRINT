@@ -25,7 +25,7 @@ static unsigned long be32(const unsigned char *p)
            ((unsigned long)p[2] << 8) | (unsigned long)p[3];
 }
 
-int main(void)
+static int test_single_page(void)
 {
     const unsigned long width = 4;
     const unsigned long height = 2;
@@ -144,5 +144,127 @@ int main(void)
     if (!mp_urf_finish(&enc)) { free(scratch); return 51; }
 
     free(scratch);
+    return 0;
+}
+
+/* Two-page duplex stream: the 12-byte file header (with its placeholder
+ * page count) is written exactly once, each page gets its own 32-byte
+ * header with the correct duplex/tumble byte, and no per-page reversal
+ * happens - see urf_writer.h and driver_core.c's mp_job_begin() for why
+ * URF backsides stream in the same natural row order as any front page. */
+static int test_duplex(void)
+{
+    const unsigned long width = 2;
+    const unsigned long height = 1;
+    unsigned long scratch_size = mp_urf_scratch_size(width);
+    unsigned char *scratch = (unsigned char *)malloc(scratch_size);
+    unsigned char out_buf[4096];
+    struct Sink sink;
+    MPUrfEncoder enc;
+    unsigned char row[2 * 3];
+    const unsigned char *p;
+    unsigned long page1_end;
+    unsigned long page2_header_off;
+
+    if (!scratch) return 1;
+
+    sink.buf = out_buf;
+    sink.size = 0;
+    sink.cap = sizeof(out_buf);
+
+    row[0] = 5; row[1] = 6; row[2] = 7;
+    row[3] = 5; row[4] = 6; row[5] = 7;
+
+    /* Page 1 (front): write_file_header=1, duplex=1, tumble=0 -
+     * two-sided-long-edge -> duplex byte 3. */
+    if (!mp_urf_begin_page(&enc, width, height, 300, 1, 1, 0,
+                           scratch, scratch_size, sink_write, &sink)) {
+        free(scratch); return 10;
+    }
+    if (sink.size != 44UL) { free(scratch); return 11; }
+    if (memcmp(out_buf, "UNIRAST", 7) != 0) { free(scratch); return 12; }
+    /* Placeholder page count: "unknown/streaming", not the real total -
+     * see MP_URF_PAGECOUNT_FIELD_OFFSET. */
+    if (be32(out_buf + MP_URF_PAGECOUNT_FIELD_OFFSET) != 0xffffffffUL) {
+        free(scratch); return 13;
+    }
+    if (out_buf[12 + 2] != 3) { free(scratch); return 14; } /* duplex-no-tumble */
+    if (!mp_urf_write_scanline(&enc, row)) { free(scratch); return 15; }
+    if (!mp_urf_finish(&enc)) { free(scratch); return 16; }
+    page1_end = sink.size;
+
+    /* Page 2 (back): write_file_header=0 - no second file header, and the
+     * stream continues appending straight after page 1's rows. */
+    if (!mp_urf_begin_page(&enc, width, height, 300, 0, 1, 0,
+                           scratch, scratch_size, sink_write, &sink)) {
+        free(scratch); return 20;
+    }
+    page2_header_off = page1_end;
+    if (sink.size != page1_end + 32UL) { free(scratch); return 21; }
+    p = out_buf + page2_header_off;
+    if (p[2] != 3) { free(scratch); return 22; } /* duplex-no-tumble again */
+    if (be32(p + 12) != width || be32(p + 16) != height) {
+        free(scratch); return 23;
+    }
+    if (!mp_urf_write_scanline(&enc, row)) { free(scratch); return 24; }
+    if (!mp_urf_finish(&enc)) { free(scratch); return 25; }
+
+    /* Patch the placeholder with the real total (2), exactly as
+     * driver_core.c's DriverClose() does before closing the file - the
+     * decoder-facing contract this whole mechanism exists for. */
+    {
+        unsigned char *count_field = out_buf + MP_URF_PAGECOUNT_FIELD_OFFSET;
+        count_field[0] = 0; count_field[1] = 0;
+        count_field[2] = 0; count_field[3] = 2;
+    }
+    if (be32(out_buf + MP_URF_PAGECOUNT_FIELD_OFFSET) != 2UL) {
+        free(scratch); return 30;
+    }
+
+    free(scratch);
+    return 0;
+}
+
+/* Tumble byte value: two-sided-short-edge -> duplex-tumble (2), not
+ * duplex-no-tumble (3) - confirms tumble is wired through, not just
+ * hardcoded to one value. */
+static int test_tumble_byte(void)
+{
+    const unsigned long width = 2;
+    const unsigned long height = 1;
+    unsigned long scratch_size = mp_urf_scratch_size(width);
+    unsigned char *scratch = (unsigned char *)malloc(scratch_size);
+    unsigned char out_buf[256];
+    struct Sink sink;
+    MPUrfEncoder enc;
+
+    if (!scratch) return 1;
+    sink.buf = out_buf;
+    sink.size = 0;
+    sink.cap = sizeof(out_buf);
+
+    if (!mp_urf_begin_page(&enc, width, height, 300, 1, 1, 1,
+                           scratch, scratch_size, sink_write, &sink)) {
+        free(scratch); return 10;
+    }
+    if (out_buf[12 + 2] != 2) { free(scratch); return 11; }
+
+    free(scratch);
+    return 0;
+}
+
+int main(void)
+{
+    int rc;
+
+    rc = test_single_page();
+    if (rc) return rc;
+
+    rc = test_duplex();
+    if (rc) return 100 + rc;
+
+    rc = test_tumble_byte();
+    if (rc) return 200 + rc;
+
     return 0;
 }
