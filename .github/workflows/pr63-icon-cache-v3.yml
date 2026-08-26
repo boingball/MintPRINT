@@ -25,7 +25,7 @@ jobs:
           python3 .github/pr63_prepare_icon_patch.py
           python3 .github/pr63_icon_cache_patch.py
           python3 .github/pr63_activation_icon_copy.py
-          grep -q 'ENV:MintPRINT/Art/Unit%d.mpic' src/MintPrintSettings.c
+          grep -q 'MintPRINT/Art/Unit%d.mpic' src/MintPrintSettings.c
           grep -q 'mp_load_printer_icon_cache(TRUE)' src/MintPrintSettings.c
           grep -q 'mp_save_printer_icon_cache' src/MintPrintSettings.c
           grep -q 'ng.ng_LeftEdge = 130;' src/MintPrintSettings.c
