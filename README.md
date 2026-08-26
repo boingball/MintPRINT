@@ -58,8 +58,9 @@ still selected by default where available.
 
 - **`driver/`** - `DEVS:Printers/MintPRINT`, the printer.device driver.
   Handles both graphics raster callbacks and plain-text `PRT:`/`CMD_WRITE`
-  output, converts the result into streamed JPEG, PostScript, PWG Raster, or
-  PDF documents, and submits them to the printer's IPP `Print-Job` endpoint.
+  output, converts the result into streamed JPEG, PostScript, PWG Raster,
+  PDF, or Apple Raster (URF) documents, and submits them to the printer's
+  IPP `Print-Job` endpoint.
   See `docs/PRINTER_DEVICE_SPIKE.md` (and its follow-ups) for how it was built,
   and `docs/PWG_RASTER.md`/`docs/DRIVER_SPOOL_PROCESS.md` for two of the most
   significant pieces of its design.
@@ -92,14 +93,16 @@ printer's IP/host, IPP path, and document format in MintPrint Settings.
 
 ## Supported document formats
 
-`image/jpeg`, `application/postscript`, `image/pwg-raster`, and
-`application/pdf`.
+`image/jpeg`, `application/postscript`, `image/pwg-raster`,
+`application/pdf`, and `image/urf` (Apple Raster).
 Any IPP Everywhere or AirPrint-certified printer
 (most network printers from roughly the last decade) 
 is required to accept PWG Raster, so most printers should already
 work with that alone. PostScript and PDF cover older or partially-compliant
 IPP printers whose network support fronts an existing office-printer
-interpreter and which reject raster formats.
+interpreter and which reject raster formats. Apple Raster (URF) covers the
+rarer case of a printer that accepts neither - see
+`docs/URF_ENGINE.md`.
 
 ## Building
 

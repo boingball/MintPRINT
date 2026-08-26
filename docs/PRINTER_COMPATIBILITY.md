@@ -30,6 +30,7 @@ accepts a job and silently discards it.
 | **Canon TS8360** (IPP identifies it as **TS8300 series**) | ✅ Working | 3.2.3 | Not reported | PWG Raster text and colour pictures physically confirmed; JPEG pictures also work | Port `631`; path `/ipp/print`; PWG Raster; **`300* dpi` compatibility mode**; A4; source `auto`; scaling as required. Printer advertises only 600 DPI but accepts 300 DPI |
 | **HP OfficeJet 8014e** on A4000, 68060, Wi-Fi | ✅ Working | 3.2.3 | Not reported | Detection/Query and Test Print fully fixed - confirmed in issue #30 after a beta build, and fully in released 1.1.0 | Port `631`; path `/ipp/print`; advertises both JPEG and PWG Raster - a fresh add now defaults to PWG Raster |
 | **Samsung C480W / C48x Series** | 🟡 Partial (PostScript only) | 3.9 Boing Bag 2; Kickstart 3.1 | Not reported | JPEG is silently discarded; PWG Raster and PDF are rejected. PostScript engine confirmed physically printing, but is slow since this printer only accepts PostScript | Port `631`; path `/ipp/print`; `300 dpi`; A4; tray `tray-1`; normal quality; scaling `auto`; allow 3–4 minutes for PostScript |
+| **OKI B412** | 🧪 Testing | Not reported | Not reported | Advertises only `application/octet-stream, application/vnd.hp-PCL, image/urf` - none of MintPRINT's four existing engines. Motivated the new `ENGINE=urf` Apple Raster backend ([docs/URF_ENGINE.md](URF_ENGINE.md)); not yet physically test-printed | Port `631`; path `/ipp/print`; Engine `urf` (auto-selected after Query, since no other MintPRINT engine is advertised) |
 
 “Not recorded” is intentional. Do not assume Roadshow, AmiTCP or Miami from
 the presence of `bsdsocket.library`; reports should name the actual stack and
@@ -191,6 +192,34 @@ The printer can take **three to four minutes** to produce a PostScript page.
 Do not declare failure after a short wait. Its IPP job byte/impression counters
 also remain zero for jobs that physically print, so the device billing counter
 or actual paper is the reliable test.
+
+### OKI B412
+
+Reported in [issue #60](https://github.com/boingball/MintPRINT/issues/60)
+via `windows_ipp_probe.py` output. The printer reports:
+
+```text
+Port/path:       631 /ipp/print
+Formats:         application/octet-stream, application/vnd.hp-PCL, image/urf
+Media default:   iso_a4_210x297mm
+Source default:  tray-1
+Sides supported: one-sided, two-sided-long-edge, two-sided-short-edge
+Colour supported: no (monochrome only)
+```
+
+None of MintPRINT's engines at the time (JPEG, PostScript, PWG Raster, PDF)
+matched any of the three advertised formats - this printer is Apple Raster
+(URF) only among the formats MintPRINT can produce. `application/vnd.hp-PCL`
+was also considered but not pursued, since Apple Raster reuses the row
+compression already proven by the PWG Raster backend rather than requiring a
+new page-description language. See `docs/URF_ENGINE.md` for the resulting
+`ENGINE=urf` backend, added specifically for this report.
+
+Not yet physically test-printed; the printer also advertises duplex sides
+(`two-sided-long-edge`, `two-sided-short-edge`), but MintPRINT duplex still
+requires `ENGINE=pwg-raster` (see `docs/DUPLEX_PRINTING.md`), which this
+printer does not advertise - so duplex is not expected to work here even
+once one-sided URF printing is confirmed.
 
 ## AmigaOS and TCP/IP stack status
 

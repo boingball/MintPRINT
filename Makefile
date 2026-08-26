@@ -14,7 +14,7 @@ TEST_BUILD := build/tests
 RELEASE_DIR := release/MintPRINT
 RELEASE31_DIR := release/MintPRINT-OS31
 
-.PHONY: all gui test test-http test-dpi test-jpeg test-ipp-enum test-postscript driver driver31 driver-symbols driver-symbols31 release release31 release-all clean help
+.PHONY: all gui test test-http test-dpi test-jpeg test-ipp-enum test-postscript test-urf driver driver31 driver-symbols driver-symbols31 release release31 release-all clean help
 
 all: gui
 
@@ -30,6 +30,7 @@ help:
 	@echo "  make driver-symbols - show ABI symbols used by the driver"
 	@echo "  make driver-symbols31 - show ABI symbols used by the OS3.1 driver"
 	@echo "  make test-postscript - host-test and Ghostscript-validate the PostScript writer"
+	@echo "  make test-urf - run host-side Apple Raster (URF) writer tests"
 	@echo "  make release  - build both and stage a distributable bundle"
 	@echo "  make release31 - stage the AmigaOS 3.1 bundle"
 	@echo "  make release-all - stage both modern and OS3.1 bundles"
@@ -97,6 +98,9 @@ $(DRIVER_BUILD)/pdf_writer.o: driver/pdf_writer.c driver/pdf_writer.h driver/jpe
 $(DRIVER_BUILD)/postscript_writer.o: driver/postscript_writer.c driver/postscript_writer.h driver/jpeg_writer.h | $(DRIVER_BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
+$(DRIVER_BUILD)/urf_writer.o: driver/urf_writer.c driver/urf_writer.h | $(DRIVER_BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
 $(DRIVER_BUILD)/ipp_client.o: driver/ipp_client.c driver/ipp_client.h src/http_response.h | $(DRIVER_BUILD)
 	$(CC) $(CFLAGS) -Isrc -c $< -o $@
 
@@ -106,7 +110,7 @@ $(DRIVER_BUILD)/http_response.o: src/http_response.c src/http_response.h | $(DRI
 $(DRIVER_BUILD)/spool.o: driver/spool.c driver/spool.h | $(DRIVER_BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(DRIVER_OUT): $(DRIVER_BUILD)/printertag.o $(DRIVER_BUILD)/driver_core.o $(DRIVER_BUILD)/command_table.o $(DRIVER_BUILD)/config.o $(DRIVER_BUILD)/media_size.o $(DRIVER_BUILD)/jpeg_writer.o $(DRIVER_BUILD)/pwg_writer.o $(DRIVER_BUILD)/pdf_writer.o $(DRIVER_BUILD)/postscript_writer.o $(DRIVER_BUILD)/ipp_client.o $(DRIVER_BUILD)/http_response.o $(DRIVER_BUILD)/spool.o
+$(DRIVER_OUT): $(DRIVER_BUILD)/printertag.o $(DRIVER_BUILD)/driver_core.o $(DRIVER_BUILD)/command_table.o $(DRIVER_BUILD)/config.o $(DRIVER_BUILD)/media_size.o $(DRIVER_BUILD)/jpeg_writer.o $(DRIVER_BUILD)/pwg_writer.o $(DRIVER_BUILD)/pdf_writer.o $(DRIVER_BUILD)/postscript_writer.o $(DRIVER_BUILD)/urf_writer.o $(DRIVER_BUILD)/ipp_client.o $(DRIVER_BUILD)/http_response.o $(DRIVER_BUILD)/spool.o
 	$(CC) -m68000 -nostartfiles -Wl,-Map,$(DRIVER_BUILD)/MintPRINT.map \
 		-o $@ $^ -lamiga
 
@@ -129,7 +133,7 @@ $(DRIVER31_BUILD)/driver_core.o: driver/driver_core.c | $(DRIVER31_BUILD)
 $(DRIVER31_BUILD)/classic_render_shim.o: driver/classic_render_shim.c | $(DRIVER31_BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(DRIVER31_OUT): $(DRIVER31_BUILD)/printertag.o $(DRIVER31_BUILD)/classic_render_shim.o $(DRIVER31_BUILD)/driver_core.o $(DRIVER_BUILD)/command_table.o $(DRIVER_BUILD)/config.o $(DRIVER_BUILD)/media_size.o $(DRIVER_BUILD)/jpeg_writer.o $(DRIVER_BUILD)/pwg_writer.o $(DRIVER_BUILD)/pdf_writer.o $(DRIVER_BUILD)/postscript_writer.o $(DRIVER_BUILD)/ipp_client.o $(DRIVER_BUILD)/http_response.o $(DRIVER_BUILD)/spool.o
+$(DRIVER31_OUT): $(DRIVER31_BUILD)/printertag.o $(DRIVER31_BUILD)/classic_render_shim.o $(DRIVER31_BUILD)/driver_core.o $(DRIVER_BUILD)/command_table.o $(DRIVER_BUILD)/config.o $(DRIVER_BUILD)/media_size.o $(DRIVER_BUILD)/jpeg_writer.o $(DRIVER_BUILD)/pwg_writer.o $(DRIVER_BUILD)/pdf_writer.o $(DRIVER_BUILD)/postscript_writer.o $(DRIVER_BUILD)/urf_writer.o $(DRIVER_BUILD)/ipp_client.o $(DRIVER_BUILD)/http_response.o $(DRIVER_BUILD)/spool.o
 	$(CC) -m68000 -nostartfiles -Wl,-Map,$(DRIVER31_BUILD)/MintPRINT.map \
 		-o $@ $^ -lamiga
 
@@ -144,11 +148,16 @@ driver-symbols31: $(DRIVER31_BUILD)/driver_core.o $(DRIVER31_BUILD)/classic_rend
 	$(NM) $(DRIVER31_BUILD)/classic_render_shim.o | grep -E '(_Render|_MintPRINT_RenderCore)' || true
 	$(NM) $(DRIVER_BUILD)/command_table.o | grep -E '_CommandTable' || true
 
-test: test-dpi test-jpeg | $(TEST_BUILD)
+test: test-dpi test-jpeg test-urf | $(TEST_BUILD)
 	$(HOSTCC) -std=c89 -Wall -Wextra -Werror -Idriver \
 		tests/test_media_size.c driver/media_size.c driver/pwg_writer.c \
 		-o $(TEST_BUILD)/test_media_size
 	$(TEST_BUILD)/test_media_size
+
+test-urf: | $(TEST_BUILD)
+	$(HOSTCC) -std=c89 -Wall -Wextra -Werror -Idriver \
+		tests/test_urf_writer.c driver/urf_writer.c -o $(TEST_BUILD)/test_urf_writer
+	$(TEST_BUILD)/test_urf_writer
 
 driver: $(DRIVER_OUT)
 	@echo

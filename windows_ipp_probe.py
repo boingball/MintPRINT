@@ -692,6 +692,7 @@ def report(parsed, target, http_status, http_reason, response_bytes, dump_all=Fa
     lines.append("  %-27s %s" % ("PostScript:", "YES" if "application/postscript" in formats else "NO"))
     lines.append("  %-27s %s" % ("PWG Raster:", "YES" if "image/pwg-raster" in formats else "NO"))
     lines.append("  %-27s %s" % ("PDF (application/pdf):", "YES" if "application/pdf" in formats else "NO"))
+    lines.append("  %-27s %s" % ("Apple Raster (image/urf):", "YES" if "image/urf" in formats else "NO"))
     add_list(lines, "JPEG size limit", all_values(parsed, "jpeg-k-octets-supported"), max_items=10)
     add_list(lines, "JPEG width limit", all_values(parsed, "jpeg-x-dimension-supported"), max_items=10)
     add_list(lines, "JPEG height limit", all_values(parsed, "jpeg-y-dimension-supported"), max_items=10)
@@ -768,9 +769,10 @@ def report(parsed, target, http_status, http_reason, response_bytes, dump_all=Fa
     if http_status >= 400:
         warnings.append("HTTP transport returned an error.")
     if formats and not any(x in formats for x in (
-        "image/jpeg", "application/postscript", "image/pwg-raster", "application/pdf"
+        "image/jpeg", "application/postscript", "image/pwg-raster", "application/pdf",
+        "image/urf"
     )):
-        warnings.append("Printer advertises none of MintPRINT's JPEG/PostScript/PWG/PDF engines.")
+        warnings.append("Printer advertises none of MintPRINT's JPEG/PostScript/PWG/PDF/URF engines.")
     if not formats:
         warnings.append("Printer did not report document-format-supported.")
     if "image/jpeg" in formats and not jpeg_constraints:
@@ -868,7 +870,7 @@ def main():
     )
     parser.add_argument(
         "--validate-mintprint", action="store_true",
-        help="run non-printing Validate-Job checks for JPEG, PostScript, PWG Raster and PDF"
+        help="run non-printing Validate-Job checks for JPEG, PostScript, PWG Raster, PDF and URF"
     )
     parser.add_argument(
         "--print-file",
@@ -915,7 +917,8 @@ def main():
         extra.append("Validate-Job checks (no page should be printed)")
         extra.append("-" * 66)
         for idx, mime in enumerate(
-            ("image/jpeg", "application/postscript", "image/pwg-raster", "application/pdf"), start=10
+            ("image/jpeg", "application/postscript", "image/pwg-raster", "application/pdf",
+             "image/urf"), start=10
         ):
             try:
                 req = build_validate_job(target["printer_uri"], mime, idx)

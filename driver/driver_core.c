@@ -2,8 +2,8 @@
  * MintPRINT printer.device integration working driver path.
  *
  * Converts printer.device raster rows into a low-memory streaming document
- * (JPEG, PWG Raster, PDF, or PostScript per Unit0's ENGINE= setting) and
- * submits it to
+ * (JPEG, PWG Raster, PDF, PostScript, or Apple Raster/URF per Unit0's
+ * ENGINE= setting) and submits it to
  * the configured IPP Print-Job endpoint.
  *
  * Trace output: T:MintPRINT-driver.log
@@ -11,6 +11,7 @@
  * Debug PWG Raster: T:MintPRINT-job.pwg
  * Debug PDF:        T:MintPRINT-job.pdf
  * Debug PostScript: T:MintPRINT-job.ps
+ * Debug URF:        T:MintPRINT-job.urf
  */
 
 #include <exec/types.h>
@@ -31,6 +32,7 @@
 #include "pwg_writer.h"
 #include "pdf_writer.h"
 #include "postscript_writer.h"
+#include "urf_writer.h"
 #include "ipp_client.h"
 #include "media_size.h"
 #include "spool.h"
@@ -68,6 +70,7 @@ struct TagItem DriverTags[] = {
 #define MP_JOB_FILE_PWG  ((CONST_STRPTR)"T:MintPRINT-job.pwg")
 #define MP_JOB_FILE_PDF  ((CONST_STRPTR)"T:MintPRINT-job.pdf")
 #define MP_JOB_FILE_PS   ((CONST_STRPTR)"T:MintPRINT-job.ps")
+#define MP_JOB_FILE_URF  ((CONST_STRPTR)"T:MintPRINT-job.urf")
 #define MP_JOB_FILE_BACK ((CONST_STRPTR)"T:MintPRINT-back.rgb")
 
 /* Multiple Render(status=0 begin -> rows -> status=4 end) cycles inside one
@@ -98,7 +101,8 @@ enum {
     MP_ENGINE_JPEG = 0,
     MP_ENGINE_PWG = 1,
     MP_ENGINE_PDF = 2,
-    MP_ENGINE_POSTSCRIPT = 3
+    MP_ENGINE_POSTSCRIPT = 3,
+    MP_ENGINE_URF = 4
 };
 
 static ULONG g_page_width = 0;
@@ -153,6 +157,8 @@ static UBYTE *g_pdf_scratch = NULL;
 static ULONG g_pdf_scratch_bytes = 0;
 static UBYTE *g_postscript_scratch = NULL;
 static ULONG g_postscript_scratch_bytes = 0;
+static UBYTE *g_urf_scratch = NULL;
+static ULONG g_urf_scratch_bytes = 0;
 static ULONG g_job_rows_written = 0;
 static BOOL g_job_failed = FALSE;
 static int g_engine = MP_ENGINE_JPEG;
@@ -160,6 +166,7 @@ static MPJpegEncoder g_jpeg;
 static MPPwgEncoder g_pwg;
 static MPPdfEncoder g_pdf;
 static MPPostScriptEncoder g_postscript;
+static MPUrfEncoder g_urf;
 static struct MPConfig g_config;
 static LONG g_config_source = MP_CONFIG_SOURCE_DEFAULTS;
 static BOOL g_duplex_job_failed = FALSE;
@@ -172,12 +179,13 @@ static BOOL g_pwg_reverse_y = FALSE;
 static BOOL g_pwg_aux_open = FALSE;
 static ULONG g_pwg_aux_bytes = 0;
 
-/* config.c only writes one of the four known engine literal strings. */
+/* config.c only writes one of the five known engine literal strings. */
 static int mp_detect_engine(const struct MPConfig *cfg)
 {
     if (cfg->engine[0] == 'p' && cfg->engine[1] == 'w') return MP_ENGINE_PWG;
     if (cfg->engine[0] == 'p' && cfg->engine[1] == 'd') return MP_ENGINE_PDF;
     if (cfg->engine[0] == 'p' && cfg->engine[1] == 'o') return MP_ENGINE_POSTSCRIPT;
+    if (cfg->engine[0] == 'u' && cfg->engine[1] == 'r') return MP_ENGINE_URF;
     return MP_ENGINE_JPEG;
 }
 
@@ -187,6 +195,7 @@ static CONST_STRPTR mp_job_filename(void)
         case MP_ENGINE_PWG: return MP_JOB_FILE_PWG;
         case MP_ENGINE_PDF: return MP_JOB_FILE_PDF;
         case MP_ENGINE_POSTSCRIPT: return MP_JOB_FILE_PS;
+        case MP_ENGINE_URF: return MP_JOB_FILE_URF;
         default:            return MP_JOB_FILE_JPEG;
     }
 }
@@ -198,6 +207,7 @@ static CONST_STRPTR mp_document_format(void)
         case MP_ENGINE_PDF: return (CONST_STRPTR)"application/pdf";
         case MP_ENGINE_POSTSCRIPT:
             return (CONST_STRPTR)"application/postscript";
+        case MP_ENGINE_URF: return (CONST_STRPTR)"image/urf";
         default:            return (CONST_STRPTR)"image/jpeg";
     }
 }
@@ -361,11 +371,16 @@ static void mp_job_release_buffers(void)
         FreeMem(g_postscript_scratch, g_postscript_scratch_bytes);
         g_postscript_scratch = NULL;
     }
+    if (g_urf_scratch) {
+        FreeMem(g_urf_scratch, g_urf_scratch_bytes);
+        g_urf_scratch = NULL;
+    }
     g_rgb_row_bytes = 0;
     g_jpeg_scratch_bytes = 0;
     g_pwg_scratch_bytes = 0;
     g_pdf_scratch_bytes = 0;
     g_postscript_scratch_bytes = 0;
+    g_urf_scratch_bytes = 0;
 }
 
 static void mp_pwg_close_aux(void)
@@ -450,6 +465,7 @@ static BOOL mp_job_begin(ULONG width, ULONG height)
         case MP_ENGINE_PWG: need = mp_pwg_scratch_size(width); break;
         case MP_ENGINE_PDF: need = mp_pdf_scratch_size(width); break;
         case MP_ENGINE_POSTSCRIPT: need = mp_postscript_scratch_size(width); break;
+        case MP_ENGINE_URF: need = mp_urf_scratch_size(width); break;
         default:            need = mp_jpeg_scratch_size(width); break;
     }
     if (!need) {
@@ -482,6 +498,15 @@ static BOOL mp_job_begin(ULONG width, ULONG height)
             g_postscript_scratch = (UBYTE *)AllocMem(need, MEMF_PUBLIC);
             if (!g_postscript_scratch) {
                 mp_log_text("PostScript scratch allocation failed");
+                mp_job_cleanup();
+                return FALSE;
+            }
+            break;
+        case MP_ENGINE_URF:
+            g_urf_scratch_bytes = need;
+            g_urf_scratch = (UBYTE *)AllocMem(need, MEMF_PUBLIC);
+            if (!g_urf_scratch) {
+                mp_log_text("URF scratch allocation failed");
                 mp_job_cleanup();
                 return FALSE;
             }
@@ -589,6 +614,18 @@ static BOOL mp_job_begin(ULONG width, ULONG height)
                      (LONG)g_config.resolution);
             break;
         }
+        case MP_ENGINE_URF:
+            if (!mp_urf_begin(&g_urf, width, height, g_config.resolution,
+                              g_urf_scratch,
+                              g_urf_scratch_bytes, mp_job_file_write, NULL)) {
+                mp_log_text("URF encoder begin failed");
+                g_job_failed = TRUE;
+                mp_job_cleanup();
+                return FALSE;
+            }
+            mp_log_3("URF begin width/height/scratch",
+                     (LONG)width, (LONG)height, (LONG)g_urf_scratch_bytes);
+            break;
         default:
             if (!mp_jpeg_begin(&g_jpeg, width, height, g_jpeg_scratch,
                                g_jpeg_scratch_bytes, mp_job_file_write, NULL)) {
@@ -744,6 +781,15 @@ static BOOL mp_job_write_row(struct PrtInfo *pi, ULONG row_number)
                 return FALSE;
             }
             break;
+        case MP_ENGINE_URF:
+            if (!mp_urf_write_scanline(&g_urf, g_rgb_row)) {
+                mp_log_3("URF scanline failed row/written/expected",
+                         (LONG)row_number, (LONG)g_job_rows_written,
+                         (LONG)g_page_height);
+                g_job_failed = TRUE;
+                return FALSE;
+            }
+            break;
         default:
             if (!mp_jpeg_write_scanline(&g_jpeg, g_rgb_row)) {
                 mp_log_3("JPEG scanline failed row/written/expected",
@@ -775,6 +821,7 @@ static BOOL mp_job_finish(ULONG expected_rows)
             case MP_ENGINE_POSTSCRIPT:
                 ok = mp_postscript_finish(&g_postscript) ? TRUE : FALSE;
                 break;
+            case MP_ENGINE_URF: ok = mp_urf_finish(&g_urf) ? TRUE : FALSE; break;
             default:            ok = mp_jpeg_finish(&g_jpeg) ? TRUE : FALSE; break;
         }
         if (!ok) g_job_failed = TRUE;
@@ -788,6 +835,7 @@ static BOOL mp_job_finish(ULONG expected_rows)
         case MP_ENGINE_POSTSCRIPT:
             label = "PostScript end rows/expected/failed";
             break;
+        case MP_ENGINE_URF: label = "URF end rows/expected/failed"; break;
         default:            label = "JPEG end rows/expected/failed"; break;
     }
     mp_log_3(label, (LONG)g_job_rows_written, (LONG)expected_rows,
