@@ -208,6 +208,12 @@ release: gui driver driver31
 	cp $(DRIVER31_OUT) $(RELEASE_DIR)/Drivers/MintPRINT-OS31/MintPRINT
 	cp Install release/Install
 	cp Aminet/MintPRINT.readme release/MintPRINT.readme
+	@if [ -f $(ART_DIR)/Install.info ]; then \
+		cp $(ART_DIR)/Install.info release/Install.info; \
+		echo "Copied $(ART_DIR)/Install.info -> release/Install.info"; \
+	else \
+		echo "No $(ART_DIR)/Install.info found - Install script will have no icon (Workbench can't run it without one)"; \
+	fi
 	@if [ -f $(ART_DIR)/MintPrintSettings.info ]; then \
 		cp $(ART_DIR)/MintPrintSettings.info $(RELEASE_DIR)/; \
 		echo "Copied $(ART_DIR)/MintPrintSettings.info -> $(RELEASE_DIR)/"; \
@@ -232,6 +238,8 @@ release: gui driver driver31
 	@echo
 	@echo "release/Install           - classic AmigaDOS Installer script, an"
 	@echo "                            alternative to running MintPrintSettings"
+	@echo "release/Install.info      - if $(ART_DIR)/ had one; Workbench needs"
+	@echo "                            this to run Install by double-clicking it"
 	@echo "release/MintPRINT.info    - the drawer's own icon, if $(ART_DIR)/ had one"
 	@echo "release/MintPRINT.readme  - the Aminet readme, staged next to the"
 	@echo "drawer (not inside it) per Aminet convention: name it to match"
