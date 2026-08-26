@@ -69,10 +69,12 @@ extern struct GfxBase *GfxBase;
  * bottom edge. */
 #define MAX_OUTPUT_LINES 8
 /* The debug output box is OUTPUT_LEFT..OUTPUT_RIGHT wide - at the main
- * window's 520px width that's ~490px, or ~61 chars of Topaz80 (8px/char).
- * 47 left several real messages (e.g. "Unit%d has no saved settings yet -
- * nothing to activate.", 54 chars) truncated mid-word. Re-check this
- * against OUTPUT_LEFT/OUTPUT_RIGHT if the window width changes again. */
+ * window's 660px width (widened in 1.2.3 to fit the ink-status panel,
+ * see MP_MARKER_AREA_LEFT) that's ~630px, or ~78 chars of Topaz80
+ * (8px/char). 62 stays under that with room to spare; it only needs to
+ * stay above the 54 chars a real message like "Unit%d has no saved
+ * settings yet - nothing to activate." needs. Re-check this against
+ * OUTPUT_LEFT/OUTPUT_RIGHT if the window width changes again. */
 #define MAX_OUTPUT_LINE_LENGTH 62
 #define MAX_PRINT_MODES 8
 #define MAX_QUALITIES 5
@@ -139,7 +141,7 @@ static struct MPTestPrintJob test_print_job;
 
 // Define the USED macro for GCC
 #define USED __attribute__((used))
-#define MINTPRINT_SETTINGS_VERSION "1.2.2"
+#define MINTPRINT_SETTINGS_VERSION "1.2.3"
 #define MINTPRINT_DRIVER_DEST ((CONST_STRPTR)"DEVS:Printers/MintPRINT")
 #define MINTPRINT_DRIVER_SRC  ((CONST_STRPTR)"PROGDIR:MintPRINT")
 
@@ -586,6 +588,29 @@ char driver_scaling_buffer[MAX_ATTR_LEN] = "";
 char driver_sides_buffer[MAX_ATTR_LEN] = "";
 int current_unit_index = 0;
 char printer_make_model[128] = "";
+
+/* Ink/toner status (RFC 3805 Printer MIB / PWG5100.13 "marker-*"
+ * attributes). Each of marker-names/marker-colors/marker-types/
+ * marker-levels/marker-low-levels/marker-high-levels is its own separate
+ * 1setOf IPP attribute, arriving as a consecutive run of values (same
+ * shape as supported_media/supported_sides/etc. above) rather than
+ * interleaved - so they're kept as parallel arrays here, each with its
+ * own count, and combined by index afterwards (see mp_marker_count()
+ * near the drawing code) rather than as one array of structs. */
+#define MAX_MARKERS MAX_VALUES
+char marker_names[MAX_MARKERS][MAX_ATTR_LEN];
+int num_marker_names = 0;
+char marker_colors[MAX_MARKERS][MAX_ATTR_LEN];
+int num_marker_colors = 0;
+char marker_types[MAX_MARKERS][MAX_ATTR_LEN];
+int num_marker_types = 0;
+int marker_levels[MAX_MARKERS];
+int num_marker_levels = 0;
+int marker_low_levels[MAX_MARKERS];
+int num_marker_low_levels = 0;
+int marker_high_levels[MAX_MARKERS];
+int num_marker_high_levels = 0;
+
 STRPTR *unit_dropdown_labels = mp_unit_label_ptrs;
 /* MintPRINT prefs #6: queried job defaults are saved into Unit0. */
 /* MintPRINT prefs #7: saved-state placeholders, ghosting, layout and engine selector. */
@@ -597,6 +622,11 @@ int output_line = 0;
 struct Screen *screen = NULL;
 void *vi = NULL;
 struct TextFont *font = NULL;
+/* Set once in main() from the same WBorTop/Font->ta_YSize calculation
+ * createAllGadgets()'s "topborder" parameter uses, so the ink-strip panel
+ * (drawn separately from GadTools, after the window already exists) lines
+ * its rows up with the gadget rows instead of recomputing its own guess. */
+static UWORD g_topborder = 0;
 BOOL operation_in_progress = FALSE;
 
 // Font definition
@@ -2363,6 +2393,17 @@ static void mp_cache_clear_capabilities(void) {
     supports_multiple_document_jobs = FALSE;
     supports_single_document_handling = FALSE;
     strcpy(pwg_sheet_back_value, "normal");
+    /* Ink/toner status is live-only (not persisted to the capability cache
+     * file - see mp_cache_write_file() - since levels are a snapshot, not
+     * a capability), so switching units must clear it here rather than
+     * leaving the previous printer's ink levels on screen until the next
+     * Query. */
+    num_marker_names = 0;
+    num_marker_colors = 0;
+    num_marker_types = 0;
+    num_marker_levels = 0;
+    num_marker_low_levels = 0;
+    num_marker_high_levels = 0;
 }
 
 static BOOL mp_cache_write_file(CONST_STRPTR filename,
@@ -2687,6 +2728,13 @@ static void apply_cached_capabilities(struct Window *win) {
  * cached capabilities (or "Not Detected" ghosting if there is none yet),
  * and the print-mode radio state. Used both when switching the Unit
  * dropdown and by File > Reload Driver Settings. */
+/* Defined further down, alongside the rest of the ink-status panel's
+ * drawing code - forward-declared here since reload_current_unit() (a
+ * unit switch clears any previously-queried printer's ink levels via
+ * mp_cache_clear_capabilities() above) needs to repaint the now-empty
+ * panel before that code appears in the file. */
+static void mp_draw_marker_strips(void);
+
 static void reload_current_unit(struct Window *win) {
     mp_cache_clear_capabilities();
 
@@ -2722,6 +2770,7 @@ static void reload_current_unit(struct Window *win) {
     }
 
     GT_RefreshWindow(win, NULL);
+    mp_draw_marker_strips();
 }
 
 
@@ -2838,6 +2887,179 @@ void custom_printf(const char *format, ...) {
     free(temp);
 
     redraw_output_box();
+}
+
+/* Ink/toner status strip panel - a plain RastPort drawing in the space to
+ * the right of the Engine/Debug/Media/Scaling rows (see main()'s window
+ * width/g_topborder), not GadTools gadgets: GadTools has no gauge/progress
+ * widget, and the fill colour needs to come from whatever RGB the printer
+ * itself reports (marker-colors), which a fixed screen pen can't do -
+ * hence ObtainBestPenA() per strip below rather than one of the four
+ * pens (SetAPen 0-3) everything else in this window already uses. */
+#define MP_MARKER_AREA_LEFT   510
+#define MP_MARKER_STRIP_H     26
+#define MP_MARKER_BAR_H       10
+#define MP_MARKER_MAX_STRIPS  6
+
+/* marker-colors (RFC 3805 / PWG5100.13) is either "#RRGGBB" or one of a
+ * small set of keyword names - resolved to RGB here, not at parse time in
+ * query_printer_attributes(), since what to do with an unrecognised name
+ * is a drawing concern (fall back to no fill), not a parsing one. */
+/* One hex digit -> 0-15, or -1 if not a hex digit - used instead of
+ * sscanf("%x") below, since the lightweight clib some Amiga toolchains
+ * link against doesn't reliably support %x, and there's no cross-compiler
+ * in this environment to find that out the hard way. */
+static int mp_hex_nibble(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static BOOL mp_marker_rgb(const char *color, UBYTE *r, UBYTE *g, UBYTE *b) {
+    if (!color || !color[0]) return FALSE;
+
+    if (color[0] == '#' && strlen(color) >= 7) {
+        int hi, lo, i;
+        UBYTE comp[3];
+        for (i = 0; i < 3; i++) {
+            hi = mp_hex_nibble(color[1 + i * 2]);
+            lo = mp_hex_nibble(color[2 + i * 2]);
+            if (hi < 0 || lo < 0) return FALSE;
+            comp[i] = (UBYTE)((hi << 4) | lo);
+        }
+        *r = comp[0]; *g = comp[1]; *b = comp[2];
+        return TRUE;
+    }
+
+    if (strcasecmp(color, "cyan") == 0)            { *r = 0;   *g = 255; *b = 255; return TRUE; }
+    if (strcasecmp(color, "light-cyan") == 0)      { *r = 170; *g = 255; *b = 255; return TRUE; }
+    if (strcasecmp(color, "magenta") == 0)         { *r = 255; *g = 0;   *b = 255; return TRUE; }
+    if (strcasecmp(color, "light-magenta") == 0)   { *r = 255; *g = 170; *b = 255; return TRUE; }
+    if (strcasecmp(color, "yellow") == 0)          { *r = 255; *g = 255; *b = 0;   return TRUE; }
+    if (strcasecmp(color, "black") == 0)           { *r = 0;   *g = 0;   *b = 0;   return TRUE; }
+    if (strcasecmp(color, "photo-black") == 0 ||
+        strcasecmp(color, "matte-black") == 0)     { *r = 40;  *g = 40;  *b = 40;  return TRUE; }
+    if (strcasecmp(color, "gray") == 0 ||
+        strcasecmp(color, "grey") == 0)            { *r = 160; *g = 160; *b = 160; return TRUE; }
+    if (strcasecmp(color, "red") == 0)             { *r = 255; *g = 0;   *b = 0;   return TRUE; }
+    if (strcasecmp(color, "green") == 0)           { *r = 0;   *g = 200; *b = 0;   return TRUE; }
+    if (strcasecmp(color, "blue") == 0)            { *r = 0;   *g = 0;   *b = 255; return TRUE; }
+    if (strcasecmp(color, "white") == 0)           { *r = 255; *g = 255; *b = 255; return TRUE; }
+    return FALSE; /* "multi-color", "unknown", "none", or anything else */
+}
+
+/* Bounded by marker-names/marker-colors, not marker-levels: a strip with
+ * no level yet (index >= num_marker_levels) still draws as "unknown"
+ * rather than being dropped, so a printer that's slow to report levels
+ * doesn't make the whole panel disappear. */
+static int mp_marker_count(void) {
+    int n = num_marker_names;
+    if (num_marker_colors < n) n = num_marker_colors;
+    if (n > MP_MARKER_MAX_STRIPS) n = MP_MARKER_MAX_STRIPS;
+    return n;
+}
+
+static void mp_draw_marker_strips(void) {
+    struct RastPort *rp;
+    int area_left, area_right, area_top, area_bottom, count, i;
+
+    if (!window || !screen || !font) return;
+
+    rp = window->RPort;
+    SetFont(rp, font);
+    SetDrMd(rp, JAM2);
+
+    area_left = MP_MARKER_AREA_LEFT;
+    area_right = window->Width - 10;
+    /* Aligned with the IPP Path/Discover row down to the Test Print row -
+     * see createAllGadgets()'s ng.ng_TopEdge math for where those rows
+     * land relative to topborder. */
+    area_top = g_topborder + 65;
+    area_bottom = g_topborder + 227;
+    if (area_right <= area_left || area_bottom <= area_top) return;
+
+    /* Clear the whole column first - otherwise a bar that shrinks (level
+     * dropped) or a printer with fewer markers than the last one queried
+     * would leave stale pixels from the previous redraw behind. */
+    SetAPen(rp, 0);
+    RectFill(rp, area_left, area_top, area_right, area_bottom);
+
+    SetAPen(rp, 1);
+    Move(rp, area_left, area_top + font->tf_Baseline);
+    Text(rp, "Ink/Toner:", 10);
+
+    count = mp_marker_count();
+    if (count <= 0) {
+        Move(rp, area_left, area_top + (font->tf_YSize + 4) + font->tf_Baseline);
+        Text(rp, "(Query for levels)", 19);
+        return;
+    }
+
+    for (i = 0; i < count; i++) {
+        int row_top = area_top + (font->tf_YSize + 4) + i * MP_MARKER_STRIP_H;
+        int bar_top, bar_bottom, bar_left, bar_right;
+        int level = (i < num_marker_levels) ? marker_levels[i] : -1;
+        char namebuf[20];
+        UBYTE r, g, b;
+        BOOL have_rgb;
+        LONG pen;
+
+        bar_top = row_top + font->tf_YSize + 2;
+        bar_bottom = bar_top + MP_MARKER_BAR_H;
+        if (bar_bottom > area_bottom) break; /* ran out of vertical room */
+        bar_left = area_left;
+        bar_right = area_right;
+
+        SetAPen(rp, 1);
+        strncpy(namebuf, marker_names[i], sizeof(namebuf) - 1);
+        namebuf[sizeof(namebuf) - 1] = '\0';
+        Move(rp, area_left, row_top + font->tf_Baseline);
+        Text(rp, namebuf, strlen(namebuf));
+
+        if (level >= 0) {
+            char pct[8];
+            int pct_len;
+            snprintf(pct, sizeof(pct), "%d%%", level > 100 ? 100 : level);
+            pct_len = strlen(pct);
+            Move(rp, area_right - (pct_len * 8), row_top + font->tf_Baseline);
+            Text(rp, pct, pct_len);
+        }
+
+        /* Bar border */
+        SetAPen(rp, 1);
+        RectFill(rp, bar_left, bar_top, bar_right, bar_top);
+        RectFill(rp, bar_left, bar_bottom, bar_right, bar_bottom);
+        RectFill(rp, bar_left, bar_top, bar_left, bar_bottom);
+        RectFill(rp, bar_right, bar_top, bar_right, bar_bottom);
+
+        have_rgb = mp_marker_rgb(marker_colors[i], &r, &g, &b);
+        pen = have_rgb
+            ? (LONG)ObtainBestPenA(screen->ViewPort.ColorMap,
+                                    (ULONG)r << 24, (ULONG)g << 24,
+                                    (ULONG)b << 24, NULL)
+            : -1;
+
+        if (level >= 0) {
+            int fill_right = bar_left + 1 +
+                (int)(((long)(bar_right - bar_left - 2) *
+                       (level > 100 ? 100 : level)) / 100);
+            if (fill_right > bar_right - 1) fill_right = bar_right - 1;
+
+            SetAPen(rp, pen >= 0 ? (UBYTE)pen : 1);
+            RectFill(rp, bar_left + 1, bar_top + 1, fill_right, bar_bottom - 1);
+            if (fill_right < bar_right - 1) {
+                SetAPen(rp, 0);
+                RectFill(rp, fill_right + 1, bar_top + 1, bar_right - 1, bar_bottom - 1);
+            }
+        }
+        /* level < 0 ("unknown", per RFC 3805) - leave the bar interior
+         * blank rather than guessing a fill width. */
+
+        if (pen >= 0) {
+            ReleasePen(screen->ViewPort.ColorMap, (ULONG)pen);
+        }
+    }
 }
 
 int load_ilbm_to_rgb(const char *filename, unsigned char **rgb_out, int *width_out, int *height_out) {
@@ -3935,6 +4157,12 @@ int query_printer_attributes(const char *ip, int port, char *response, int maxle
     supports_single_document_handling = FALSE;
     strcpy(pwg_sheet_back_value, "normal");
     printer_make_model[0] = '\0';
+    num_marker_names = 0;
+    num_marker_colors = 0;
+    num_marker_types = 0;
+    num_marker_levels = 0;
+    num_marker_low_levels = 0;
+    num_marker_high_levels = 0;
 
     // Allocate buffers for parsing
     char *name = malloc(512);
@@ -4015,7 +4243,10 @@ int query_printer_attributes(const char *ip, int port, char *response, int maxle
             "multiple-document-jobs-supported",
             "multiple-document-handling-supported",
             "jpeg-k-octets-supported", "jpeg-x-dimension-supported",
-            "jpeg-y-dimension-supported", NULL
+            "jpeg-y-dimension-supported",
+            "marker-names", "marker-colors", "marker-types",
+            "marker-levels", "marker-low-levels", "marker-high-levels",
+            NULL
         };
         int i;
         for (i = 0; mp_requested_attrs[i]; i++) {
@@ -4624,6 +4855,42 @@ query_receive_pump_gui:
                                (value_tag == 0x41 || value_tag == 0x42)) {
                         strncpy(printer_make_model, value, sizeof(printer_make_model) - 1);
                         printer_make_model[sizeof(printer_make_model) - 1] = '\0';
+                    } else if (strcmp(name, "marker-names") == 0 &&
+                               (value_tag == 0x41 || value_tag == 0x42 ||
+                                value_tag == 0x44)) {
+                        store_value(marker_names, &num_marker_names, value);
+                    } else if (strcmp(name, "marker-colors") == 0 &&
+                               (value_tag == 0x41 || value_tag == 0x42 ||
+                                value_tag == 0x44)) {
+                        /* "#RRGGBB" (PWG5100.13) or CSS-style names
+                         * ("cyan", "multi-color", ...) depending on the
+                         * printer - resolved to a screen pen when drawn,
+                         * not here. */
+                        store_value(marker_colors, &num_marker_colors, value);
+                    } else if (strcmp(name, "marker-types") == 0 &&
+                               value_tag == 0x44) {
+                        store_value(marker_types, &num_marker_types, value);
+                    } else if (strcmp(name, "marker-levels") == 0 &&
+                               value_tag == 0x21 && value_len == 4) {
+                        /* Percent full, 0-100; RFC 3805 reserves negative
+                         * values (-1, -2, ...) to mean "unknown"/"some
+                         * value not currently reportable", not a real
+                         * level - store as-is and let the drawing code
+                         * treat negative as unknown rather than clamping
+                         * here and losing that distinction. */
+                        int level = (int)mp_ipp_decode_be32(
+                            (const UBYTE *)ipp_start + pos - value_len);
+                        store_int_value(marker_levels, &num_marker_levels, level);
+                    } else if (strcmp(name, "marker-low-levels") == 0 &&
+                               value_tag == 0x21 && value_len == 4) {
+                        int level = (int)mp_ipp_decode_be32(
+                            (const UBYTE *)ipp_start + pos - value_len);
+                        store_int_value(marker_low_levels, &num_marker_low_levels, level);
+                    } else if (strcmp(name, "marker-high-levels") == 0 &&
+                               value_tag == 0x21 && value_len == 4) {
+                        int level = (int)mp_ipp_decode_be32(
+                            (const UBYTE *)ipp_start + pos - value_len);
+                        store_int_value(marker_high_levels, &num_marker_high_levels, level);
                     }
                 }
 
@@ -4879,6 +5146,11 @@ static void perform_query_flow(struct Window *win, const char *ip_only, int port
         custom_printf("CLEAR");
         custom_printf("Scan failed - please try Query again");
     }
+    /* Redraw either way: query_printer_attributes() already reset the
+     * marker-* arrays before this loop even on failure, so a failed
+     * re-query correctly clears a previous printer's ink levels off the
+     * panel instead of leaving them looking current. */
+    mp_draw_marker_strips();
 }
 
 int send_pwg_print_job(const char *ip, int port, const char *media, const char *print_mode, unsigned char *pwg_data, int pwg_size) {
@@ -6059,6 +6331,7 @@ void process_window_events(struct Window *win) {
                      * something forces a refresh (e.g. Printer Prefs
                      * opening on top of this window and closing again). */
                     redraw_output_box();
+                    mp_draw_marker_strips();
                     break;
 
                     case IDCMP_MENUPICK:
@@ -6231,6 +6504,7 @@ int main(void) {
 
     // Calculate top border
     topborder = screen->WBorTop + (screen->Font->ta_YSize + 1);
+    g_topborder = topborder;
     /* Cycle label pointers already target process-lifetime static storage.
      * seed_saved_option_labels() populated those arrays above. */
     // Load the same Unit0 profile used by DEVS:Printers/MintPRINT.
@@ -6261,8 +6535,8 @@ int main(void) {
         WA_Title, (ULONG)"MintPrint Settings",
         WA_Gadgets, (ULONG)glist,
         WA_AutoAdjust, TRUE,
-        WA_Width, 520,
-        WA_MinWidth, 520,
+        WA_Width, 660,
+        WA_MinWidth, 660,
         WA_InnerHeight, 350,
         WA_MinHeight, 350,
         WA_DragBar, TRUE,
@@ -6292,6 +6566,7 @@ int main(void) {
     /* Draw the status box's empty border immediately, rather than leaving
      * it invisible until the first status line happens to draw it. */
     custom_printf("CLEAR");
+    mp_draw_marker_strips();
 
     // Set the initial state of the print mode radio buttons
     struct Gadget *print_mode_gadget = glist;

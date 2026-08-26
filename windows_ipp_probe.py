@@ -20,7 +20,7 @@ import sys
 import urllib.parse
 from collections import defaultdict
 
-VERSION = "2.2"
+VERSION = "2.3"
 
 # IPP operations
 OP_PRINT_JOB = 0x0002
@@ -155,6 +155,15 @@ REQUESTED_ATTRIBUTES = [
     "jpeg-k-octets-supported",
     "jpeg-x-dimension-supported",
     "jpeg-y-dimension-supported",
+    # RFC 3805 / PWG5100.13 Printer MIB ink/toner status - kept in sync
+    # with MintPrintSettings.c's mp_requested_attrs[], which now also
+    # requests these for the GUI's ink-status panel (1.2.3).
+    "marker-names",
+    "marker-colors",
+    "marker-types",
+    "marker-levels",
+    "marker-low-levels",
+    "marker-high-levels",
     "compression-supported",
     "charset-configured",
     "charset-supported",
@@ -677,6 +686,15 @@ def report(parsed, target, http_status, http_reason, response_bytes, dump_all=Fa
     add_list(lines, "State reasons", all_values(parsed, "printer-state-reasons"), max_items=20)
     add_list(lines, "Accepting jobs", all_values(parsed, "printer-is-accepting-jobs"), max_items=5)
     add_list(lines, "Queued jobs", all_values(parsed, "queued-job-count"), max_items=5)
+    lines.append("")
+
+    lines.append("Ink/toner status (RFC 3805 / PWG5100.13)")
+    add_list(lines, "Marker names", all_values(parsed, "marker-names"), max_items=10)
+    add_list(lines, "Marker colors", all_values(parsed, "marker-colors"), max_items=10)
+    add_list(lines, "Marker types", all_values(parsed, "marker-types"), max_items=10)
+    add_list(lines, "Marker levels", all_values(parsed, "marker-levels"), max_items=10)
+    add_list(lines, "Marker low levels", all_values(parsed, "marker-low-levels"), max_items=10)
+    add_list(lines, "Marker high levels", all_values(parsed, "marker-high-levels"), max_items=10)
     lines.append("")
 
     formats = [s.lower() for s in flat_strings(all_values(parsed, "document-format-supported"))]
