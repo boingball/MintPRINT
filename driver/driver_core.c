@@ -1199,10 +1199,11 @@ static BOOL mp_page_finalize(void)
  * SPECIAL_NOFORMFEED band that didn't fit on the page mp_page_finalize()
  * just closed (see the case-1 split point in Render()). Mirrors case 0's
  * own "begin new page" path (media/duplex-floor target, mp_job_begin(),
- * the g_page_pending/g_accum_*/g_page_target_height reset), minus the
- * leading-whitespace and tiny-auxiliary-band handling that never applies
- * here - a split page always starts with real content rows already in
- * hand, never a leading blank band still to be discovered. */
+ * the g_page_pending/g_accum_width/g_accum_height/g_page_target_height
+ * reset), minus the leading-whitespace and tiny-auxiliary-band handling
+ * that never applies here - a split page always starts with real content
+ * rows already in hand, never a leading blank band still to be
+ * discovered. */
 static BOOL mp_begin_split_page(ULONG width, ULONG remaining_height)
 {
     ULONG encoder_height = remaining_height;
