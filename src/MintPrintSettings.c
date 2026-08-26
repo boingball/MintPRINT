@@ -32,6 +32,7 @@ typedef long ssize_t;
 #include <graphics/gfx.h>
 #include <graphics/rastport.h>
 #include <graphics/displayinfo.h>
+#include <graphics/scale.h>
 #include <devices/printer.h>
 #include <stdarg.h>
 #include <string.h>
@@ -514,6 +515,7 @@ struct Window *window = NULL;
 struct Gadget *glist = NULL;
 struct Library *SocketBase = NULL;
 struct Library *GadToolsBase = NULL;
+struct Library *DataTypesBase = NULL;
 struct IntuitionBase *IntuitionBase = NULL;
 struct GfxBase *GfxBase = NULL;
 char ip_buffer[256] = "192.168.0.51:80";
@@ -586,6 +588,13 @@ char driver_scaling_buffer[MAX_ATTR_LEN] = "";
 char driver_sides_buffer[MAX_ATTR_LEN] = "";
 int current_unit_index = 0;
 char printer_make_model[128] = "";
+char printer_icon_uri[256] = "";
+
+#define MP_PRINTER_ICON_LEFT  420
+#define MP_PRINTER_ICON_TOP   117
+#define MP_PRINTER_ICON_SIZE   32
+#define MP_PRINTER_ICON_TEMP  "T:MintPRINT-printer-icon.img"
+static struct BitMap *mp_printer_icon_bitmap = NULL;
 
 /* Ink/toner status (RFC 3805 Printer MIB / PWG5100.13 "marker-*"
  * attributes). Each of marker-names/marker-colors/marker-types/
@@ -2733,9 +2742,12 @@ static void apply_cached_capabilities(struct Window *win) {
  * panel before that code appears in the file. */
 static void mp_draw_marker_strips(void);
 static void mp_draw_sides_hint(void);
+static void mp_draw_printer_icon(void);
+static void mp_clear_printer_icon(void);
 
 static void reload_current_unit(struct Window *win) {
     mp_cache_clear_capabilities();
+    mp_clear_printer_icon();
 
     if (load_driver_config())
         custom_printf("MintPRINT Unit%d loaded\n", current_unit_index);
@@ -2771,6 +2783,7 @@ static void reload_current_unit(struct Window *win) {
     GT_RefreshWindow(win, NULL);
     mp_draw_marker_strips();
     mp_draw_sides_hint();
+    mp_draw_printer_icon();
 }
 
 
@@ -4397,6 +4410,267 @@ static int mp_connect_with_timeout(int sockfd, struct sockaddr_in *addr, int tim
     return rc;
 }
 
+/* ---------------------------------------------------------------------
+ * Optional printer picture advertised by IPP's printer-icons attribute.
+ *
+ * Fetch the first HTTP URI only. picture.datatype performs format decode
+ * and remapping (Brother's AirPrint icon is PNG), then graphics.library
+ * scales the bitmap into a small 32x32 preview beside the duplex hint.
+ * This is deliberately optional: unsupported URI/image format/download
+ * failure simply leaves the preview blank.
+ * ------------------------------------------------------------------ */
+static void mp_clear_printer_icon(void) {
+    if (mp_printer_icon_bitmap) {
+        FreeBitMap(mp_printer_icon_bitmap);
+        mp_printer_icon_bitmap = NULL;
+    }
+    DeleteFile((CONST_STRPTR)MP_PRINTER_ICON_TEMP);
+}
+
+static BOOL mp_fetch_printer_icon_file(const char *uri) {
+    const char *authority;
+    const char *slash;
+    const char *colon;
+    char host[96];
+    char path[256];
+    char request[512];
+    char *response;
+    int host_len;
+    int port = 80;
+    int sockfd;
+    int total = 0;
+    int http_status = 0;
+    int body_off = 0;
+    int body_len = 0;
+    int complete = 0;
+    int request_len;
+    struct sockaddr_in serv_addr;
+    struct timeval timeout;
+    BPTR file;
+
+    if (!uri || strncmp(uri, "http://", 7) != 0)
+        return FALSE;
+
+    authority = uri + 7;
+    slash = strchr(authority, '/');
+    if (!slash)
+        return FALSE;
+
+    colon = memchr(authority, ':', (size_t)(slash - authority));
+    host_len = (int)((colon ? colon : slash) - authority);
+    if (host_len <= 0 || host_len >= (int)sizeof(host))
+        return FALSE;
+
+    memcpy(host, authority, (size_t)host_len);
+    host[host_len] = '\0';
+
+    if (colon) {
+        port = atoi(colon + 1);
+        if (port <= 0 || port > 65535)
+            return FALSE;
+    }
+
+    strncpy(path, slash, sizeof(path) - 1);
+    path[sizeof(path) - 1] = '\0';
+
+    memset(&serv_addr, 0, sizeof(serv_addr));
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons((UWORD)port);
+    serv_addr.sin_addr.s_addr = inet_addr(host);
+    if (serv_addr.sin_addr.s_addr == (ULONG)-1)
+        return FALSE;
+
+    sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0)
+        return FALSE;
+
+    timeout.tv_sec = 5;
+    timeout.tv_usec = 0;
+    setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout));
+    setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, (char *)&timeout, sizeof(timeout));
+
+    if (mp_connect_with_timeout(sockfd, &serv_addr, 5) < 0) {
+        CloseSocket(sockfd);
+        return FALSE;
+    }
+
+    snprintf(request, sizeof(request),
+             "GET %s HTTP/1.1\r\n"
+             "Host: %s\r\n"
+             "User-Agent: MintPrintSettings/%s\r\n"
+             "Accept: image/png,image/jpeg,image/*\r\n"
+             "Connection: close\r\n\r\n",
+             path, host, MINTPRINT_SETTINGS_VERSION);
+    request_len = (int)strlen(request);
+
+    if (safe_send(sockfd, request, request_len) != request_len) {
+        CloseSocket(sockfd);
+        return FALSE;
+    }
+
+    response = AllocVec(MAX_BUFFER, MEMF_ANY);
+    if (!response) {
+        CloseSocket(sockfd);
+        return FALSE;
+    }
+
+    while (total < MAX_BUFFER) {
+        int got = recv(sockfd, response + total, MAX_BUFFER - total, 0);
+        if (got <= 0)
+            break;
+        total += got;
+        complete = mp_http_final_body(response, total, &http_status,
+                                      &body_off, &body_len);
+        if (complete != 0)
+            break;
+    }
+    CloseSocket(sockfd);
+
+    if (complete == 0)
+        complete = mp_http_final_body(response, total, &http_status,
+                                      &body_off, &body_len);
+
+    if (complete != 1 || http_status != 200 || body_len <= 0 ||
+        body_off < 0 || body_off + body_len > total) {
+        FreeVec(response);
+        return FALSE;
+    }
+
+    file = Open((CONST_STRPTR)MP_PRINTER_ICON_TEMP, MODE_NEWFILE);
+    if (!file) {
+        FreeVec(response);
+        return FALSE;
+    }
+
+    if (Write(file, response + body_off, body_len) != body_len) {
+        Close(file);
+        DeleteFile((CONST_STRPTR)MP_PRINTER_ICON_TEMP);
+        FreeVec(response);
+        return FALSE;
+    }
+
+    Close(file);
+    FreeVec(response);
+    return TRUE;
+}
+
+static BOOL mp_load_printer_icon_bitmap(void) {
+    Object *dto;
+    struct BitMap *src_bitmap = NULL;
+    struct BitMapHeader *bmhd = NULL;
+    struct BitScaleArgs bsa;
+    ULONG depth;
+    int src_w;
+    int src_h;
+    int draw_w;
+    int draw_h;
+
+    if (!screen)
+        return FALSE;
+
+    if (!DataTypesBase) {
+        DataTypesBase = OpenLibrary("datatypes.library", 39);
+        if (!DataTypesBase)
+            return FALSE;
+    }
+
+    dto = NewDTObject((APTR)MP_PRINTER_ICON_TEMP,
+                      DTA_SourceType, DTST_FILE,
+                      DTA_GroupID, GID_PICTURE,
+                      PDTA_Screen, (ULONG)screen,
+                      PDTA_Remap, TRUE,
+                      PDTA_FreeSourceBitMap, TRUE,
+                      TAG_DONE);
+    if (!dto)
+        return FALSE;
+
+    if (!DoMethod(dto, DTM_PROCLAYOUT, NULL, TRUE) ||
+        !GetDTAttrs(dto,
+                    PDTA_DestBitMap, (ULONG)&src_bitmap,
+                    PDTA_BitMapHeader, (ULONG)&bmhd,
+                    TAG_DONE) ||
+        !src_bitmap || !bmhd || bmhd->bmh_Width == 0 || bmhd->bmh_Height == 0) {
+        DisposeDTObject(dto);
+        return FALSE;
+    }
+
+    src_w = bmhd->bmh_Width;
+    src_h = bmhd->bmh_Height;
+    draw_w = MP_PRINTER_ICON_SIZE;
+    draw_h = MP_PRINTER_ICON_SIZE;
+
+    if (src_w > src_h)
+        draw_h = (src_h * MP_PRINTER_ICON_SIZE) / src_w;
+    else if (src_h > src_w)
+        draw_w = (src_w * MP_PRINTER_ICON_SIZE) / src_h;
+
+    if (draw_w < 1) draw_w = 1;
+    if (draw_h < 1) draw_h = 1;
+
+    depth = GetBitMapAttr(src_bitmap, BMA_DEPTH);
+    mp_printer_icon_bitmap = AllocBitMap(MP_PRINTER_ICON_SIZE,
+                                         MP_PRINTER_ICON_SIZE,
+                                         depth, BMF_CLEAR, src_bitmap);
+    if (!mp_printer_icon_bitmap) {
+        DisposeDTObject(dto);
+        return FALSE;
+    }
+
+    memset(&bsa, 0, sizeof(bsa));
+    bsa.bsa_SrcX = 0;
+    bsa.bsa_SrcY = 0;
+    bsa.bsa_SrcWidth = src_w;
+    bsa.bsa_SrcHeight = src_h;
+    bsa.bsa_XSrcFactor = src_w;
+    bsa.bsa_XDestFactor = draw_w;
+    bsa.bsa_YSrcFactor = src_h;
+    bsa.bsa_YDestFactor = draw_h;
+    bsa.bsa_DestX = (MP_PRINTER_ICON_SIZE - draw_w) / 2;
+    bsa.bsa_DestY = (MP_PRINTER_ICON_SIZE - draw_h) / 2;
+    bsa.bsa_SrcBitMap = src_bitmap;
+    bsa.bsa_DestBitMap = mp_printer_icon_bitmap;
+    bsa.bsa_Flags = 0;
+    BitMapScale(&bsa);
+    WaitBlit();
+
+    DisposeDTObject(dto);
+    return TRUE;
+}
+
+static void mp_refresh_printer_icon(void) {
+    mp_clear_printer_icon();
+
+    if (!printer_icon_uri[0])
+        return;
+
+    if (mp_fetch_printer_icon_file(printer_icon_uri))
+        mp_load_printer_icon_bitmap();
+
+    DeleteFile((CONST_STRPTR)MP_PRINTER_ICON_TEMP);
+}
+
+static void mp_draw_printer_icon(void) {
+    struct RastPort *rp;
+    int left = MP_PRINTER_ICON_LEFT;
+    int top = g_topborder + MP_PRINTER_ICON_TOP;
+
+    if (!window)
+        return;
+
+    rp = window->RPort;
+    SetDrMd(rp, JAM1);
+    SetAPen(rp, 0);
+    RectFill(rp, left - 1, top - 1,
+             left + MP_PRINTER_ICON_SIZE, top + MP_PRINTER_ICON_SIZE);
+
+    if (mp_printer_icon_bitmap) {
+        BltBitMapRastPort(mp_printer_icon_bitmap, 0, 0,
+                          rp, left, top,
+                          MP_PRINTER_ICON_SIZE, MP_PRINTER_ICON_SIZE,
+                          0xC0);
+    }
+}
+
 // Updated query_printer_attributes with fixed mapping logic and tray name parsing
 int query_printer_attributes(const char *ip, int port, char *response, int maxlen) {
     custom_printf("CLEAR");
@@ -4429,6 +4703,7 @@ int query_printer_attributes(const char *ip, int port, char *response, int maxle
     supports_single_document_handling = FALSE;
     strcpy(pwg_sheet_back_value, "normal");
     printer_make_model[0] = '\0';
+    printer_icon_uri[0] = '\0';
     num_marker_names = 0;
     num_marker_colors = 0;
     num_marker_types = 0;
@@ -4516,6 +4791,7 @@ int query_printer_attributes(const char *ip, int port, char *response, int maxle
             "multiple-document-handling-supported",
             "jpeg-k-octets-supported", "jpeg-x-dimension-supported",
             "jpeg-y-dimension-supported",
+            "printer-icons",
             "marker-names", "marker-colors", "marker-types",
             "marker-levels", "marker-low-levels", "marker-high-levels",
             NULL
@@ -5127,6 +5403,10 @@ query_receive_pump_gui:
                                (value_tag == 0x41 || value_tag == 0x42)) {
                         strncpy(printer_make_model, value, sizeof(printer_make_model) - 1);
                         printer_make_model[sizeof(printer_make_model) - 1] = '\0';
+                    } else if (strcmp(name, "printer-icons") == 0 &&
+                               value_tag == 0x45 && printer_icon_uri[0] == '\0') {
+                        strncpy(printer_icon_uri, value, sizeof(printer_icon_uri) - 1);
+                        printer_icon_uri[sizeof(printer_icon_uri) - 1] = '\0';
                     } else if (strcmp(name, "marker-names") == 0 &&
                                (value_tag == 0x41 || value_tag == 0x42 ||
                                 value_tag == 0x44)) {
@@ -5417,6 +5697,9 @@ static void perform_query_flow(struct Window *win, const char *ip_only, int port
     if (!ok) {
         custom_printf("CLEAR");
         custom_printf("Scan failed - please try Query again");
+        mp_clear_printer_icon();
+    } else {
+        mp_refresh_printer_icon();
     }
     /* Redraw either way: query_printer_attributes() already reset the
      * marker-* arrays before this loop even on failure, so a failed
@@ -5424,6 +5707,7 @@ static void perform_query_flow(struct Window *win, const char *ip_only, int port
      * panel instead of leaving them looking current. */
     mp_draw_marker_strips();
     mp_draw_sides_hint();
+    mp_draw_printer_icon();
 }
 
 int send_pwg_print_job(const char *ip, int port, const char *media, const char *print_mode, unsigned char *pwg_data, int pwg_size) {
@@ -6629,6 +6913,7 @@ void process_window_events(struct Window *win) {
                     redraw_output_box();
                     mp_draw_marker_strips();
                     mp_draw_sides_hint();
+                    mp_draw_printer_icon();
                     break;
 
                     case IDCMP_MENUPICK:
@@ -7024,6 +7309,11 @@ int main(void) {
     }
 
     // Close libraries in reverse order of opening
+    mp_clear_printer_icon();
+    if (DataTypesBase) {
+        CloseLibrary(DataTypesBase);
+        DataTypesBase = NULL;
+    }
     if (SocketBase) {
         CloseLibrary(SocketBase);
         SocketBase = NULL;

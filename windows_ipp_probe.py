@@ -139,6 +139,7 @@ REQUESTED_ATTRIBUTES = [
     "printer-location",
     "printer-make-and-model",
     "printer-device-id",
+    "printer-icons",
     "printer-uri-supported",
     "uri-authentication-supported",
     "uri-security-supported",
