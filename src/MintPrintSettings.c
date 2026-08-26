@@ -6201,7 +6201,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     ng.ng_LeftEdge = 348;
     ng.ng_Width = 100;
     ng.ng_Height = 12;
-    ng.ng_TopEdge = 153 + topborder;
+    ng.ng_TopEdge = 171 + topborder;
     ng.ng_GadgetText = (STRPTR)"DPI:";
     ng.ng_GadgetID = GAD_RESOLUTION;
     gad = CreateGadget(CYCLE_KIND, gad, &ng,
@@ -6237,7 +6237,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     ng.ng_LeftEdge = 350;
     ng.ng_Width = 150;
     ng.ng_Height = 12;
-    ng.ng_TopEdge = 171 + topborder;
+    ng.ng_TopEdge = 153 + topborder;
     ng.ng_GadgetText = (STRPTR)"Sides:";
     ng.ng_GadgetID = GAD_SIDES;
     gad = CreateGadget(CYCLE_KIND, gad, &ng,
