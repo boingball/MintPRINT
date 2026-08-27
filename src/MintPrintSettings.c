@@ -1320,14 +1320,129 @@ static BOOL load_driver_config(void) {
     return found;
 }
 
+/* TRUE for a raw IPP/PWG5100.3 self-describing keyword: lowercase letters,
+ * digits, '-', '.' and '_' only. Real keywords are always shaped like this
+ * ("iso_a4_210x297mm", "by-pass-tray", "tray-1"); anything with a space
+ * or an uppercase letter is already a human-readable name - either
+ * printer-supplied (trayname=/medianame= from a vendor's media-col
+ * response) or one of this program's own "AUTO"/"Unknown" fallbacks -
+ * and mp_pretty_media_size()/mp_pretty_tray_name() below leave it alone
+ * rather than risk mangling it. */
+static BOOL mp_looks_like_raw_ipp_keyword(const char *s) {
+    int i;
+    if (!s || !s[0]) return FALSE;
+    for (i = 0; s[i]; i++) {
+        char c = s[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+              c == '-' || c == '.' || c == '_'))
+            return FALSE;
+    }
+    return TRUE;
+}
+
+/* Capitalises each hyphen-separated word of a raw keyword's middle
+ * segment, turning hyphens into spaces - shared by
+ * mp_pretty_media_size() and mp_pretty_tray_name() below. Caller
+ * guarantees len < out_size. */
+static void mp_pretty_words(const char *start, size_t len, char *out) {
+    size_t i, oi = 0;
+    BOOL cap_next = TRUE;
+    for (i = 0; i < len; i++) {
+        char c = start[i];
+        if (c == '-') {
+            out[oi++] = ' ';
+            cap_next = TRUE;
+        } else if (cap_next) {
+            out[oi++] = (char)toupper((unsigned char)c);
+            cap_next = FALSE;
+        } else {
+            out[oi++] = c;
+        }
+    }
+    out[oi] = '\0';
+}
+
+/* PWG5100.3 self-describing media names look like
+ * "<region>_<name>_<dims><unit>", e.g. "iso_a4_210x297mm" or
+ * "na_number-10-envelope_4.125x9.5in" - keep just the <name> segment,
+ * the part a person actually recognises, and drop the region prefix and
+ * exact millimetre/inch dimensions, which are just noise in a dropdown
+ * ("A4" instead of "iso_a4_210x297mm"). Falls back to the raw string
+ * unchanged if it doesn't look like a raw keyword, or doesn't have the
+ * expected two-underscore shape, so nothing already friendly gets
+ * mangled. */
+static void mp_pretty_media_size(const char *raw, char *out, size_t out_size) {
+    const char *first_us, *last_us, *name_start;
+    size_t name_len;
+    char buf[MAX_ATTR_LEN];
+
+    if (!mp_looks_like_raw_ipp_keyword(raw)) {
+        snprintf(out, out_size, "%s", raw ? raw : "");
+        return;
+    }
+
+    first_us = strchr(raw, '_');
+    last_us = strrchr(raw, '_');
+    if (!first_us || !last_us || first_us == last_us) {
+        snprintf(out, out_size, "%s", raw);
+        return;
+    }
+
+    name_start = first_us + 1;
+    name_len = (size_t)(last_us - name_start);
+    if (name_len == 0 || name_len >= sizeof(buf)) {
+        snprintf(out, out_size, "%s", raw);
+        return;
+    }
+
+    mp_pretty_words(name_start, name_len, buf);
+    snprintf(out, out_size, "%s", buf);
+}
+
+/* PWG5100.3 media-source keywords, prettified for the dropdown. Only two
+ * need a special case - the rest ("tray-1", "roll-2", "envelope-manual",
+ * "large-capacity", ...) already read fine from the same hyphen-to-space,
+ * capitalise-each-word transform mp_pretty_media_size() uses above.
+ * Falls back to the raw string unchanged if it doesn't look like a raw
+ * keyword - see mp_looks_like_raw_ipp_keyword(). */
+static void mp_pretty_tray_name(const char *raw, char *out, size_t out_size) {
+    char buf[MAX_ATTR_LEN];
+    size_t len;
+
+    if (!mp_looks_like_raw_ipp_keyword(raw)) {
+        snprintf(out, out_size, "%s", raw ? raw : "");
+        return;
+    }
+    if (strcmp(raw, "auto") == 0) {
+        snprintf(out, out_size, "AUTO");
+        return;
+    }
+    if (strcmp(raw, "by-pass-tray") == 0 || strcmp(raw, "bypass-tray") == 0) {
+        snprintf(out, out_size, "Bypass Tray");
+        return;
+    }
+
+    len = strlen(raw);
+    if (len >= sizeof(buf)) len = sizeof(buf) - 1;
+    mp_pretty_words(raw, len, buf);
+    snprintf(out, out_size, "%s", buf);
+}
+
 static void seed_saved_option_labels(void) {
     if (driver_media_buffer[0]) {
-        if (driver_source_buffer[0])
+        char media_pretty[MAX_ATTR_LEN];
+
+        mp_pretty_media_size(driver_media_buffer, media_pretty, sizeof(media_pretty));
+        if (driver_source_buffer[0]) {
+            char tray_pretty[MAX_ATTR_LEN];
+
+            mp_pretty_tray_name(driver_source_buffer, tray_pretty, sizeof(tray_pretty));
             snprintf(initial_media_value, sizeof(initial_media_value), "%s (%s)",
-                     driver_media_buffer, driver_source_buffer);
-        else
+                     media_pretty, tray_pretty);
+        } else {
             snprintf(initial_media_value, sizeof(initial_media_value), "%s",
-                     driver_media_buffer);
+                     media_pretty);
+        }
     } else {
         strcpy(initial_media_value, "Not Detected");
     }
@@ -1944,11 +2059,16 @@ void update_media_dropdown(struct Window *win) {
                               ? media_tray_map[i].media : "Unknown";
             const char *tray = media_tray_map[i].trayName[0]
                              ? media_tray_map[i].trayName : "Unknown";
+            char media_pretty[MAX_ATTR_LEN];
+            char tray_pretty[MAX_ATTR_LEN];
+
+            mp_pretty_media_size(media, media_pretty, sizeof(media_pretty));
+            mp_pretty_tray_name(tray, tray_pretty, sizeof(tray_pretty));
 
             mp_media_label_ptrs[i] = mp_media_label_storage[i];
             snprintf(mp_media_label_storage[i],
                      sizeof(mp_media_label_storage[i]),
-                     "%s (%s)", media, tray);
+                     "%s (%s)", media_pretty, tray_pretty);
             printf("Dropdown item %d: %s\n",
                    i, mp_media_label_storage[i]);
         }
