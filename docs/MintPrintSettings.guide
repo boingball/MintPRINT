@@ -1,5 +1,5 @@
 @database MintPrintSettings.guide
-@$VER: MintPrintSettings.guide 1.2.5 (27.08.2026)
+@$VER: MintPrintSettings.guide 1.2.6 (27.08.2026)
 @author "MintPRINT project (boingball)"
 @(c) "Copyright (c) 2026 Darren Banfi (boingball). MIT License."
 @width 74
@@ -101,8 +101,9 @@ type the printer's IP address into Printer IPv4 and click
 Query Printer sends an IPP Get-Printer-Attributes request and uses the
 real answer to fill in, or narrow down, most of the window:
 
-    - Printer Engine: which of JPEG, PostScript, PWG Raster and PDF the
-      printer actually advertises - see @{" Printer Engine " LINK "Engines"}.
+    - Printer Engine: which of JPEG, PostScript, PWG Raster, PDF and
+      Apple Raster (URF) the printer actually advertises - see
+      @{" Printer Engine " LINK "Engines"}.
     - Media and tray/source choices.
     - Print Mode (colour/monochrome).
     - Scaling and Quality choices the printer reports.
@@ -120,7 +121,7 @@ real answer to fill in, or narrow down, most of the window:
 A field showing "Not Detected" simply means nothing has been queried
 and saved yet for the currently selected Unit; it is not an error.
 
-If the printer's advertised format list contains none of the four
+If the printer's advertised format list contains none of the five
 formats MintPRINT can produce, a requester points you at filing a
 GitHub issue - see @{" Reporting a problem " LINK "ReportingProblems"}.
 
@@ -132,12 +133,13 @@ GitHub issue - see @{" Reporting a problem " LINK "ReportingProblems"}.
                               Printer Engine
                               --------------
 
-MintPRINT can produce four kinds of document:
+MintPRINT can produce five kinds of document:
 
-    JPEG          image/jpeg
-    PostScript    application/postscript
-    PWG Raster    image/pwg-raster
-    PDF           application/pdf
+    JPEG           image/jpeg
+    PostScript     application/postscript
+    PWG Raster     image/pwg-raster
+    PDF            application/pdf
+    Apple Raster   image/urf
 
 Any IPP Everywhere or AirPrint-certified printer (most network
 printers from roughly the last decade) is required to accept PWG
@@ -146,6 +148,13 @@ less CPU on real 68k hardware than JPEG or PDF, which both go through
 a DCT/quantization step. When Query finds a printer that supports PWG
 Raster, Settings prefers it automatically unless you have deliberately
 pinned a different engine yourself.
+
+Apple Raster (URF) is for printers that advertise none of MintPRINT's
+other three raster/JPEG-based formats but do advertise image/urf -
+some AirPrint-only devices are like this. It shares PWG Raster's cheap
+row compression, so when a printer doesn't advertise PWG Raster but
+does advertise URF, Settings prefers URF over JPEG/PDF for the same
+reason it prefers PWG Raster when that's available.
 
 PostScript and PDF are there for older or partially-compliant IPP
 printers that front an existing office-printer PostScript/PCL
@@ -205,16 +214,17 @@ automatically; otherwise "auto" is generally the safest source choice.
 The Sides selector defaults to One-sided and is only enabled once
 Query confirms all of the following:
 
-    - Printer Engine is set to PWG Raster.
-    - The printer accepts PWG Raster.
+    - Printer Engine is set to PWG Raster or Apple Raster (URF).
+    - The printer accepts that engine's format.
     - The requested duplex binding is actually advertised by the
       printer.
 
-When enabled, MintPRINT sends one multi-page PWG Raster document per
-Print-Job, which also works with printers that report
-"multiple-document-jobs-supported=false". Every other engine (JPEG,
-PostScript, PDF) always prints one-sided, regardless of what the
-printer itself supports.
+When enabled, MintPRINT sends one multi-page document per Print-Job
+(PWG Raster or Apple Raster, matching whichever engine is selected),
+which also works with printers that report
+"multiple-document-jobs-supported=false". JPEG, PostScript and PDF
+always print one-sided, regardless of what the printer itself
+supports.
 
 @{" Back to Contents " LINK "Main"}
 @endnode
@@ -247,9 +257,9 @@ The two explicit full-page choices have different purposes:
             be cropped at the edges. Printer margins do not change this
             cover/crop behaviour.
 
-For JPEG, PDF and PWG Raster, scaling is still applied by the printer
-through IPP. The PostScript note above is specific to MintPRINT's own
-PostScript page placement.
+For JPEG, PDF, PWG Raster and Apple Raster, scaling is still applied
+by the printer through IPP. The PostScript note above is specific to
+MintPRINT's own PostScript page placement.
 
 @{" Back to Contents " LINK "Main"}
 @endnode
@@ -289,19 +299,44 @@ them.
                             Installing the driver
                             ----------------------
 
-MintPrint Settings expects the compiled MintPRINT driver binary to sit
-right next to it in the same drawer. If DEVS:Printers/MintPRINT is
-missing (or an older revision) when Settings starts, it offers to
-install/update it from that copy.
+MintPRINT ships as one drawer containing MintPrintSettings and BOTH
+compiled driver builds, under Drivers/:
 
-After a successful install, Settings offers to open AmigaOS Printer
-Preferences for you. In Printer Preferences, select MintPRINT as the
-Printer Type and save - this last step is always manual; Settings
-cannot select a driver in Printer Preferences on your behalf.
+    Drivers/MintPRINT-V44/MintPRINT    AmigaOS 3.2, 3.5, 3.9 and later
+    Drivers/MintPRINT-OS31/MintPRINT   AmigaOS 3.0 and 3.1 (classic
+                                        pre-V44 printer.device)
+
+There is no separate archive to choose between AmigaOS versions.
+MintPrint Settings detects which build this machine needs (from
+workbench.library's version - or exec.library's if workbench.library
+cannot be opened at all) and tells you what it found and which driver
+it picked, in both the install/update prompt and the About window.
+
+If DEVS:Printers/MintPRINT is missing (or an older revision) when
+Settings starts, it offers to install/update it from the matching
+Drivers/ copy above. After a successful install, Settings offers to
+open AmigaOS Printer Preferences for you. In Printer Preferences,
+select MintPRINT as the Printer Type and save - this last step is
+always manual; Settings cannot select a driver in Printer Preferences
+on your behalf.
 
 Reboot after installing or updating the driver. A copy of the driver
 already resident in memory will not pick up a replacement file until
 then.
+
+Prefer installing without running MintPrintSettings first? The
+"Install" script at the top of the archive (a standard AmigaDOS
+Installer script - double-click it, or run "Installer Install" from a
+Shell) performs the same AmigaOS-version detection and lets you
+confirm or override the driver choice before anything is copied. It
+installs the driver and the MintPrintSettings drawer, and you still
+need to select MintPRINT in Printer Preferences afterwards, same as
+above.
+
+On AmigaOS 3.0/3.1, both the classic driver and MintPrint Settings
+itself require a bsdsocket.library V4-compatible TCP/IP stack
+(Roadshow, AmiTCP, Miami or similar) - Settings checks for a usable
+socket before opening its window, and refuses to start without one.
 
 @{" Back to Contents " LINK "Main"}
 @endnode
