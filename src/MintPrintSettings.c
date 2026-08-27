@@ -609,7 +609,7 @@ char printer_icon_uri[256] = "";
  * flush with zero overlap; growing it further means moving one of those
  * two neighbours too. */
 #define MP_PRINTER_ICON_TOP   110
-#define MP_PRINTER_ICON_SIZE   37
+#define MP_PRINTER_ICON_SIZE   42
 #define MP_PRINTER_ICON_TEMP  "T:MintPRINT-printer-icon.img"
 #define MP_PRINTER_ICON_PIXELS (MP_PRINTER_ICON_SIZE * MP_PRINTER_ICON_SIZE)
 #define MP_PRINTER_ICON_MAX_SOURCE_DIM 1024
@@ -7325,7 +7325,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // raw IPP keywords ("iso_a4_210x297mm (by-pass-tray)") did.
     ng.ng_LeftEdge = 135;
     ng.ng_TopEdge = 117 + topborder;
-    ng.ng_Width = 150;
+    ng.ng_Width = 180;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"Media (Tray):";
     ng.ng_GadgetID = GAD_MEDIA_DROPDOWN;
