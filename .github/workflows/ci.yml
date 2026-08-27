@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  host-tests:
+    # Runs every host-testable suite (make check): DPI options, JPEG AAN
+    # forward-DCT, Apple Raster (URF), media/page geometry, HTTP response
+    # parsing, IPP-enum decoding, and the Ghostscript-validated PostScript
+    # writer. This does not build the actual m68k driver or GUI - those
+    # need the m68k-amigaos cross toolchain, which isn't available here.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Ghostscript
+        run: sudo apt-get update && sudo apt-get install -y ghostscript
+
+      - name: make check
+        run: make check

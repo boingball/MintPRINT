@@ -12,10 +12,95 @@
 #include <proto/dos.h>
 typedef long ssize_t;
 #include <proto/bsdsocket.h>
+#include <sys/ioctl.h> /* FIONBIO, for mp_connect_with_timeout() */
+#include <errno.h>     /* EINPROGRESS/EWOULDBLOCK, for mp_connect_with_timeout() */
 
 #include "ipp_client.h"
 #include "media_size.h"
 #include "http_response.h"
+
+/* Bounds on how long a hung/half-responsive printer can hold up the spool
+ * Process. Without these, connect() and recv() below block indefinitely -
+ * the caller of mp_ipp_print_document()/mp_ipp_query_imageable_margins()
+ * (printer.device, on behalf of whatever application is printing) would
+ * never get control back. */
+#define MP_IPP_CONNECT_TIMEOUT_SECS 8
+#define MP_IPP_RECV_TIMEOUT_SECS 20
+
+/* Connect with a bound on how long a dead/unreachable printer can stall the
+ * spool Process. Modeled on src/MintPrintSettings.c's mp_connect_with_timeout,
+ * minus the GUI message pump (this runs in its own Process, not a Task
+ * servicing a Window). Returns 0 on success, -1 on failure or timeout; the
+ * socket is always left blocking again before returning. */
+static int mp_connect_with_timeout(int sockfd, struct sockaddr_in *addr,
+                                   int timeout_secs)
+{
+    long nonblock = 1;
+    long block = 0;
+    int rc;
+    int connect_errno;
+
+    if (IoctlSocket(sockfd, FIONBIO, (char *)&nonblock) < 0) {
+        /* Non-blocking mode unavailable on this stack - fall back to a
+         * plain blocking connect rather than failing outright. */
+        return connect(sockfd, (struct sockaddr *)addr, sizeof(*addr));
+    }
+
+    rc = connect(sockfd, (struct sockaddr *)addr, sizeof(*addr));
+    connect_errno = (rc < 0) ? Errno() : 0;
+
+    if (rc < 0 && (connect_errno == EINPROGRESS || connect_errno == EWOULDBLOCK)) {
+        fd_set wfds, efds;
+        struct timeval tv;
+        long ready;
+
+        FD_ZERO(&wfds);
+        FD_SET(sockfd, &wfds);
+        FD_ZERO(&efds);
+        FD_SET(sockfd, &efds);
+        tv.tv_sec = timeout_secs;
+        tv.tv_usec = 0;
+
+        ready = WaitSelect(sockfd + 1, NULL, &wfds, &efds, &tv, NULL);
+        if (ready > 0 && (FD_ISSET(sockfd, &wfds) || FD_ISSET(sockfd, &efds))) {
+            int so_err = 0;
+            socklen_t optlen = sizeof(so_err);
+            if (getsockopt(sockfd, SOL_SOCKET, SO_ERROR, (char *)&so_err, &optlen) == 0) {
+                rc = (so_err == 0) ? 0 : -1;
+            } else {
+                /* getsockopt(SO_ERROR) unsupported on this stack - trust
+                 * write-readiness alone as success. */
+                rc = 0;
+            }
+        } else {
+            rc = -1;
+        }
+    }
+
+    IoctlSocket(sockfd, FIONBIO, (char *)&block);
+    return rc;
+}
+
+/* recv() with a bound on how long a half-responsive printer (connected, but
+ * never sending a full response) can stall the spool Process. Returns the
+ * same values recv() would (>0 bytes, 0 on orderly close, <0 on error or
+ * timeout). */
+static LONG mp_recv_with_timeout(int sockfd, char *buf, ULONG cap,
+                                 int timeout_secs)
+{
+    fd_set rfds;
+    struct timeval tv;
+    long ready;
+
+    FD_ZERO(&rfds);
+    FD_SET(sockfd, &rfds);
+    tv.tv_sec = timeout_secs;
+    tv.tv_usec = 0;
+
+    ready = WaitSelect(sockfd + 1, &rfds, NULL, NULL, &tv, NULL);
+    if (ready <= 0) return -1;
+    return recv(sockfd, buf, (LONG)cap, 0);
+}
 
 extern struct ExecBase *SysBase;
 extern struct DosLibrary *DOSBase;
@@ -395,7 +480,7 @@ LONG mp_ipp_query_imageable_margins(const struct MPConfig *cfg,
     addr.sin_port = htons(cfg->port);
     addr.sin_addr.s_addr = inet_addr((STRPTR)cfg->host);
     if (addr.sin_addr.s_addr == INADDR_NONE) { rc = -7; goto done; }
-    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+    if (mp_connect_with_timeout(sock, &addr, MP_IPP_CONNECT_TIMEOUT_SECS) < 0) {
         rc = -8; goto done;
     }
 
@@ -418,8 +503,9 @@ LONG mp_ipp_query_imageable_margins(const struct MPConfig *cfg,
         if (parsed < 0 || response_used >= sizeof(g_margin_response)) {
             rc = -10; goto done;
         }
-        got = recv(sock, g_margin_response + response_used,
-                   (LONG)(sizeof(g_margin_response) - response_used), 0);
+        got = mp_recv_with_timeout(sock, g_margin_response + response_used,
+                                   sizeof(g_margin_response) - response_used,
+                                   MP_IPP_RECV_TIMEOUT_SECS);
         if (got <= 0) { rc = -10; goto done; }
         response_used += (ULONG)got;
     }
@@ -650,7 +736,9 @@ LONG mp_ipp_print_document(const struct MPConfig *cfg, CONST_STRPTR filename,
     addr.sin_port = htons(cfg->port);
     addr.sin_addr.s_addr = inet_addr((STRPTR)cfg->host);
     if (addr.sin_addr.s_addr == INADDR_NONE) { rc = -9; goto done; }
-    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) { rc = -10; goto done; }
+    if (mp_connect_with_timeout(sock, &addr, MP_IPP_CONNECT_TIMEOUT_SECS) < 0) {
+        rc = -10; goto done;
+    }
 
     if (!mp_safe_send(sock, (const UBYTE *)http, hp) ||
         !mp_safe_send(sock, ipp, io)) { rc = -11; goto done; }
@@ -677,8 +765,9 @@ LONG mp_ipp_print_document(const struct MPConfig *cfg, CONST_STRPTR filename,
             rc = -14;
             goto done;
         }
-        got = recv(sock, response + response_used,
-                   (LONG)(sizeof(response) - response_used), 0);
+        got = mp_recv_with_timeout(sock, response + response_used,
+                                   sizeof(response) - response_used,
+                                   MP_IPP_RECV_TIMEOUT_SECS);
         if (got <= 0) { rc = -14; goto done; }
         response_used += (ULONG)got;
     }

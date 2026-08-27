@@ -515,7 +515,7 @@ struct Library *SocketBase = NULL;
 struct Library *GadToolsBase = NULL;
 struct IntuitionBase *IntuitionBase = NULL;
 struct GfxBase *GfxBase = NULL;
-char ip_buffer[256] = "192.168.0.51:80";
+char ip_buffer[256] = "";
 char driver_path_buffer[96] = "/ipp/print";
 BOOL driver_debug = FALSE;
 static STRPTR debug_labels[] = { "Off", "On", NULL };
@@ -1063,7 +1063,7 @@ static BOOL write_driver_config_file(CONST_STRPTR filename) {
     char line[192];
 
     if (!parse_ip_and_port(ip_buffer, host, sizeof(host), &port) || !host[0]) {
-        printf("Invalid printer host/IP: %s\n", ip_buffer);
+        printf("Invalid printer IPv4 address: %s\n", ip_buffer);
         return FALSE;
     }
     if (port <= 0) port = 80;
@@ -1158,7 +1158,11 @@ static BOOL save_driver_config(struct Window *win) {
 static BOOL load_driver_config(void) {
     BPTR file;
     char line[192];
-    char host[64] = "192.168.0.51";
+    /* Empty, not a real address: a fresh install has no saved endpoint, and
+     * defaulting to some other user's LAN printer address would make the
+     * startup Query below (main()'s "if (ip_buffer[0])" refresh) probe a
+     * random device on this network instead of doing nothing. */
+    char host[64] = "";
     char env_path[64];
     char envarc_path[64];
     int port = 80;
@@ -1188,7 +1192,7 @@ static BOOL load_driver_config(void) {
         file = Open((CONST_STRPTR)envarc_path, MODE_OLDFILE);
 
     if (!file) {
-        snprintf(ip_buffer, sizeof(ip_buffer), "%s:%d", host, port);
+        ip_buffer[0] = '\0';
         return FALSE;
     }
 
@@ -1282,7 +1286,10 @@ static BOOL load_driver_config(void) {
     }
 
     Close(file);
-    snprintf(ip_buffer, sizeof(ip_buffer), "%s:%d", host, port);
+    if (host[0])
+        snprintf(ip_buffer, sizeof(ip_buffer), "%s:%d", host, port);
+    else
+        ip_buffer[0] = '\0';
     return found;
 }
 
@@ -3616,16 +3623,37 @@ static BOOL mp_file_exists(CONST_STRPTR name) {
     return FALSE;
 }
 
+/* Copies to a "<dst>.new" temp file first, validates the full source size
+ * landed, and only then deletes/renames over the real destination. dst -
+ * e.g. DEVS:Printers/MintPRINT, the live driver a printer.device caller may
+ * be using right now - used to be Open(dst, MODE_NEWFILE) directly, which
+ * truncates it immediately: an AllocVec failure, a short write, or the disk
+ * filling up partway through left a previously-working file destroyed with
+ * no way back. Now any such failure only ever touches the temp file; dst
+ * itself is untouched until a complete, size-verified copy is ready to
+ * replace it. */
 static BOOL mp_copy_file(CONST_STRPTR src, CONST_STRPTR dst) {
     BPTR in, out;
     UBYTE *buf;
     LONG nread;
     BOOL ok = TRUE;
+    LONG src_size;
+    LONG written = 0;
+    char tmp_path[256];
 
     in = Open(src, MODE_OLDFILE);
     if (!in) return FALSE;
 
-    out = Open(dst, MODE_NEWFILE);
+    if (Seek(in, 0, OFFSET_END) == -1) { Close(in); return FALSE; }
+    src_size = Seek(in, 0, OFFSET_CURRENT);
+    if (src_size < 0 || Seek(in, 0, OFFSET_BEGINNING) == -1) {
+        Close(in);
+        return FALSE;
+    }
+
+    snprintf(tmp_path, sizeof(tmp_path), "%s.new", (const char *)dst);
+
+    out = Open((CONST_STRPTR)tmp_path, MODE_NEWFILE);
     if (!out) {
         Close(in);
         return FALSE;
@@ -3635,6 +3663,7 @@ static BOOL mp_copy_file(CONST_STRPTR src, CONST_STRPTR dst) {
     if (!buf) {
         Close(out);
         Close(in);
+        DeleteFile((CONST_STRPTR)tmp_path);
         return FALSE;
     }
 
@@ -3643,6 +3672,7 @@ static BOOL mp_copy_file(CONST_STRPTR src, CONST_STRPTR dst) {
             ok = FALSE;
             break;
         }
+        written += nread;
     }
     if (nread < 0) ok = FALSE;
 
@@ -3650,8 +3680,15 @@ static BOOL mp_copy_file(CONST_STRPTR src, CONST_STRPTR dst) {
     Close(out);
     Close(in);
 
-    if (!ok) DeleteFile(dst);
-    return ok;
+    if (ok && written == src_size) {
+        DeleteFile(dst);
+        if (Rename((CONST_STRPTR)tmp_path, dst)) {
+            return TRUE;
+        }
+    }
+
+    DeleteFile((CONST_STRPTR)tmp_path);
+    return FALSE;
 }
 
 /* Same NIL:-handles convention as mp_launch_printer_prefs() below: an
@@ -6757,7 +6794,11 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     ng.ng_TopEdge = 21 + topborder;
     ng.ng_Width = 248;
     ng.ng_Height = 12;
-    ng.ng_GadgetText = (STRPTR)"_Printer IP/Host:";
+    /* Not "...IP/Host": both this field and the driver resolve it with
+     * inet_addr() only, so a hostname like "printer.local" silently fails
+     * rather than being looked up. Label matches actual behaviour instead
+     * of implying DNS/mDNS name support that doesn't exist. */
+    ng.ng_GadgetText = (STRPTR)"_Printer IPv4:";
     ng.ng_GadgetID = GAD_IP_STRING;
     gad = CreateGadget(STRING_KIND, gad, &ng,
         GTST_String, (ULONG)ip_buffer,
@@ -6826,7 +6867,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
         return NULL;
     }
 
-    // Discover button - shares the Printer IP/Host row in the compact layout.
+    // Discover button - shares the Printer IPv4 row in the compact layout.
     // Preserve the previous TopEdge afterwards so this isolated button does
     // not affect the state used by later gadget setup.
     {
@@ -7292,8 +7333,14 @@ void process_window_events(struct Window *win) {
                         
                             // Parse IP and optional port
                             if (!parse_ip_and_port(ip_buffer, ip_only, sizeof(ip_only), &port)) {
-                                snprintf(response, MAX_BUFFER, "Invalid IP format");
-                                return;
+                                /* Report the bad address and keep the window
+                                 * open - this used to "return;", which exits
+                                 * process_window_events()'s entire event loop
+                                 * (and leaks the response buffer below it),
+                                 * closing Settings instead of just failing
+                                 * this one Query attempt. */
+                                printf("Invalid IP format: '%s'\n", ip_buffer);
+                                break;
                             }
                         
                             // Try default + fallback ports, apply capabilities on success

@@ -17,7 +17,7 @@ Startup behaviour:
 Layout:
 
 - Unit sits at the top - which saved printer profile is being viewed/edited.
-- Query Printer sits beside Printer IP/Host.
+- Query Printer sits beside Printer IPv4.
 - Discover sits directly below Query and searches the LAN for printers.
 - Printer Engine offers JPEG, PostScript, PWG Raster, and PDF.
 - Sides defaults to One-sided and only offers capability-confirmed duplex
@@ -110,7 +110,7 @@ predictable. Distinct, non-loopback responders from either pass are merged
 into one list.
 
 Results appear in a small selection window. Picking one and choosing
-**Use Selected** fills in the Printer IP/Host field and runs the same
+**Use Selected** fills in the Printer IPv4 field and runs the same
 capability query as the **Query** button (trying the given port, then 631),
 so the fetched media/colour/quality/scaling values and the printer's
 supported document formats are pulled in immediately - this is where the

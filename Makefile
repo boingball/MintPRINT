@@ -13,7 +13,7 @@ DRIVER31_OUT := $(DRIVER31_BUILD)/MintPRINT
 TEST_BUILD := build/tests
 RELEASE_DIR := release/MintPRINT
 
-.PHONY: all gui test test-http test-dpi test-jpeg test-ipp-enum test-postscript test-urf driver driver31 driver-symbols driver-symbols31 release clean help
+.PHONY: all gui test check test-http test-dpi test-jpeg test-ipp-enum test-postscript test-urf driver driver31 driver-symbols driver-symbols31 release clean help
 
 all: gui
 
@@ -34,6 +34,9 @@ help:
 	@echo "                  bundle (release/MintPRINT/) with both drivers under"
 	@echo "                  Drivers/ - MintPrintSettings picks the right one at runtime"
 	@echo "  make test     - run host-side geometry regression tests"
+	@echo "  make check    - run every host-side test (test target plus HTTP,"
+	@echo "                  IPP-enum and Ghostscript-validated PostScript) -"
+	@echo "                  what CI runs"
 	@echo "  make clean"
 
 gui: MintPrintSettings
@@ -157,6 +160,13 @@ test-urf: | $(TEST_BUILD)
 	$(HOSTCC) -std=c89 -Wall -Wextra -Werror -Idriver \
 		tests/test_urf_writer.c driver/urf_writer.c -o $(TEST_BUILD)/test_urf_writer
 	$(TEST_BUILD)/test_urf_writer
+
+# Everything host-testable in one target: `test` (DPI/JPEG/URF/media-size)
+# plus the three suites it leaves out (HTTP response parsing, IPP-enum
+# decoding, and the Ghostscript-validated PostScript writer, which needs
+# `gs` on PATH). This is what CI runs; it never touches the m68k cross
+# toolchain, so it needs no Amiga SDK to work.
+check: test test-http test-ipp-enum test-postscript
 
 driver: $(DRIVER_OUT)
 	@echo

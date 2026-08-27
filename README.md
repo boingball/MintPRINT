@@ -97,7 +97,7 @@ is unchanged (still driver revision 41.1).
   being hidden.
 - **Compact settings layout.** The main GadTools controls were rearranged to
   use the available 520px width more efficiently: Unit spans the top row,
-  Discover sits beside Printer IP/Host, Query beside Printer Model, and DPI /
+  Discover sits beside Printer IPv4, Query beside Printer Model, and DPI /
   Sides share the lower option rows. The status/output area remains unchanged.
 
 ## What's new in 1.2.2
