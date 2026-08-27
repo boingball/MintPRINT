@@ -31,7 +31,12 @@ typedef long ssize_t;
 /* Connect with a bound on how long a dead/unreachable printer can stall the
  * spool Process. Modeled on src/MintPrintSettings.c's mp_connect_with_timeout,
  * minus the GUI message pump (this runs in its own Process, not a Task
- * servicing a Window). Returns 0 on success, -1 on failure or timeout; the
+ * servicing a Window). Returns 0 on success, -1 on a real connect failure
+ * (the stack reported a socket error), -2 specifically when the socket
+ * never became writable within timeout_secs at all - callers that want to
+ * tell "never got a response to the connection attempt" apart from an
+ * ordinary connect failure (connection refused, etc.) can check for -2,
+ * as mp_ipp_print_document() does below to report it distinctly. The
  * socket is always left blocking again before returning. */
 static int mp_connect_with_timeout(int sockfd, struct sockaddr_in *addr,
                                    int timeout_secs)
@@ -74,7 +79,10 @@ static int mp_connect_with_timeout(int sockfd, struct sockaddr_in *addr,
                 rc = 0;
             }
         } else {
-            rc = -1;
+            /* WaitSelect returned without the socket ever becoming ready -
+             * genuinely timed out waiting for a SYN-ACK/RST, not a socket
+             * error the stack reported. */
+            rc = -2;
         }
     }
 
@@ -84,8 +92,12 @@ static int mp_connect_with_timeout(int sockfd, struct sockaddr_in *addr,
 
 /* recv() with a bound on how long a half-responsive printer (connected, but
  * never sending a full response) can stall the spool Process. Returns the
- * same values recv() would (>0 bytes, 0 on orderly close, <0 on error or
- * timeout). */
+ * same values recv() would (>0 bytes, 0 on orderly close, <0 on error), but
+ * -2 specifically (rather than -1) when nothing at all arrived before
+ * timeout_secs elapsed and recv() itself was never even called - callers
+ * that want to tell "printer never answered" apart from an ordinary read
+ * failure (connection reset, orderly close, ...) can check for -2, as
+ * mp_ipp_print_document() does below to report it distinctly. */
 static LONG mp_recv_with_timeout(int sockfd, char *buf, ULONG cap,
                                  int timeout_secs)
 {
@@ -99,7 +111,8 @@ static LONG mp_recv_with_timeout(int sockfd, char *buf, ULONG cap,
     tv.tv_usec = 0;
 
     ready = WaitSelect(sockfd + 1, &rfds, NULL, NULL, &tv, NULL);
-    if (ready <= 0) return -1;
+    if (ready == 0) return -2;
+    if (ready < 0) return -1;
     return recv(sockfd, buf, (LONG)cap, 0);
 }
 
@@ -773,8 +786,16 @@ LONG mp_ipp_print_document(const struct MPConfig *cfg, CONST_STRPTR filename,
     addr.sin_port = htons(cfg->port);
     addr.sin_addr.s_addr = inet_addr((STRPTR)cfg->host);
     if (addr.sin_addr.s_addr == INADDR_NONE) { rc = -9; goto done; }
-    if (mp_connect_with_timeout(sock, &addr, MP_IPP_CONNECT_TIMEOUT_SECS) < 0) {
-        rc = -10; goto done;
+    {
+        int connect_rc = mp_connect_with_timeout(sock, &addr,
+                                                 MP_IPP_CONNECT_TIMEOUT_SECS);
+        /* -18, not -10: distinguishes "printer never answered the
+         * connection attempt at all within MP_IPP_CONNECT_TIMEOUT_SECS"
+         * from an ordinary connect failure (connection refused, no route),
+         * so driver_core.c's log can name it specifically - same idea as
+         * -17 for the recv() timeout below. */
+        if (connect_rc == -2) { rc = -18; goto done; }
+        if (connect_rc < 0) { rc = -10; goto done; }
     }
 
     if (!mp_safe_send(sock, (const UBYTE *)http, hp) ||
@@ -805,6 +826,12 @@ LONG mp_ipp_print_document(const struct MPConfig *cfg, CONST_STRPTR filename,
         got = mp_recv_with_timeout(sock, response + response_used,
                                    sizeof(response) - response_used,
                                    MP_IPP_RECV_TIMEOUT_SECS);
+        /* -17, not -14: distinguishes "printer never sent anything within
+         * MP_IPP_RECV_TIMEOUT_SECS" (e.g. issue #66 - a printer that
+         * accepts the job, then silently hangs) from the other -14 causes
+         * (malformed/oversized response, connection reset) so
+         * driver_core.c's log can name it specifically. */
+        if (got == -2) { rc = -17; goto done; }
         if (got <= 0) { rc = -14; goto done; }
         response_used += (ULONG)got;
     }
