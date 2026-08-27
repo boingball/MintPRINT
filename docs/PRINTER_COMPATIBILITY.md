@@ -5,7 +5,7 @@ version, TCP/IP stack, document engine and the settings needed to reproduce a
 working print. It deliberately distinguishes physical output from an IPP job
 that merely reports success.
 
-Last reviewed: **26 August 2026**
+Last reviewed: **27 August 2026**
 
 ## Status key
 
@@ -340,7 +340,7 @@ this printer's own URF printing is confirmed, one-sided first.
 | AmigaOS 3.2.3 + Roadshow, A500 PiStorm Wi-Fi | ✅ Confirmed end-to-end with Brother HL-L2350DW |
 | AmigaOS 3.2.3 + Roadshow, A4000/Ariadne-II wired | ✅ Confirmed end-to-end, including multi-page output, with Brother HL-L2350DW as of 1.1.0 |
 | AmigaOS 3.9 BB2, TCP stack not reported | 🟡 IPP transport reaches Samsung C480W; no released MintPRINT engine currently prints on it |
-| AmigaOS 3.1 classic driver | 🧪 Structurally implemented but no physical OS3.1 print is recorded yet |
+| AmigaOS 3.1 classic driver | ✅ Physical Test Print confirmed (Brother MFC-J6930DW, `Drivers/MintPRINT-OS31` build, driver rev 41.1); engine and TCP/IP stack not yet recorded here - see docs/OS31_SUPPORT.md |
 | AmiTCP | 🧪 Expected through compatible `bsdsocket.library`; no named hardware report yet |
 | Miami | 🧪 Expected through compatible `bsdsocket.library`; no named hardware report yet |
 
@@ -370,7 +370,10 @@ why the Wordworth and ArtEffect settings below still matter even though the OS
 Printer Preferences values do not configure MintPRINT's IPP output.
 
 This does not apply unchanged to the separate AmigaOS 3.1 classic build, which
-cannot use the V44 `PRTA_NoIO` tag and still needs dedicated hardware testing.
+cannot use the V44 `PRTA_NoIO` tag - now physically confirmed printing on
+real AmigaOS 3.1 hardware (see the "AmigaOS and TCP/IP stack status" table
+above and `docs/OS31_SUPPORT.md`), though the exact engine, TCP/IP stack and
+reproducible settings for that test are not yet recorded here.
 
 ### AmigaOS Graphics Printer Preferences
 
@@ -542,8 +545,10 @@ engines. It is not a printer, IPP, PWG or application-settings fault.
 
 ## Baseline setup and troubleshooting
 
-1. Install the correct package: the classic build for AmigaOS 3.1, or the
-   normal build for AmigaOS 3.2/3.5/3.9 and newer printer.device versions.
+1. Run MintPrintSettings (or the `Install` script) - it detects this
+   machine's AmigaOS/printer.device generation and installs the matching
+   driver (classic for AmigaOS 3.0/3.1, V44+ for 3.2/3.5/3.9 and newer)
+   automatically; there is no separate package to choose.
 2. Reboot after installing or updating the driver. If the old revision remains
    loaded, fully power-cycle the Amiga.
 3. Query the printer before saving so MintPRINT learns its actual formats,

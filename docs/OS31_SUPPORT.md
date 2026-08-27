@@ -86,20 +86,22 @@ which driver it picked (and why) before installing it. The `Install`
 script at the repository root offers the same auto-detect-then-confirm
 flow for anyone installing without running MintPrintSettings first.
 
-## Important: test status
+## Test status
 
-This compatibility layer is structurally based on the documented classic
-printer.device ABI, but it must be considered **experimental until it has
-actually produced a physical/test print on an OS3.1 system**.
+**Physically confirmed on a real AmigaOS 3.1 system**: MintPrint Settings
+runs, detects this build's driver as the correct choice, installs it,
+discovers/queries a live network printer over IPP, and a Test Print
+completes successfully with real paper output.
 
-Before public release, test at minimum:
+Still worth confirming as testing continues:
 
-1. MintPrint Settings -> Test Print on OS3.1.
-2. MultiView or GraphicDump graphics printing.
-3. JPEG engine.
-4. PWG Raster and PDF where the target printer advertises them.
-5. Reboot/install/update cycle.
-6. A real bsdsocket.library stack used by OS3.1 (not only WinUAE networking).
+1. MultiView or GraphicDump graphics printing (beyond Test Print).
+2. JPEG engine specifically (confirm which engine the successful test used
+   if it wasn't JPEG).
+3. PWG Raster and PDF where the target printer advertises them.
+4. A second reboot/install/update cycle (updating an already-installed
+   driver, not just a first install).
+5. A real bsdsocket.library stack other than the one already tested.
 
 If the OS3.1 printer transport opens Parallel/Serial even though MintPRINT
 never calls `PD->pd_PWrite`, that is the first compatibility point to inspect.
