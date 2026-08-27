@@ -99,6 +99,10 @@ real-hardware use. Driver revision **41.2**.
 - Fixed a `return;` in the Query button's event-loop handler that closed
   the entire Settings window on an invalid address instead of just
   reporting the error.
+- Fixed garbled AmigaGuide help text - `@wordwrap`/`@smartwrap` were
+  reflowing hand-formatted, already-wrapped paragraphs and splicing their
+  hanging-indent whitespace into the middle of lines. Removed; every node
+  was already wrapped to fit the declared `@width`.
 - Added `make check` (the existing test suite plus HTTP/IPP-enum/
   PostScript coverage it skipped) and a GitHub Actions workflow that runs
   it on every push/PR.

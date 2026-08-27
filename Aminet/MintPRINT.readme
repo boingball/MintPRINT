@@ -97,7 +97,7 @@ Extract the archive and copy the MintPRINT/ drawer wherever you like, then
 run MintPrintSettings.
 
 On first run MintPrintSettings detects your AmigaOS/printer.device
-generation (from exec.library's version) and tells you which bundled
+generation (from workbench.library's version) and tells you which bundled
 driver it picked - Drivers/MintPRINT-V44/ for AmigaOS 3.2, 3.5, 3.9 and
 later, or Drivers/MintPRINT-OS31/ for the classic pre-V44 AmigaOS 3.0/3.1
 build - before offering to install it to DEVS:Printers/MintPRINT. On later
@@ -243,6 +243,11 @@ History
          addresses were ever actually supported
        - Fixed entering an invalid address and pressing Query closing the
          entire Settings window instead of just reporting the error
+       - Fixed garbled AmigaGuide help text (words run together with
+         stray gaps) - the help file's @wordwrap/@smartwrap directives
+         were reflowing hand-formatted, already-wrapped paragraphs and
+         splicing their hanging-indent whitespace into the middle of
+         lines
 
 1.2.4  Single combined archive with automatic driver selection, driver
        revision 41.1 (no driver change).
