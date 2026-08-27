@@ -3631,14 +3631,20 @@ static BOOL mp_file_exists(CONST_STRPTR name) {
 }
 
 /* Copies to a "<dst>.new" temp file first, validates the full source size
- * landed, and only then deletes/renames over the real destination. dst -
- * e.g. DEVS:Printers/MintPRINT, the live driver a printer.device caller may
- * be using right now - used to be Open(dst, MODE_NEWFILE) directly, which
+ * landed, and only then swaps it in over the real destination. dst - e.g.
+ * DEVS:Printers/MintPRINT, the live driver a printer.device caller may be
+ * using right now - used to be Open(dst, MODE_NEWFILE) directly, which
  * truncates it immediately: an AllocVec failure, a short write, or the disk
  * filling up partway through left a previously-working file destroyed with
- * no way back. Now any such failure only ever touches the temp file; dst
- * itself is untouched until a complete, size-verified copy is ready to
- * replace it. */
+ * no way back. Now any such failure only ever touches the temp file.
+ *
+ * The swap itself is a rename-old-aside/rename-new-in/delete-old dance
+ * rather than delete-then-rename: if Rename(tmp, dst) is the thing that
+ * fails (disk full on the directory entry, whatever), a plain
+ * DeleteFile(dst) beforehand would have already destroyed the working
+ * file with nothing to put back. Keeping the old file as "<dst>.bak"
+ * until the new one is confirmed in place means that failure instead
+ * restores dst from the backup. */
 static BOOL mp_copy_file(CONST_STRPTR src, CONST_STRPTR dst) {
     BPTR in, out;
     UBYTE *buf;
@@ -3647,6 +3653,9 @@ static BOOL mp_copy_file(CONST_STRPTR src, CONST_STRPTR dst) {
     LONG src_size;
     LONG written = 0;
     char tmp_path[256];
+    char bak_path[256];
+    BOOL had_existing;
+    BOOL bak_created = FALSE;
 
     in = Open(src, MODE_OLDFILE);
     if (!in) return FALSE;
@@ -3688,10 +3697,31 @@ static BOOL mp_copy_file(CONST_STRPTR src, CONST_STRPTR dst) {
     Close(in);
 
     if (ok && written == src_size) {
-        DeleteFile(dst);
+        snprintf(bak_path, sizeof(bak_path), "%s.bak", (const char *)dst);
+        had_existing = mp_file_exists(dst);
+
+        if (had_existing) {
+            /* Clear any stale .bak left over from a prior failed attempt
+             * first - Rename() fails if the destination name exists. */
+            DeleteFile((CONST_STRPTR)bak_path);
+            if (Rename(dst, (CONST_STRPTR)bak_path)) {
+                bak_created = TRUE;
+            } else {
+                /* Couldn't even move the current file aside - stop here
+                 * rather than risk leaving dst in an unknown state. */
+                DeleteFile((CONST_STRPTR)tmp_path);
+                return FALSE;
+            }
+        }
+
         if (Rename((CONST_STRPTR)tmp_path, dst)) {
+            if (bak_created) DeleteFile((CONST_STRPTR)bak_path);
             return TRUE;
         }
+
+        /* The new file didn't make it into place - put the previously
+         * working one back rather than leaving dst missing/truncated. */
+        if (bak_created) Rename((CONST_STRPTR)bak_path, dst);
     }
 
     DeleteFile((CONST_STRPTR)tmp_path);

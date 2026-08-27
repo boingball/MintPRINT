@@ -117,7 +117,7 @@ After rebooting:
 
   1. Open Prefs/Printer and select MintPRINT as the printer.
   2. Run MintPrintSettings.
-  3. Enter the printer IP/hostname and IPP path, or use Discover.
+  3. Enter the printer's numeric IPv4 address and IPP path, or use Discover.
   4. Press Query Printer to read the printer's capabilities.
   5. Select the document engine and required media/tray/colour/quality
      options.
@@ -146,7 +146,7 @@ configured stack size is used. If launching from a Shell on a classic
 system and using a build which does not provide its own enlarged stack,
 set a large Shell stack first, for example:
 
-  Stack 400000
+  Stack 131072
 
 Reporting a problem
 -------------------

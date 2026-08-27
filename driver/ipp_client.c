@@ -26,6 +26,7 @@ typedef long ssize_t;
  * never get control back. */
 #define MP_IPP_CONNECT_TIMEOUT_SECS 8
 #define MP_IPP_RECV_TIMEOUT_SECS 20
+#define MP_IPP_SEND_TIMEOUT_SECS 20
 
 /* Connect with a bound on how long a dead/unreachable printer can stall the
  * spool Process. Modeled on src/MintPrintSettings.c's mp_connect_with_timeout,
@@ -181,16 +182,52 @@ static int mp_append_ulong(char *dst, ULONG cap, ULONG *pos, ULONG value)
     return 1;
 }
 
+/* send() bounded so a printer that accepts the connection and then simply
+ * stops reading (TCP window stays full, never drains) cannot stall the
+ * spool Process for the rest of a large print job's transfer - only
+ * connect()/recv() were bounded before this. Each chunk still waits for
+ * write-readiness up to MP_IPP_SEND_TIMEOUT_SECS; as long as the printer
+ * keeps draining *some* data before each such wait expires, a job of any
+ * size still sends to completion - only a stalled connection (no forward
+ * progress within one timeout window) gives up. */
 static int mp_safe_send(int sock, const UBYTE *buf, ULONG len)
 {
     ULONG sent_total = 0;
+    long nonblock = 1;
+    long block = 0;
+    BOOL nonblocking = (IoctlSocket(sock, FIONBIO, (char *)&nonblock) == 0);
+
     while (sent_total < len) {
         ULONG left = len - sent_total;
         LONG want = (LONG)(left > 4096UL ? 4096UL : left);
-        LONG sent = send(sock, (char *)(buf + sent_total), want, 0);
-        if (sent <= 0) return 0;
+        LONG sent;
+
+        if (nonblocking) {
+            fd_set wfds;
+            struct timeval tv;
+            long ready;
+
+            FD_ZERO(&wfds);
+            FD_SET(sock, &wfds);
+            tv.tv_sec = MP_IPP_SEND_TIMEOUT_SECS;
+            tv.tv_usec = 0;
+
+            ready = WaitSelect(sock + 1, NULL, &wfds, NULL, &tv, NULL);
+            if (ready <= 0 || !FD_ISSET(sock, &wfds)) {
+                IoctlSocket(sock, FIONBIO, (char *)&block);
+                return 0;
+            }
+        }
+
+        sent = send(sock, (char *)(buf + sent_total), want, 0);
+        if (sent <= 0) {
+            if (nonblocking) IoctlSocket(sock, FIONBIO, (char *)&block);
+            return 0;
+        }
         sent_total += (ULONG)sent;
     }
+
+    if (nonblocking) IoctlSocket(sock, FIONBIO, (char *)&block);
     return 1;
 }
 
