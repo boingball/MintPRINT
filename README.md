@@ -32,6 +32,27 @@ printer.device driver plus a GUI setup tool.
 <img width="525" height="327" alt="image" src="https://github.com/user-attachments/assets/ba4cfd1f-8b0f-4aee-91b9-a6b221712ca5" />
 
 
+## What's new in 1.2.6
+
+MintPRINT 1.2.6 is a driver bug fix: **Monochrome now actually prints in
+black and white.** Driver revision **41.3**.
+
+- **Fixed monochrome jobs printing in colour.** `Printer Engine`'s colour
+  mode (`COLOR=` in the saved config) was only ever forwarded to the
+  printer as the IPP `print-color-mode` job attribute - a *request* the
+  printer's firmware can honour or ignore. The actual raster/JPEG pixel
+  data sent alongside it stayed full colour regardless, across all five
+  engines (JPEG, PostScript, PWG Raster, PDF, URF), since none of them had
+  any grayscale handling at all. On hardware that doesn't strictly honour
+  the hint, a "monochrome" job printed in colour - confirmed on real
+  hardware. `mp_job_write_row()` (`driver/driver_core.c`) now desaturates
+  the row itself (integer ITU-R BT.601 luma, no floating point) whenever
+  `COLOR=` is `monochrome`, `auto-monochrome`, `bi-level`,
+  `process-bi-level` or `process-monochrome` - the PWG5100.3/RFC 8011
+  keywords that mean "black ink only" - before it reaches any encoder, so
+  the output is black and white regardless of whether the printer itself
+  respects the IPP hint.
+
 ## What's new in 1.2.5
 
 MintPRINT 1.2.5 is a maintenance release: safer defaults, a driver that no
@@ -425,8 +446,8 @@ be added with its AmigaOS version, TCP/IP stack, engine and exact print options.
 
 ## Status
 
-MintPRINT is now a real, working app: version **1.2.5** GUI with **driver
-revision 41.2**, with multiple printers confirmed fully working over IPP/AirPrint
+MintPRINT is now a real, working app: version **1.2.6** GUI with **driver
+revision 41.3**, with multiple printers confirmed fully working over IPP/AirPrint
 from real Amiga hardware. It's still actively developed and not every printer
 is confirmed yet, so check the
 [printer compatibility page](docs/PRINTER_COMPATIBILITY.md) for your specific
