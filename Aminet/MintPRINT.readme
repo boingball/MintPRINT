@@ -2,7 +2,7 @@ Short:        IPP/AirPrint driver and setup tool
 Author:       Darren Banfi (boingball)
 Uploader:     boingball@gmail.com
 Type:         driver/print
-Version:      1.2.4
+Version:      1.2.5
 Requires:     68000+; AmigaOS 3.0+; TCP/IP stack providing bsdsocket.library
 Architecture: m68k-amigaos >= 3.0.0
 
@@ -196,6 +196,53 @@ from Anthropic Claude.
 
 History
 -------
+
+1.2.5  Maintenance release: safer defaults, no more indefinite driver
+       hangs, correct AmigaOS 3.9 detection, driver revision 41.2.
+
+       - driver/ipp_client.c's connect()/recv()/send() were plain blocking
+         calls with no timeout - a printer that accepted a connection or a
+         job and then went silent (e.g. a Samsung C480W hanging on a valid
+         image/urf job, GitHub issue #66) could hold the driver, and the
+         application printing through it, forever. All three are now
+         timeout-bounded (8s connect, 20s read/write), with a distinct
+         result code and debug log line for a timeout specifically
+       - Fresh installs no longer default to a hardcoded LAN address
+         (192.168.0.51:80) in either MintPrint Settings or the driver's
+         own config - both now default to empty and do nothing until a
+         real address is set, instead of a startup Query or even a print
+         job silently probing some other device on the network
+       - Driver/GUI generation detection now reads workbench.library's
+         version instead of exec.library's - AmigaOS 3.9 and similar
+         software-only OS updates can leave exec.library at whatever the
+         Kickstart ROM shipped with, which was misdetecting real 3.9
+         systems as needing the classic pre-V44 driver build
+       - Installing/updating DEVS:Printers/MintPRINT is now atomic: copies
+         to a temp file, verifies the full size landed, then swaps it in -
+         an allocation failure, short write, or full disk partway through
+         used to be able to destroy a previously-working driver with no
+         way back
+       - Fixed the Help menu ("MintPrint Settings Help...") silently doing
+         nothing - it built its Multiview command line with the literal
+         PROGDIR:MintPrintSettings.guide, but PROGDIR: is scoped to the
+         process that has it, not inherited by the new process spawned to
+         run Multiview
+       - Query now shows a live printer status (Ready, Busy, Stopped, or a
+         specific problem - Jam, Door Open, Toner Empty, Out of Paper,
+         Supply Low) next to the ink/toner levels, from printer-state and
+         printer-state-reasons
+       - Fixed sluggish loading of the duplex-hint art on real hardware:
+         its IFF decoder's debug output was hitting real stdio instead of
+         MintPrint Settings' Workbench-safe status box, likely forcing a
+         hidden console open. Its per-pixel colour-to-screen-pen matching
+         is now cached instead of recomputed on every redraw
+       - Reduced the GUI's stack requirement from 384 KiB to 128 KiB (the
+         256 KiB IPP response buffers behind that figure are heap
+         allocations now, not stack)
+       - Relabeled "Printer IP/Host" to "Printer IPv4" - only numeric
+         addresses were ever actually supported
+       - Fixed entering an invalid address and pressing Query closing the
+         entire Settings window instead of just reporting the error
 
 1.2.4  Single combined archive with automatic driver selection, driver
        revision 41.1 (no driver change).
