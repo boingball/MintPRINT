@@ -177,15 +177,22 @@ BOOL has_extension(const char *filename, const char *ext) {
  *
  * The "$STACK:" cookie is useful on newer AmigaOS startup code, but classic
  * m68k AmigaOS programs built with the GCC/libnix runtime use the __stack
- * variable.  Keep this comfortably large because the Settings Query path
- * has deep parsing / GadTools / bsdsocket call chains.
+ * variable.  This used to be 384 KiB, sized generously for the Settings
+ * Query path's parsing / GadTools / bsdsocket call chains. The 256 KiB IPP
+ * response buffers those call chains use are heap allocations now (not
+ * stack), and the largest remaining per-frame users (encoders, PNG icon
+ * decode) measure under 1 KiB each, so 128 KiB should carry the same
+ * margin with room to spare. Exercise Query, the PNG printer icon,
+ * Discover and Test Print on real AmigaOS 3.1 and 3.2 hardware before
+ * trusting this on a release build; do not drop it further (e.g. to 64
+ * KiB) without the same real-hardware exercise repeated at the new size.
  *
- * 384 KiB = 393216 bytes.
+ * 128 KiB = 131072 bytes.
  */
-unsigned long __stack = 393216UL;
+unsigned long __stack = 131072UL;
 
 /* Keep the cookie as harmless metadata for newer startup code too. */
-static const char USED min_stack[] = "$STACK:393216";
+static const char USED min_stack[] = "$STACK:131072";
 
 // Structure to map media sizes to trays (Updated to include tray name and medianame)
 struct MediaTrayMap {
