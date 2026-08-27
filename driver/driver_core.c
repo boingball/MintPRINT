@@ -55,7 +55,7 @@
  * MP_DRIVER_REV (the version half) only bumps for something that
  * warrants a new version number outright, not on every rebuild. */
 #define MP_DRIVER_REV 41
-#define MP_DRIVER_SUBREV 2
+#define MP_DRIVER_SUBREV 3
 
 struct ExecBase *SysBase = NULL;
 struct DosLibrary *DOSBase = NULL;
@@ -784,6 +784,24 @@ static BOOL mp_pwg_accept_row(const UBYTE *rgb)
     return TRUE;
 }
 
+/* True when cfg->color is one of PWG5100.3/RFC 8011's print-color-mode
+ * keywords meaning "no colour, black ink only". mp_spool_ipp_submit()
+ * (ipp_client.c) forwards cfg->color to the printer verbatim as the
+ * print-color-mode job attribute, but that is only ever a REQUEST -
+ * printer firmware is free to ignore it, and real hardware seen during
+ * testing did: a "monochrome" job still carried full-colour raster/JPEG
+ * pixel data and printed in colour. mp_job_write_row() below desaturates
+ * the actual pixel data when this is true, so monochrome mode no longer
+ * depends on the printer choosing to honour the hint. */
+static BOOL mp_color_mode_wants_grayscale(const char *color)
+{
+    return mp_streq(color, "monochrome") ||
+           mp_streq(color, "auto-monochrome") ||
+           mp_streq(color, "bi-level") ||
+           mp_streq(color, "process-bi-level") ||
+           mp_streq(color, "process-monochrome");
+}
+
 static BOOL mp_job_write_row(struct PrtInfo *pi, ULONG row_number)
 {
     ULONG src_x;
@@ -849,6 +867,28 @@ static BOOL mp_job_write_row(struct PrtInfo *pi, ULONG row_number)
             g_rgb_row[out + 1] = green;
             g_rgb_row[out + 2] = blue;
             ++dst_x;
+        }
+    }
+
+    /* Desaturate before dispatching to whichever encoder is active below -
+     * one place covers PWG Raster, PDF, PostScript, URF and JPEG alike,
+     * rather than teaching each encoder about colour modes separately.
+     * Runs over the whole row (including the white margin the loop above
+     * never touched, still white component-wise averaged), not just the
+     * printed columns - simpler than tracking the exact written range and
+     * free of visible effect either way. */
+    if (mp_color_mode_wants_grayscale(g_config.color)) {
+        ULONG px;
+        for (px = 0; px < g_rgb_row_bytes; px += 3UL) {
+            UBYTE r = g_rgb_row[px + 0];
+            UBYTE g = g_rgb_row[px + 1];
+            UBYTE b = g_rgb_row[px + 2];
+            /* Integer luma, ITU-R BT.601 weights fixed-point /256 -
+             * avoids floating point for the classic 68000 build. */
+            UBYTE gray = (UBYTE)((77UL * r + 150UL * g + 29UL * b) >> 8);
+            g_rgb_row[px + 0] = gray;
+            g_rgb_row[px + 1] = gray;
+            g_rgb_row[px + 2] = gray;
         }
     }
 

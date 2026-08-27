@@ -2,7 +2,7 @@ Short:        IPP/AirPrint driver and setup tool
 Author:       Darren Banfi (boingball)
 Uploader:     boingball@gmail.com
 Type:         driver/print
-Version:      1.2.5
+Version:      1.2.6
 Requires:     68000+; AmigaOS 3.0+; TCP/IP stack providing bsdsocket.library
 Architecture: m68k-amigaos >= 3.0.0
 
@@ -196,6 +196,24 @@ from Anthropic Claude.
 
 History
 -------
+
+1.2.6  Fixed monochrome jobs printing in colour, driver revision 41.3.
+
+       - COLOR= (the Printer Engine colour mode) was only ever forwarded
+         to the printer as the IPP print-color-mode job attribute - a
+         request the printer's firmware can honour or ignore. The actual
+         raster/JPEG pixel data sent alongside it stayed full colour
+         regardless, across all five engines (JPEG, PostScript, PWG
+         Raster, PDF, URF), since none of them had any grayscale handling
+         at all. On hardware that doesn't strictly honour the hint, a
+         "monochrome" job printed in colour - confirmed on real hardware.
+       - driver/driver_core.c's mp_job_write_row() now desaturates the
+         row itself (integer ITU-R BT.601 luma, no floating point)
+         whenever COLOR= is monochrome, auto-monochrome, bi-level,
+         process-bi-level or process-monochrome - the PWG5100.3/RFC 8011
+         keywords that mean "black ink only" - before it reaches any
+         encoder, so the output is black and white regardless of whether
+         the printer itself respects the IPP hint.
 
 1.2.5  Maintenance release: safer defaults, no more indefinite driver
        hangs, correct AmigaOS 3.9 detection, driver revision 41.2.
