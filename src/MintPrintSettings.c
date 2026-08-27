@@ -62,10 +62,12 @@ extern struct ExecBase *SysBase;
 #define MAX_ATTR_LEN 64
 #define MAX_BUFFER 256000
 /* 8, not 10: the box's font is Topaz80 (see redraw_output_box()), giving
- * a line height of tf_YSize(8)+2=10px. The window's fixed WA_InnerHeight
- * only leaves room below OUTPUT_TOP for 8 lines at that height (8*10=80px)
- * - 10 lines would push the box's bottom border past the window's own
- * bottom edge. */
+ * a line height of tf_YSize(8)+2=10px, i.e. 80px for the box's text area.
+ * WA_InnerHeight (see main()) is derived from OUTPUT_TOP and this count
+ * specifically so the box's bottom border always ends flush with the
+ * window's own bottom edge - changing either one without the other
+ * reintroduces either dead space below the box or a border pushed past
+ * the window's edge. */
 #define MAX_OUTPUT_LINES 8
 /* The debug output box is OUTPUT_LEFT..OUTPUT_RIGHT wide - at the main
  * window's 520px width that's ~490px, or ~61 chars of Topaz80 (8px/char).
@@ -132,7 +134,13 @@ static struct MPTestPrintJob test_print_job;
 // switchable GUI-side profiles (e.g. for a second/third network printer).
 #define MAX_UNITS 8
 
-#define OUTPUT_TOP     228 // Below Test Print / Save / Exit row
+/* A few pixels below the Test Print/Save/Exit row (198+12 tall) for even
+ * spacing - see WA_InnerHeight in main() for why raising this also raises
+ * that: the box's bottom border sits at OUTPUT_TOP + 81 (MAX_OUTPUT_LINES
+ * lines at 10px, see below, plus the 2px border), and WA_InnerHeight is
+ * kept equal to that so the box's border sits flush with the window's own
+ * bottom edge instead of leaving dead space below it. */
+#define OUTPUT_TOP     232 // Below Test Print / Save / Exit row
 #define OUTPUT_LEFT    10
 #define OUTPUT_RIGHT   (window->Width - 20)
 
@@ -7139,9 +7147,13 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // Apple Raster (URF).
     // Printer Engine has the longest label in the left column; x=132 keeps
     // a small left margin while leaving the compact ink panel free at x=320.
+    // Width 140 (was 180): the longest option text ("Apple Raster") is
+    // still comfortably inside that at Topaz80's 8px/char, and the box's
+    // right edge (130+140=270) now sits well clear of the ink panel at
+    // x=320 instead of crowding it at the old 310.
     ng.ng_LeftEdge = 130;
     ng.ng_TopEdge = 78 + topborder;
-    ng.ng_Width = 180;
+    ng.ng_Width = 140;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"Printer Engine:";
     ng.ng_GadgetID = GAD_ENGINE;
@@ -7154,10 +7166,12 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
         return NULL;
     }
 
-    // Enable/disable diagnostic logs and retained rendered jobs
+    // Enable/disable diagnostic logs and retained rendered jobs. Same
+    // width as Printer Engine above so the two stacked cycle gadgets
+    // stay visually aligned.
     ng.ng_LeftEdge = 130;
     ng.ng_TopEdge = 95 + topborder;
-    ng.ng_Width = 180;
+    ng.ng_Width = 140;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"Debug:";
     ng.ng_GadgetID = GAD_DEBUG;
@@ -7874,8 +7888,12 @@ int main(void) {
         WA_AutoAdjust, TRUE,
         WA_Width, 520,
         WA_MinWidth, 520,
-        WA_InnerHeight, 312,
-        WA_MinHeight, 312,
+        /* Sized to end exactly where the output box's bottom border does
+         * (OUTPUT_TOP + 81 - see the comment on OUTPUT_TOP), leaving no
+         * dead space below it - keep this in sync with OUTPUT_TOP if that
+         * ever changes again. */
+        WA_InnerHeight, 314,
+        WA_MinHeight, 314,
         WA_DragBar, TRUE,
         WA_DepthGadget, TRUE,
         WA_Activate, TRUE,
