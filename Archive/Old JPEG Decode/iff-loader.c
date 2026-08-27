@@ -118,7 +118,6 @@ static void decode_ham_pixels(UBYTE **planes, int plane_count, int bytes_per_row
 int load_iff_direct(const char *filename, struct jpeg_data *data) {
     FILE *file = fopen(filename, "rb");
     if (!file) {
-        printf("ERROR: Cannot open file '%s'", filename);
         return -1;
     }
 
@@ -128,10 +127,8 @@ int load_iff_direct(const char *filename, struct jpeg_data *data) {
     fread(&type_id, 4, 1, file);
     form_id = read_be_ulong(form_id);
     type_id = read_be_ulong(type_id);
-    printf("FORM ID: 0x%08lx  TYPE ID: 0x%08lx", form_id, type_id);
 
     if (form_id != ID_FORM || type_id != ID_ILBM) {
-        puts("ERROR: Not a FORM ILBM file");
         fclose(file);
         return -1;
     }
@@ -153,21 +150,17 @@ int load_iff_direct(const char *filename, struct jpeg_data *data) {
             fread(&bmhd, sizeof(bmhd), 1, file);
             bmhd.w = read_be_uword(bmhd.w);
             bmhd.h = read_be_uword(bmhd.h);
-            printf("BMHD: %dx%d, %d planes, compression=%d", bmhd.w, bmhd.h, bmhd.nPlanes, bmhd.compression);
         } else if (id == ID_CMAP) {
             colormap = AllocVec(size, MEMF_ANY);
             fread(colormap, size, 1, file);
             colors = size / 3;
-            printf("CMAP: %d colors", colors);
         } else if (id == ID_CAMG) {
             fread(&camg_mode, 4, 1, file);
             camg_mode = read_be_ulong(camg_mode);
-            printf("CAMG: 0x%08lx (HAM=%d EHB=%d)", camg_mode, !!(camg_mode & HAM_KEY), !!(camg_mode & EXTRA_HALFBRITE));
         } else if (id == ID_BODY) {
             body_data = AllocVec(size, MEMF_ANY);
             fread(body_data, size, 1, file);
             body_size = size;
-            printf("BODY: %lu bytes", size);
         } else {
             fseek(file, size + (size & 1), SEEK_CUR);
         }
@@ -178,7 +171,6 @@ int load_iff_direct(const char *filename, struct jpeg_data *data) {
     fclose(file);
 
     if (!body_data || (!colormap && bmhd.nPlanes <= 8)) {
-        printf("Missing BODY or CMAP");
         return -1;
     }
 
@@ -203,7 +195,6 @@ int load_iff_direct(const char *filename, struct jpeg_data *data) {
                 int offset = y * bpr;
                 int consumed = decompress_rle(body_data + src, planes[p] + offset, body_size - src, bpr);
                 if (consumed <= 0 || src + consumed > (int)body_size) {
-                    printf("Invalid ByteRun1 data at row %d plane %d", y, p);
                     for (int q = 0; q < bmhd.nPlanes; q++)
                         if (planes[q]) FreeVec(planes[q]);
                     if (planes) FreeVec(planes);
@@ -275,7 +266,6 @@ int load_iff_direct(const char *filename, struct jpeg_data *data) {
     if (colormap) FreeVec(colormap);
     if (body_data) FreeVec(body_data);
 
-    printf("IFF load successful: %dx%d pixels", w, h);
     return 0;
 }
 
