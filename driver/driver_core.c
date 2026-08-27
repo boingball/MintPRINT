@@ -55,7 +55,7 @@
  * MP_DRIVER_REV (the version half) only bumps for something that
  * warrants a new version number outright, not on every rebuild. */
 #define MP_DRIVER_REV 41
-#define MP_DRIVER_SUBREV 1
+#define MP_DRIVER_SUBREV 2
 
 struct ExecBase *SysBase = NULL;
 struct DosLibrary *DOSBase = NULL;
@@ -382,6 +382,25 @@ static void mp_log_3(const char *event, LONG a, LONG b, LONG c)
     mp_log_append(" ");
     mp_log_append_long(c);
     mp_spool_log(g_log_line);
+}
+
+/* Same "error/http/status" triple every IPP submission already logs via
+ * mp_log_3(), plus a plain-English line for the two timeout-specific error
+ * codes (see ipp_client.c's mp_connect_with_timeout()/
+ * mp_recv_with_timeout()) that would otherwise look like any other -10/-14
+ * failure in the log - e.g. issue #66, a printer that accepts a job and
+ * then silently hangs instead of ever responding. */
+static void mp_log_ipp_result(const char *event, const struct MPIPPResult *result)
+{
+    mp_log_3(event, result->error, result->http_status,
+             (LONG)result->ipp_status);
+    if (result->error == -17) {
+        mp_log_text("No response from printer (timed out waiting to read "
+                    "the IPP reply - printer accepted the job, then hung)");
+    } else if (result->error == -18) {
+        mp_log_text("No response from printer (timed out waiting to "
+                    "connect - printer unreachable/offline)");
+    }
 }
 
 static void mp_log_config(const struct MPConfig *cfg, LONG source)
@@ -1131,8 +1150,7 @@ static LONG mp_page_submit_and_track(ULONG rows_for_streak)
     } else {
         ipp_rc = mp_spool_ipp_submit(&g_config, fname, fmt, &result);
     }
-    mp_log_3("IPP result error/http/status",
-             result.error, result.http_status, (LONG)result.ipp_status);
+    mp_log_ipp_result("IPP result error/http/status", &result);
 
     if (ipp_rc == 0) {
         if (rows_for_streak < MP_TINY_PAGE_ROWS) {
@@ -1495,9 +1513,8 @@ VOID PRT_STDARGS DriverClose(struct IORequest *ior)
         if (!g_duplex_job_failed) {
             ipp_rc = mp_spool_ipp_submit(&g_config, mp_job_filename(),
                                           mp_document_format(), &result);
-            mp_log_3("IPP duplex Print-Job error/http/status",
-                     result.error, result.http_status,
-                     (LONG)result.ipp_status);
+            mp_log_ipp_result("IPP duplex Print-Job error/http/status",
+                              &result);
             if (ipp_rc != 0) g_duplex_job_failed = TRUE;
         } else {
             mp_log_text("Duplex job discarded after page failure");

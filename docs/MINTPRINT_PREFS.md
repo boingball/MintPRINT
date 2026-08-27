@@ -17,7 +17,7 @@ Startup behaviour:
 Layout:
 
 - Unit sits at the top - which saved printer profile is being viewed/edited.
-- Query Printer sits beside Printer IP/Host.
+- Query Printer sits beside Printer IPv4.
 - Discover sits directly below Query and searches the LAN for printers.
 - Printer Engine offers JPEG, PostScript, PWG Raster, and PDF.
 - Sides defaults to One-sided and only offers capability-confirmed duplex
@@ -110,7 +110,7 @@ predictable. Distinct, non-loopback responders from either pass are merged
 into one list.
 
 Results appear in a small selection window. Picking one and choosing
-**Use Selected** fills in the Printer IP/Host field and runs the same
+**Use Selected** fills in the Printer IPv4 field and runs the same
 capability query as the **Query** button (trying the given port, then 631),
 so the fetched media/colour/quality/scaling values and the printer's
 supported document formats are pulled in immediately - this is where the
@@ -164,14 +164,19 @@ MintPRINT now ships as a single drawer holding `MintPrintSettings` plus
   exists at all.
 
 On startup, `mp_needs_os31_driver()` (`src/MintPrintSettings.c`) checks
-`SysBase->LibNode.lib_Version` - AmigaOS releases bump exec.library and
-printer.device together, so exec's own version reliably indicates whether
-this machine's printer.device understands the V44 tags - and
-`mp_driver_src_path()` picks the matching drawer above as the bundled
-driver source for the rest of this flow. `mp_describe_amiga_os()` turns
-that same version into a friendly label (e.g. "AmigaOS 3.1 (exec.library
-v40)") shown in the install/update prompts and the About box, so the user
-can see what was detected and why a given driver was chosen.
+`mp_os_version()`'s reading of `workbench.library`'s version (falling back
+to `SysBase->LibNode.lib_Version` - exec.library/Kickstart - only if
+workbench.library can't be opened at all). workbench.library, not
+exec.library, is what indicates whether this machine's printer.device
+understands the V44 tags: AmigaOS 3.9 and other software-only OS updates
+layered on an existing Kickstart ROM commonly leave exec.library's own
+version at whatever the ROM shipped with, while workbench.library and the
+rest of `LIBS:` get bumped to V44+. `mp_driver_src_path()` then picks the
+matching drawer above as the bundled driver source for the rest of this
+flow, and `mp_describe_amiga_os()` turns that same version into a friendly
+label (e.g. "AmigaOS 3.1") shown in the install/update prompts and the
+About box, so the user can see what was detected and why a given driver
+was chosen.
 
 If `DEVS:Printers/MintPRINT` does not exist:
 

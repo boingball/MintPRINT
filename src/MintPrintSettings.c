@@ -138,7 +138,7 @@ static struct MPTestPrintJob test_print_job;
 
 // Define the USED macro for GCC
 #define USED __attribute__((used))
-#define MINTPRINT_SETTINGS_VERSION "1.2.4"
+#define MINTPRINT_SETTINGS_VERSION "1.2.5"
 #define MINTPRINT_DRIVER_DEST ((CONST_STRPTR)"DEVS:Printers/MintPRINT")
 
 /* MintPrint Settings now ships as a single drawer containing both bundled
@@ -164,7 +164,7 @@ static BOOL mp_read_driver_version(CONST_STRPTR path, struct MPDriverVersion *ou
 
 /* Visible both to AmigaOS's Version command and in the About requester. */
 static const char USED mintprint_version[] =
-    "$VER: MintPrintSettings " MINTPRINT_SETTINGS_VERSION " (26.08.2026)";
+    "$VER: MintPrintSettings " MINTPRINT_SETTINGS_VERSION " (27.08.2026)";
 
 // Simple extension check
 BOOL has_extension(const char *filename, const char *ext) {
@@ -177,15 +177,22 @@ BOOL has_extension(const char *filename, const char *ext) {
  *
  * The "$STACK:" cookie is useful on newer AmigaOS startup code, but classic
  * m68k AmigaOS programs built with the GCC/libnix runtime use the __stack
- * variable.  Keep this comfortably large because the Settings Query path
- * has deep parsing / GadTools / bsdsocket call chains.
+ * variable.  This used to be 384 KiB, sized generously for the Settings
+ * Query path's parsing / GadTools / bsdsocket call chains. The 256 KiB IPP
+ * response buffers those call chains use are heap allocations now (not
+ * stack), and the largest remaining per-frame users (encoders, PNG icon
+ * decode) measure under 1 KiB each, so 128 KiB should carry the same
+ * margin with room to spare. Exercise Query, the PNG printer icon,
+ * Discover and Test Print on real AmigaOS 3.1 and 3.2 hardware before
+ * trusting this on a release build; do not drop it further (e.g. to 64
+ * KiB) without the same real-hardware exercise repeated at the new size.
  *
- * 384 KiB = 393216 bytes.
+ * 128 KiB = 131072 bytes.
  */
-unsigned long __stack = 393216UL;
+unsigned long __stack = 131072UL;
 
 /* Keep the cookie as harmless metadata for newer startup code too. */
-static const char USED min_stack[] = "$STACK:393216";
+static const char USED min_stack[] = "$STACK:131072";
 
 // Structure to map media sizes to trays (Updated to include tray name and medianame)
 struct MediaTrayMap {
@@ -515,7 +522,7 @@ struct Library *SocketBase = NULL;
 struct Library *GadToolsBase = NULL;
 struct IntuitionBase *IntuitionBase = NULL;
 struct GfxBase *GfxBase = NULL;
-char ip_buffer[256] = "192.168.0.51:80";
+char ip_buffer[256] = "";
 char driver_path_buffer[96] = "/ipp/print";
 BOOL driver_debug = FALSE;
 static STRPTR debug_labels[] = { "Off", "On", NULL };
@@ -620,6 +627,18 @@ int marker_low_levels[MAX_MARKERS];
 int num_marker_low_levels = 0;
 int marker_high_levels[MAX_MARKERS];
 int num_marker_high_levels = 0;
+
+/* Printer status (RFC 8011 5.4.11 printer-state / 5.4.12
+ * printer-state-reasons), reduced to one short word/phrase shown next to
+ * the ink/toner strips - see mp_printer_status_label() near the drawing
+ * code. Live-only, same as the marker-* fields above: reset alongside them,
+ * never written to the capability cache file. printer_state_value is the
+ * raw IPP enum (3 idle, 4 processing, 5 stopped); 0 means "not queried
+ * yet". printer-state-reasons is itself a 1setOf keyword, so it needs the
+ * same parallel-array treatment as marker_names/marker_colors/etc. */
+int printer_state_value = 0;
+char printer_state_reasons[MAX_MARKERS][MAX_ATTR_LEN];
+int num_printer_state_reasons = 0;
 
 STRPTR *unit_dropdown_labels = mp_unit_label_ptrs;
 /* MintPRINT prefs #6: queried job defaults are saved into Unit0. */
@@ -1063,7 +1082,7 @@ static BOOL write_driver_config_file(CONST_STRPTR filename) {
     char line[192];
 
     if (!parse_ip_and_port(ip_buffer, host, sizeof(host), &port) || !host[0]) {
-        printf("Invalid printer host/IP: %s\n", ip_buffer);
+        printf("Invalid printer IPv4 address: %s\n", ip_buffer);
         return FALSE;
     }
     if (port <= 0) port = 80;
@@ -1158,7 +1177,11 @@ static BOOL save_driver_config(struct Window *win) {
 static BOOL load_driver_config(void) {
     BPTR file;
     char line[192];
-    char host[64] = "192.168.0.51";
+    /* Empty, not a real address: a fresh install has no saved endpoint, and
+     * defaulting to some other user's LAN printer address would make the
+     * startup Query below (main()'s "if (ip_buffer[0])" refresh) probe a
+     * random device on this network instead of doing nothing. */
+    char host[64] = "";
     char env_path[64];
     char envarc_path[64];
     int port = 80;
@@ -1188,7 +1211,7 @@ static BOOL load_driver_config(void) {
         file = Open((CONST_STRPTR)envarc_path, MODE_OLDFILE);
 
     if (!file) {
-        snprintf(ip_buffer, sizeof(ip_buffer), "%s:%d", host, port);
+        ip_buffer[0] = '\0';
         return FALSE;
     }
 
@@ -1282,7 +1305,10 @@ static BOOL load_driver_config(void) {
     }
 
     Close(file);
-    snprintf(ip_buffer, sizeof(ip_buffer), "%s:%d", host, port);
+    if (host[0])
+        snprintf(ip_buffer, sizeof(ip_buffer), "%s:%d", host, port);
+    else
+        ip_buffer[0] = '\0';
     return found;
 }
 
@@ -2419,6 +2445,8 @@ static void mp_cache_clear_capabilities(void) {
     num_marker_levels = 0;
     num_marker_low_levels = 0;
     num_marker_high_levels = 0;
+    printer_state_value = 0;
+    num_printer_state_reasons = 0;
 }
 
 static BOOL mp_cache_write_file(CONST_STRPTR filename,
@@ -3058,10 +3086,65 @@ static void mp_release_marker_pens(void) {
     }
 }
 
+/* Reduces printer-state/printer-state-reasons to one short word/phrase
+ * shown to the right of the "Ink/Toner:" header, on the same line - see
+ * mp_draw_marker_strips(). That row is only ~12 characters wide after
+ * "Ink/Toner:" itself at the window's minimum size, so every label here
+ * is deliberately kept at or under that (checked against the longest,
+ * "Out of Paper", 12 chars) rather than spelled out in full - there is no
+ * spare row to give this its own line without either overlapping the
+ * printer icon just below (MP_PRINTER_ICON_TOP) or the Sides/DPI cycle
+ * gadgets below that.
+ *
+ * Matching is substring-based against the handful of reasons someone
+ * actually needs to act on, most severe first, rather than enumerating
+ * the full PWG reason-keyword registry (RFC 8011 5.4.12) - real printers
+ * commonly suffix these with "-error"/"-warning"/"-report" (e.g.
+ * "media-jam-error"), which a substring match still catches. An
+ * unrecognised reason falls back to the bare printer-state enum (RFC
+ * 8011 5.4.11) rather than being shown raw and risking a much longer,
+ * unbounded string on this same tight row. Blank before the first
+ * Query. */
+static void mp_printer_status_label(char *buf, size_t bufsize) {
+    static const struct { const char *needle; const char *label; } known_reasons[] = {
+        { "jam",                 "Jam"          },
+        { "door-open",           "Door Open"    },
+        { "cover-open",          "Door Open"    },
+        { "interlock-open",      "Door Open"    },
+        { "marker-supply-empty", "Toner Empty"  },
+        { "toner-empty",         "Toner Empty"  },
+        { "media-empty",         "Out of Paper" },
+        { "marker-supply-low",   "Supply Low"   },
+        { "toner-low",           "Supply Low"   },
+    };
+    size_t k;
+    int i;
+
+    if (!buf || !bufsize) return;
+    buf[0] = '\0';
+
+    for (k = 0; k < sizeof(known_reasons) / sizeof(known_reasons[0]); k++) {
+        for (i = 0; i < num_printer_state_reasons; i++) {
+            if (strstr(printer_state_reasons[i], known_reasons[k].needle)) {
+                snprintf(buf, bufsize, "%s", known_reasons[k].label);
+                return;
+            }
+        }
+    }
+
+    switch (printer_state_value) {
+        case 3: snprintf(buf, bufsize, "Ready");    break;
+        case 4: snprintf(buf, bufsize, "Busy");     break;
+        case 5: snprintf(buf, bufsize, "Stopped");  break;
+        default: break; /* not yet queried - leave blank */
+    }
+}
+
 static void mp_draw_marker_strips(void) {
     struct RastPort *rp;
     int area_left, area_right, area_top, area_bottom;
     int grid_top, cell_width, count, i;
+    char status_label[24];
 
     if (!window || !screen || !font) return;
 
@@ -3088,6 +3171,19 @@ static void mp_draw_marker_strips(void) {
     Move(rp, area_left, area_top + font->tf_Baseline);
     Text(rp, "Ink/Toner:", 10);
 
+    /* Printer status shares this header row, right-aligned - there is no
+     * spare row below the grid to give it its own line without reaching
+     * into the printer icon just below (MP_PRINTER_ICON_TOP) or the
+     * Sides/DPI cycle gadgets below that. See mp_printer_status_label()
+     * for why every possible label is kept short enough to fit here. */
+    mp_printer_status_label(status_label, sizeof(status_label));
+    if (status_label[0]) {
+        int len = (int)strlen(status_label);
+        SetAPen(rp, 1);
+        Move(rp, area_right - len * 8, area_top + font->tf_Baseline);
+        Text(rp, status_label, len);
+    }
+
     count = mp_marker_count();
     if (count <= 0) {
         Move(rp,
@@ -3097,9 +3193,9 @@ static void mp_draw_marker_strips(void) {
         return;
     }
 
+    grid_top = area_top + font->tf_YSize + 3;
     cell_width =
         (area_right - area_left - MP_MARKER_COL_GAP) / MP_MARKER_COLS;
-    grid_top = area_top + font->tf_YSize + 3;
 
     for (i = 0; i < count; i++) {
         int col = i % MP_MARKER_COLS;
@@ -3269,6 +3365,13 @@ struct MPSidesHintImage {
     int width;
     int height;
     BOOL attempted;
+    /* Cached nearest-screen-pen index per pixel (width*height entries) -
+     * see mp_sides_hint_ensure_pens(). Rebuilt only when the screen
+     * palette actually changes, not on every redraw. */
+    UBYTE *pens;
+    BOOL pens_valid;
+    ULONG cached_palette[3 * 256];
+    int cached_pen_count;
 };
 
 struct MPSidesHintPen {
@@ -3362,6 +3465,45 @@ static UBYTE mp_sides_hint_nearest_pen(const ULONG *palette,
     return (UBYTE)best;
 }
 
+/* mp_sides_hint_nearest_pen() is a linear scan over the whole screen
+ * palette (up to 256 entries) - fine once, but mp_draw_sides_hint() used
+ * to call it for every pixel of the 32x32 hint image on every single
+ * redraw (Query, every gadget click, every window refresh, ...), up to
+ * ~1024*256 distance computations each time for no reason: the palette
+ * essentially never changes between redraws. Cache the per-pixel result
+ * here and only redo the scan when the palette actually differs from the
+ * one the cache was built against (a real screen depth/mode change,
+ * which is rare), rather than unconditionally every redraw. */
+static BOOL mp_sides_hint_ensure_pens(struct MPSidesHintImage *image,
+                                      const ULONG *palette, int pen_count) {
+    int pixels = image->width * image->height;
+    int i;
+
+    if (image->pens_valid && image->cached_pen_count == pen_count &&
+        memcmp(image->cached_palette, palette,
+               (size_t)pen_count * 3 * sizeof(ULONG)) == 0) {
+        return TRUE;
+    }
+
+    if (!image->pens) {
+        image->pens = AllocVec((ULONG)pixels, MEMF_ANY);
+        if (!image->pens) return FALSE;
+    }
+
+    for (i = 0; i < pixels; ++i) {
+        image->pens[i] = mp_sides_hint_nearest_pen(
+            palette, pen_count,
+            image->rgb[i * 3 + 0], image->rgb[i * 3 + 1],
+            image->rgb[i * 3 + 2]);
+    }
+
+    memcpy(image->cached_palette, palette,
+           (size_t)pen_count * 3 * sizeof(ULONG));
+    image->cached_pen_count = pen_count;
+    image->pens_valid = TRUE;
+    return TRUE;
+}
+
 static void mp_draw_sides_hint(void) {
     struct MPSidesHintImage *image;
     ULONG screen_palette[3 * 256];
@@ -3406,6 +3548,9 @@ static void mp_draw_sides_hint(void) {
         return;
 
     image = &mp_sides_hint_images[index];
+    if (!mp_sides_hint_ensure_pens(image, screen_palette, screen_pen_count))
+        return;
+
     draw_w = image->width < MP_SIDES_HINT_SIZE
            ? image->width : MP_SIDES_HINT_SIZE;
     draw_h = image->height < MP_SIDES_HINT_SIZE
@@ -3415,12 +3560,7 @@ static void mp_draw_sides_hint(void) {
         LONG last_pen = -1;
         for (x = 0; x < draw_w; ++x) {
             int pixel = y * image->width + x;
-            UBYTE r = image->rgb[pixel * 3 + 0];
-            UBYTE g = image->rgb[pixel * 3 + 1];
-            UBYTE b = image->rgb[pixel * 3 + 2];
-            UBYTE pen = mp_sides_hint_nearest_pen(screen_palette,
-                                                   screen_pen_count,
-                                                   r, g, b);
+            UBYTE pen = image->pens[pixel];
 
             if ((LONG)pen != last_pen) {
                 SetAPen(rp, pen);
@@ -3439,9 +3579,15 @@ static void mp_free_sides_hint_images(void) {
             FreeVec(mp_sides_hint_images[i].rgb);
             mp_sides_hint_images[i].rgb = NULL;
         }
+        if (mp_sides_hint_images[i].pens) {
+            FreeVec(mp_sides_hint_images[i].pens);
+            mp_sides_hint_images[i].pens = NULL;
+        }
         mp_sides_hint_images[i].width = 0;
         mp_sides_hint_images[i].height = 0;
         mp_sides_hint_images[i].attempted = FALSE;
+        mp_sides_hint_images[i].pens_valid = FALSE;
+        mp_sides_hint_images[i].cached_pen_count = 0;
     }
 }
 
@@ -3558,29 +3704,58 @@ int convert_to_pwg(unsigned char *rgb, int w, int h, unsigned char **pwg_out, in
  * ------------------------------------------------------------------- */
 
 /* The extended V44 printer-driver interface (PPCF_EXTENDED / PRTA_NoIO /
- * PRTA_8BitGuns) shipped with AmigaOS 3.5, whose exec.library is v44.
+ * PRTA_8BitGuns) shipped with AmigaOS 3.5, whose components are v44.
  * Every component released together with a given AmigaOS version shares
- * that version's major library number, so exec.library's own version is a
- * reliable stand-in for "does this machine's printer.device understand
- * the V44 tags" without having to open printer.device just to ask. */
+ * that version's major library number - except exec.library itself on a
+ * software-only OS update layered on an existing Kickstart ROM. AmigaOS
+ * 3.9 is exactly this: real-world 3.9 systems keep whatever exec.library
+ * version their Kickstart ROM shipped with (3.1's exec v40 is common)
+ * while workbench.library and the rest of LIBS: - including the parts
+ * printer.device actually depends on here - get bumped to V44+ (v45,
+ * higher again after Boing Bags). Checking exec.library's version alone
+ * misdetected such a 3.9 system as needing the classic pre-V44 driver.
+ * workbench.library, being a plain LIBS: file every such update actually
+ * replaces, tracks "what AmigaOS is genuinely running" far more reliably
+ * than the Kickstart-resident exec.library does. */
 #define MP_EXEC_VERSION_V44 44
 
+/* Falls back to exec.library's version only if workbench.library can't be
+ * opened at all - should never happen on a real system, but that is a
+ * safer failure mode than mis-defaulting to the classic driver on an
+ * unknown one. */
+static UWORD mp_os_version(void) {
+    struct Library *wb_base = OpenLibrary((CONST_STRPTR)"workbench.library", 0);
+    UWORD ver;
+
+    if (!wb_base) return SysBase->LibNode.lib_Version;
+
+    ver = wb_base->lib_Version;
+    CloseLibrary(wb_base);
+    return ver;
+}
+
 static BOOL mp_needs_os31_driver(void) {
-    return SysBase->LibNode.lib_Version < MP_EXEC_VERSION_V44;
+    return mp_os_version() < MP_EXEC_VERSION_V44;
 }
 
 /* Short friendly label for EasyRequest prompts and the About box - kept
- * deliberately brief (no exec.library version number) because EasyRequest
- * sizes its window to the single longest \n-delimited line with no
- * wrapping, and a long line here easily pushes the whole requester off a
- * low-resolution AmigaOS screen. The exec.library numbers below are the
- * ones real AmigaOS 3.x releases shipped with; any version outside this
- * list (older or a future release) still gets a short label rather than
- * being left blank - see printf() callers for the exec.library number
- * itself, logged separately to the on-screen output box where a longer
- * line just wraps instead of resizing a window. */
+ * deliberately brief (no version number) because EasyRequest sizes its
+ * window to the single longest \n-delimited line with no wrapping, and a
+ * long line here easily pushes the whole requester off a low-resolution
+ * AmigaOS screen. workbench.library's version, not exec.library's, is
+ * what's checked (see mp_os_version() above) - the numbers below are the
+ * ones real AmigaOS 3.x releases shipped workbench.library with on an
+ * unpatched system; a 3.9 install with Boing Bags applied commonly reads
+ * higher than the plain "45" below and falls through to the generic
+ * fallback label instead, which is only cosmetic - mp_needs_os31_driver()'s
+ * own >=44 comparison does not depend on hitting one of these exact
+ * numbers. Any version outside this list (older, a future release, or a
+ * patched 3.9) still gets a short label rather than being left blank -
+ * see printf() callers for the version number itself, logged separately
+ * to the on-screen output box where a longer line just wraps instead of
+ * resizing a window. */
 static void mp_describe_amiga_os(char *buf, size_t bufsize) {
-    UWORD ver = SysBase->LibNode.lib_Version;
+    UWORD ver = mp_os_version();
     const char *label;
 
     switch (ver) {
@@ -3595,7 +3770,7 @@ static void mp_describe_amiga_os(char *buf, size_t bufsize) {
     if (label) {
         snprintf(buf, bufsize, "AmigaOS %s", label);
     } else {
-        snprintf(buf, bufsize, "AmigaOS (exec v%u)", (unsigned)ver);
+        snprintf(buf, bufsize, "AmigaOS (v%u)", (unsigned)ver);
     }
 }
 
@@ -3616,16 +3791,46 @@ static BOOL mp_file_exists(CONST_STRPTR name) {
     return FALSE;
 }
 
+/* Copies to a "<dst>.new" temp file first, validates the full source size
+ * landed, and only then swaps it in over the real destination. dst - e.g.
+ * DEVS:Printers/MintPRINT, the live driver a printer.device caller may be
+ * using right now - used to be Open(dst, MODE_NEWFILE) directly, which
+ * truncates it immediately: an AllocVec failure, a short write, or the disk
+ * filling up partway through left a previously-working file destroyed with
+ * no way back. Now any such failure only ever touches the temp file.
+ *
+ * The swap itself is a rename-old-aside/rename-new-in/delete-old dance
+ * rather than delete-then-rename: if Rename(tmp, dst) is the thing that
+ * fails (disk full on the directory entry, whatever), a plain
+ * DeleteFile(dst) beforehand would have already destroyed the working
+ * file with nothing to put back. Keeping the old file as "<dst>.bak"
+ * until the new one is confirmed in place means that failure instead
+ * restores dst from the backup. */
 static BOOL mp_copy_file(CONST_STRPTR src, CONST_STRPTR dst) {
     BPTR in, out;
     UBYTE *buf;
     LONG nread;
     BOOL ok = TRUE;
+    LONG src_size;
+    LONG written = 0;
+    char tmp_path[256];
+    char bak_path[256];
+    BOOL had_existing;
+    BOOL bak_created = FALSE;
 
     in = Open(src, MODE_OLDFILE);
     if (!in) return FALSE;
 
-    out = Open(dst, MODE_NEWFILE);
+    if (Seek(in, 0, OFFSET_END) == -1) { Close(in); return FALSE; }
+    src_size = Seek(in, 0, OFFSET_CURRENT);
+    if (src_size < 0 || Seek(in, 0, OFFSET_BEGINNING) == -1) {
+        Close(in);
+        return FALSE;
+    }
+
+    snprintf(tmp_path, sizeof(tmp_path), "%s.new", (const char *)dst);
+
+    out = Open((CONST_STRPTR)tmp_path, MODE_NEWFILE);
     if (!out) {
         Close(in);
         return FALSE;
@@ -3635,6 +3840,7 @@ static BOOL mp_copy_file(CONST_STRPTR src, CONST_STRPTR dst) {
     if (!buf) {
         Close(out);
         Close(in);
+        DeleteFile((CONST_STRPTR)tmp_path);
         return FALSE;
     }
 
@@ -3643,6 +3849,7 @@ static BOOL mp_copy_file(CONST_STRPTR src, CONST_STRPTR dst) {
             ok = FALSE;
             break;
         }
+        written += nread;
     }
     if (nread < 0) ok = FALSE;
 
@@ -3650,19 +3857,85 @@ static BOOL mp_copy_file(CONST_STRPTR src, CONST_STRPTR dst) {
     Close(out);
     Close(in);
 
-    if (!ok) DeleteFile(dst);
-    return ok;
+    if (ok && written == src_size) {
+        snprintf(bak_path, sizeof(bak_path), "%s.bak", (const char *)dst);
+        had_existing = mp_file_exists(dst);
+
+        if (had_existing) {
+            /* Clear any stale .bak left over from a prior failed attempt
+             * first - Rename() fails if the destination name exists. */
+            DeleteFile((CONST_STRPTR)bak_path);
+            if (Rename(dst, (CONST_STRPTR)bak_path)) {
+                bak_created = TRUE;
+            } else {
+                /* Couldn't even move the current file aside - stop here
+                 * rather than risk leaving dst in an unknown state. */
+                DeleteFile((CONST_STRPTR)tmp_path);
+                return FALSE;
+            }
+        }
+
+        if (Rename((CONST_STRPTR)tmp_path, dst)) {
+            if (bak_created) DeleteFile((CONST_STRPTR)bak_path);
+            return TRUE;
+        }
+
+        /* The new file didn't make it into place - put the previously
+         * working one back rather than leaving dst missing/truncated. */
+        if (bak_created) Rename((CONST_STRPTR)bak_path, dst);
+    }
+
+    DeleteFile((CONST_STRPTR)tmp_path);
+    return FALSE;
 }
 
 /* Same NIL:-handles convention as mp_launch_printer_prefs() below: an
  * async SystemTags() child must not inherit and later close this program's
  * (and its launching Shell's) own console handles. Multiview displays an
- * AmigaGuide file directly, so no amigaguide.library calls are needed here. */
+ * AmigaGuide file directly, so no amigaguide.library calls are needed here.
+ *
+ * PROGDIR: is deliberately NOT passed straight through in the command
+ * string, unlike the Art/ and Drivers/ PROGDIR: paths used elsewhere in
+ * this file: those are opened directly by THIS process, where PROGDIR: is
+ * a valid local assign pointing at this program's own drawer. This
+ * command line instead runs in a brand-new Process that SystemTags()
+ * spawns to run Multiview - PROGDIR: is local to the process that has it,
+ * not inherited by a freshly spawned one, so that new process's own
+ * PROGDIR: (if it resolves at all) has no reason to still mean "this
+ * program's drawer". The Help menu item silently did nothing as a result:
+ * Multiview looked for the guide next to wherever ITS OWN idea of
+ * PROGDIR: pointed, generally failed to find it, and its own std{in,out}
+ * were redirected to NIL: like the rest of this async launch, so nothing
+ * was visible either way. Resolving PROGDIR: to a real absolute path
+ * *before* building the command line - while still running as this
+ * process, where the assign is valid - sidesteps that entirely. */
 static void mp_launch_help_guide(void) {
     BPTR in = Open((CONST_STRPTR)"NIL:", MODE_OLDFILE);
     BPTR out = Open((CONST_STRPTR)"NIL:", MODE_NEWFILE);
+    BPTR lock;
+    char dir[192];
+    char cmd[256];
+    BOOL resolved = FALSE;
 
-    if (SystemTags((CONST_STRPTR)"Multiview PROGDIR:MintPrintSettings.guide",
+    lock = Lock((CONST_STRPTR)"PROGDIR:", ACCESS_READ);
+    if (lock) {
+        resolved = NameFromLock(lock, (STRPTR)dir, sizeof(dir));
+        UnLock(lock);
+    }
+
+    if (resolved) {
+        size_t len = strlen(dir);
+        const char *sep = (len && dir[len - 1] == ':') ? "" : "/";
+        snprintf(cmd, sizeof(cmd), "Multiview \"%s%sMintPrintSettings.guide\"",
+                 dir, sep);
+    } else {
+        /* Could not resolve PROGDIR: at all (should not happen for a
+         * normally-launched program) - fall back to the old string and
+         * let the failure path below report it, rather than not trying. */
+        strcpy(cmd, "Multiview PROGDIR:MintPrintSettings.guide");
+    }
+
+    if (SystemTags((CONST_STRPTR)cmd,
                    SYS_Asynch, TRUE,
                    SYS_Input, (ULONG)in, SYS_Output, (ULONG)out,
                    TAG_DONE) != 0) {
@@ -3834,8 +4107,8 @@ static void check_and_offer_driver_install(struct Window *win) {
     CONST_STRPTR variant_name = mp_needs_os31_driver() ? "OS3.0/3.1" : "V44+";
 
     mp_describe_amiga_os(os_desc, sizeof(os_desc));
-    printf("Detected %s (exec.library v%u) - using the %s driver (%s).\n",
-           os_desc, (unsigned)SysBase->LibNode.lib_Version, variant_name, src_path);
+    printf("Detected %s (workbench.library v%u) - using the %s driver (%s).\n",
+           os_desc, (unsigned)mp_os_version(), variant_name, src_path);
 
     if (!mp_file_exists(src_path)) {
         printf("Bundled driver not found at %s; skipping install check.\n", src_path);
@@ -5157,6 +5430,8 @@ int query_printer_attributes(const char *ip, int port, char *response, int maxle
     num_marker_levels = 0;
     num_marker_low_levels = 0;
     num_marker_high_levels = 0;
+    printer_state_value = 0;
+    num_printer_state_reasons = 0;
 
     // Allocate buffers for parsing
     char *name = malloc(512);
@@ -5227,7 +5502,7 @@ int query_printer_attributes(const char *ip, int port, char *response, int maxle
     {
         static const char *mp_requested_attrs[] = {
             "media-source-supported", "media-ready", "printer-input-tray",
-            "printer-state", "print-color-mode-supported",
+            "printer-state", "printer-state-reasons", "print-color-mode-supported",
             "print-scaling-supported", "print-quality-supported",
             "printer-resolution-default", "printer-resolution-supported",
             "pwg-raster-document-resolution-supported",
@@ -5745,11 +6020,19 @@ query_receive_pump_gui:
                     } else if (strcmp(name, "printer-state") == 0 &&
                                value_tag == 0x23 && value_len == 4) {
                         /* printer-state is an IPP enum (RFC 8011 5.4.11),
-                         * not the 0x21 'integer' tag - diagnostic only, does
-                         * not affect GUI behaviour. */
-                        unsigned long state = mp_ipp_decode_be32(
+                         * not the 0x21 'integer' tag. Fed into
+                         * mp_printer_status_label() and shown under the
+                         * ink/toner strips - see mp_draw_marker_strips(). */
+                        printer_state_value = (int)mp_ipp_decode_be32(
                             (const UBYTE *)ipp_start + pos - value_len);
-                        printf("Printer state: %lu\n", state);
+                        printf("Printer state: %d\n", printer_state_value);
+                    } else if (strcmp(name, "printer-state-reasons") == 0 &&
+                               value_tag == 0x44) {
+                        /* 1setOf keyword (RFC 8011 5.4.12), same parallel-
+                         * array shape as marker-names/marker-colors/etc.
+                         * above - see mp_printer_status_label(). */
+                        store_value(printer_state_reasons,
+                                    &num_printer_state_reasons, value);
                     } else if (strcmp(name, "print-color-mode-supported") == 0 && value_tag == 0x44) {
                         store_value(supported_print_modes, &num_supported_print_modes, value);
                         printf("Added print-color-mode-supported: %s\n", value); }
@@ -6757,7 +7040,11 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     ng.ng_TopEdge = 21 + topborder;
     ng.ng_Width = 248;
     ng.ng_Height = 12;
-    ng.ng_GadgetText = (STRPTR)"_Printer IP/Host:";
+    /* Not "...IP/Host": both this field and the driver resolve it with
+     * inet_addr() only, so a hostname like "printer.local" silently fails
+     * rather than being looked up. Label matches actual behaviour instead
+     * of implying DNS/mDNS name support that doesn't exist. */
+    ng.ng_GadgetText = (STRPTR)"_Printer IPv4:";
     ng.ng_GadgetID = GAD_IP_STRING;
     gad = CreateGadget(STRING_KIND, gad, &ng,
         GTST_String, (ULONG)ip_buffer,
@@ -6826,7 +7113,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
         return NULL;
     }
 
-    // Discover button - shares the Printer IP/Host row in the compact layout.
+    // Discover button - shares the Printer IPv4 row in the compact layout.
     // Preserve the previous TopEdge afterwards so this isolated button does
     // not affect the state used by later gadget setup.
     {
@@ -7292,8 +7579,14 @@ void process_window_events(struct Window *win) {
                         
                             // Parse IP and optional port
                             if (!parse_ip_and_port(ip_buffer, ip_only, sizeof(ip_only), &port)) {
-                                snprintf(response, MAX_BUFFER, "Invalid IP format");
-                                return;
+                                /* Report the bad address and keep the window
+                                 * open - this used to "return;", which exits
+                                 * process_window_events()'s entire event loop
+                                 * (and leaks the response buffer below it),
+                                 * closing Settings instead of just failing
+                                 * this one Query attempt. */
+                                printf("Invalid IP format: '%s'\n", ip_buffer);
+                                break;
                             }
                         
                             // Try default + fallback ports, apply capabilities on success

@@ -9,8 +9,12 @@ If that file is absent, the driver falls back to:
 
     ENVARC:MintPRINT/Unit0
 
-If neither exists, the first proven Brother endpoint remains the built-in
-fallback so this patch does not change the known-good print path.
+If neither exists, the driver defaults to an empty host and simply does
+nothing (query or print) rather than falling back to any hardcoded
+address - an early build defaulted to a specific test printer's address,
+which meant an unconfigured Unit0 could silently send traffic to
+whatever device happened to be at that address on someone else's
+network.
 
 The driver itself has no concept of multiple units - it only ever reads
 `Unit0`. MintPrint Settings' Unit dropdown (see `docs/MINTPRINT_PREFS.md`)
@@ -20,9 +24,10 @@ becomes the live `Unit0` this driver reads.
 
 ## Unit0 format
 
-The file is plain text:
+The file is plain text (`HOST=` below is a placeholder - MintPrint
+Settings always fills in a real printer address before saving):
 
-    HOST=192.168.0.51
+    HOST=192.168.1.100
     PORT=80
     PATH=/ipp/print
     DEBUG=0
@@ -54,5 +59,8 @@ Settings are reloaded for each new graphics print, so changing Unit0 does not
 require unloading the driver. Replacing `DEVS:Printers/MintPRINT` itself still
 requires a reboot before testing a new driver binary.
 
-`config-Unit0.example` contains the same known-good defaults and can be copied
-to the ENV:/ENVARC: locations while the Prefs GUI is being wired to this format.
+`config-Unit0.example` shows the same format for manual/scripted setup
+without running MintPrint Settings first - replace its placeholder `HOST=`
+with your printer's real address before copying it to the ENV:/ENVARC:
+locations; copied verbatim, it configures nothing your printer actually
+uses.

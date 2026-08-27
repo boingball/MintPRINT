@@ -1,10 +1,8 @@
 @database MintPrintSettings.guide
-@$VER: MintPrintSettings.guide 1.2.0 (24.08.2026)
+@$VER: MintPrintSettings.guide 1.2.5 (27.08.2026)
 @author "MintPRINT project (boingball)"
 @(c) "Copyright (c) 2026 Darren Banfi (boingball). MIT License."
 @width 74
-@wordwrap
-@smartwrap
 
 @node Main "MintPrint Settings Help"
 @toc Main
@@ -48,7 +46,8 @@ For a brand new printer, the quickest path is:
 
     1. Run MintPrint Settings.
     2. Click @{" Discover " LINK "Discover"} to search the LAN, or type your
-       printer's IP address/hostname straight into "Printer IP/Host".
+       printer's IPv4 address straight into "Printer IPv4" (hostnames like
+       "printer.local" are not resolved - use the numeric address).
     3. Click @{" Query Printer " LINK "Query"}. This asks the printer what it
        supports and fills in Printer Engine, Media, Print Mode, Scaling,
        Quality, DPI and Sides from real capability data.
@@ -81,14 +80,14 @@ seconds each:
 
 Any address that replies to either scan appears in a small selection
 list. Pick your printer and choose "Use Selected" - this fills in
-Printer IP/Host and immediately runs the same query as the Query
+Printer IPv4 and immediately runs the same query as the Query
 button, so the printer's real name, supported formats and other
 capabilities appear right away.
 
 Discover is a best-effort LAN scan. A printer behind a router or VLAN
 that blocks multicast traffic will not show up even though it works
 fine once its address is entered manually. If nothing appears, just
-type the printer's IP address into Printer IP/Host and click
+type the printer's IP address into Printer IPv4 and click
 @{" Query Printer " LINK "Query"} as usual.
 
 @{" Back to Contents " LINK "Main"}
@@ -112,6 +111,11 @@ real answer to fill in, or narrow down, most of the window:
       it - see @{" Duplex (Sides) " LINK "Duplex"}.
     - The printer's make/model, shown once Save has been used at least
       once for this Unit.
+    - A short status word next to the "Ink/Toner:" ink levels - "Ready",
+      "Busy", "Stopped", or a specific problem such as "Jam", "Door Open",
+      "Toner Empty", "Out of Paper" or "Supply Low", read from the
+      printer's own reported state. Blank until Query has been run at
+      least once.
 
 A field showing "Not Detected" simply means nothing has been queried
 and saved yet for the currently selected Unit; it is not an error.

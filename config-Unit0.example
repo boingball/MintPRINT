@@ -1,5 +1,9 @@
 # MintPRINT Unit0 example
-HOST=192.168.0.51
+# HOST= below is a placeholder - replace it with your printer's real
+# IPv4 address before copying this file to ENV:MintPRINT/Unit0 or
+# ENVARC:MintPRINT/Unit0. Left as-is, this configures nothing your
+# printer actually uses.
+HOST=192.168.1.100
 PORT=80
 PATH=/ipp/print
 ENGINE=jpeg

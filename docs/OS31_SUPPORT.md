@@ -78,8 +78,11 @@ containing `MintPrintSettings` and both driver builds under `Drivers/`:
   3.0/3.1.
 
 `mp_needs_os31_driver()` in `src/MintPrintSettings.c` checks
-`SysBase->LibNode.lib_Version` at runtime and `mp_driver_src_path()` picks
-whichever `Drivers/MintPRINT-<variant>/MintPRINT` matches, so there is no
+`mp_os_version()` (workbench.library's version, not exec.library's - see
+that function's comment for why: AmigaOS 3.9 and similar software-only OS
+updates can leave exec.library's own version at whatever the Kickstart ROM
+shipped with) at runtime, and `mp_driver_src_path()` picks whichever
+`Drivers/MintPRINT-<variant>/MintPRINT` matches, so there is no
 longer a separate bundle to choose before downloading - one archive covers
 every supported AmigaOS release, and MintPrint Settings tells the user
 which driver it picked (and why) before installing it. The `Install`

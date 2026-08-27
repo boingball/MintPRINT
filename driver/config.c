@@ -85,7 +85,14 @@ void mp_config_defaults(struct MPConfig *cfg)
 {
     if (!cfg) return;
 
-    mp_cfg_copy(cfg->host, sizeof(cfg->host), "192.168.0.51");
+    /* Empty, not a real address: mp_ipp_query_imageable_margins() and
+     * mp_ipp_print_document() (ipp_client.c) both already refuse to run
+     * when cfg->host[0] is 0 - the guard that matters is having nothing
+     * here, not what the "nothing configured yet" placeholder looks like.
+     * A real IP here meant a Unit0 that was never saved (no ENV:/ENVARC:
+     * MintPRINT/Unit0 at all) still had this driver try to print to
+     * someone else's LAN device instead of failing cleanly. */
+    cfg->host[0] = 0;
     cfg->port = 80;
     mp_cfg_copy(cfg->path, sizeof(cfg->path), "/ipp/print");
     cfg->debug = FALSE;

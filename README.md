@@ -32,6 +32,81 @@ printer.device driver plus a GUI setup tool.
 <img width="525" height="327" alt="image" src="https://github.com/user-attachments/assets/ba4cfd1f-8b0f-4aee-91b9-a6b221712ca5" />
 
 
+## What's new in 1.2.5
+
+MintPRINT 1.2.5 is a maintenance release: safer defaults, a driver that no
+longer hangs on an unresponsive printer, correct AmigaOS 3.9 detection, and
+several smaller GUI fixes and cleanups found during an external audit and
+real-hardware use. Driver revision **41.2**.
+
+- **No more indefinite driver hangs on a dead/unresponsive printer.**
+  `driver/ipp_client.c`'s `connect()`/`recv()`/`send()` were plain blocking
+  calls with no timeout - a printer that accepted a connection or a job and
+  then went silent (see
+  [issue #66](https://github.com/boingball/MintPRINT/issues/66), a Samsung
+  C480W hanging on a valid `image/urf` job) could hold the spool process,
+  and the application printing through it, forever. All three are now
+  timeout-bounded (8s connect, 20s read/write). A timeout also gets its own
+  result codes (`-17`/`-18`) and a plain-English debug log line, distinct
+  from an ordinary response failure.
+- **Fresh installs no longer probe a hardcoded LAN address.** Both
+  MintPrint Settings and the driver's own config defaults used to fall
+  back to `192.168.0.51:80` when nothing was configured yet, so an unset
+  Unit0 could still send a startup Query or even a print job to some other
+  device on the network. Both now default to empty and simply do nothing
+  until a real address is set.
+- **Correct AmigaOS 3.9 detection.** Driver/GUI selection used to read
+  `exec.library`'s version, which stays at whatever the Kickstart ROM
+  shipped with on a software-only OS update - a real 3.9 system with a 3.1
+  ROM read back as "3.1" and got the wrong (classic pre-V44) driver build.
+  Now reads `workbench.library`'s version instead (falling back to
+  exec.library only if that can't be opened at all), in both MintPrint
+  Settings and the `Install` script.
+- **Atomic driver install/update.** Copying a new driver into
+  `DEVS:Printers/MintPRINT` used to truncate the destination file
+  immediately on open; an allocation failure, short write, or full disk
+  partway through could destroy a previously-working driver with no way
+  back. It now copies to a temp file, verifies the full size landed, then
+  swaps it in via a rename-old-aside/rename-new-in/delete-old dance -
+  restoring the previous file if the final rename itself fails.
+- **Help menu now actually opens the guide.** "MintPrint Settings Help..."
+  silently did nothing: it built its Multiview command line with the
+  literal string `PROGDIR:MintPrintSettings.guide`, but `PROGDIR:` is a
+  local assign scoped to the process that has it, not inherited by the new
+  process `SystemTags()` spawns to run Multiview. Now resolves `PROGDIR:`
+  to a real path before spawning.
+- **Live printer status next to the ink/toner strips.** Query already
+  requested and decoded `printer-state` but never showed it anywhere;
+  `printer-state-reasons` wasn't even requested. Now shown as a short
+  word/phrase - Ready, Busy, Stopped, or a specific problem (Jam, Door
+  Open, Toner Empty, Out of Paper, Supply Low) - right on the "Ink/Toner:"
+  row.
+- **Faster duplex-hint art loading.** The 32x32 duplex icons
+  (`single.iff`/`longside.iff`/`shortside.iff`) are decoded by a separate
+  translation unit (`iff-loader.c`) whose debug `printf()`/`puts()` calls
+  bypassed MintPrint Settings' own Workbench-safe output redirect and hit
+  real stdio instead - likely forcing a hidden console open on a
+  Workbench launch, reported as sluggish loading on real hardware.
+  Removed. The per-pixel nearest-screen-pen colour match for that same
+  icon is also now cached instead of recomputed on every redraw.
+- **GUI stack reduced from 384 KiB to 128 KiB.** The 256 KiB IPP response
+  buffers behind that figure are heap allocations now, not stack; `__stack`,
+  the `$STACK:` cookie, and the Workbench icon's `do_StackSize` all move
+  together.
+- Relabeled "Printer IP/Host" to "Printer IPv4" - both the GUI and driver
+  only ever resolve it with `inet_addr()`, so a hostname was never
+  actually supported.
+- Fixed a `return;` in the Query button's event-loop handler that closed
+  the entire Settings window on an invalid address instead of just
+  reporting the error.
+- Fixed garbled AmigaGuide help text - `@wordwrap`/`@smartwrap` were
+  reflowing hand-formatted, already-wrapped paragraphs and splicing their
+  hanging-indent whitespace into the middle of lines. Removed; every node
+  was already wrapped to fit the declared `@width`.
+- Added `make check` (the existing test suite plus HTTP/IPP-enum/
+  PostScript coverage it skipped) and a GitHub Actions workflow that runs
+  it on every push/PR.
+
 ## What's new in 1.2.4
 
 MintPRINT 1.2.4 is mainly a packaging/build change: one distributable
@@ -47,8 +122,12 @@ testing it. Driver behaviour is unchanged (still driver revision 41.1).
   `docs/OS31_SUPPORT.md`. There is no longer a "which archive do I
   download" question.
 - **Automatic driver selection.** MintPrint Settings now reads
-  `SysBase->LibNode.lib_Version` at startup (`mp_needs_os31_driver()` /
-  `mp_driver_src_path()` in `src/MintPrintSettings.c`) and installs or
+  `workbench.library`'s version at startup (`mp_os_version()` /
+  `mp_needs_os31_driver()` / `mp_driver_src_path()` in
+  `src/MintPrintSettings.c` - checked instead of exec.library's, since
+  AmigaOS 3.9 and similar software-only OS updates can leave
+  exec.library's own version at whatever the Kickstart ROM shipped with)
+  and installs or
   offers to update whichever `Drivers/MintPRINT-<variant>/MintPRINT` this
   machine's printer.device generation actually needs. The detected AmigaOS
   version and chosen driver are shown in the install/update prompts and the
@@ -97,7 +176,7 @@ is unchanged (still driver revision 41.1).
   being hidden.
 - **Compact settings layout.** The main GadTools controls were rearranged to
   use the available 520px width more efficiently: Unit spans the top row,
-  Discover sits beside Printer IP/Host, Query beside Printer Model, and DPI /
+  Discover sits beside Printer IPv4, Query beside Printer Model, and DPI /
   Sides share the lower option rows. The status/output area remains unchanged.
 
 ## What's new in 1.2.2
@@ -282,7 +361,7 @@ AmigaOS 3.2, 3.5, 3.9 (and later), `Drivers/MintPRINT-OS31/` for the
 classic pre-V44 AmigaOS 3.0/3.1 build (see `docs/OS31_SUPPORT.md`).
 
 Run `MintPrintSettings` - it detects which driver this machine needs from
-exec.library's version, tells you what it found, and offers to
+workbench.library's version, tells you what it found, and offers to
 install/update a missing or out-of-date `DEVS:Printers/MintPRINT` from the
 matching `Drivers/` subdrawer. **Reboot after any driver install or
 update** - a driver segment already resident in memory will not pick up a
@@ -346,8 +425,8 @@ be added with its AmigaOS version, TCP/IP stack, engine and exact print options.
 
 ## Status
 
-MintPRINT is now a real, working app: version **1.2.4** GUI with **driver
-revision 41.1**, with multiple printers confirmed fully working over IPP/AirPrint
+MintPRINT is now a real, working app: version **1.2.5** GUI with **driver
+revision 41.2**, with multiple printers confirmed fully working over IPP/AirPrint
 from real Amiga hardware. It's still actively developed and not every printer
 is confirmed yet, so check the
 [printer compatibility page](docs/PRINTER_COMPATIBILITY.md) for your specific
