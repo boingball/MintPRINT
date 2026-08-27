@@ -3760,12 +3760,50 @@ static BOOL mp_copy_file(CONST_STRPTR src, CONST_STRPTR dst) {
 /* Same NIL:-handles convention as mp_launch_printer_prefs() below: an
  * async SystemTags() child must not inherit and later close this program's
  * (and its launching Shell's) own console handles. Multiview displays an
- * AmigaGuide file directly, so no amigaguide.library calls are needed here. */
+ * AmigaGuide file directly, so no amigaguide.library calls are needed here.
+ *
+ * PROGDIR: is deliberately NOT passed straight through in the command
+ * string, unlike the Art/ and Drivers/ PROGDIR: paths used elsewhere in
+ * this file: those are opened directly by THIS process, where PROGDIR: is
+ * a valid local assign pointing at this program's own drawer. This
+ * command line instead runs in a brand-new Process that SystemTags()
+ * spawns to run Multiview - PROGDIR: is local to the process that has it,
+ * not inherited by a freshly spawned one, so that new process's own
+ * PROGDIR: (if it resolves at all) has no reason to still mean "this
+ * program's drawer". The Help menu item silently did nothing as a result:
+ * Multiview looked for the guide next to wherever ITS OWN idea of
+ * PROGDIR: pointed, generally failed to find it, and its own std{in,out}
+ * were redirected to NIL: like the rest of this async launch, so nothing
+ * was visible either way. Resolving PROGDIR: to a real absolute path
+ * *before* building the command line - while still running as this
+ * process, where the assign is valid - sidesteps that entirely. */
 static void mp_launch_help_guide(void) {
     BPTR in = Open((CONST_STRPTR)"NIL:", MODE_OLDFILE);
     BPTR out = Open((CONST_STRPTR)"NIL:", MODE_NEWFILE);
+    BPTR lock;
+    char dir[192];
+    char cmd[256];
+    BOOL resolved = FALSE;
 
-    if (SystemTags((CONST_STRPTR)"Multiview PROGDIR:MintPrintSettings.guide",
+    lock = Lock((CONST_STRPTR)"PROGDIR:", ACCESS_READ);
+    if (lock) {
+        resolved = NameFromLock(lock, (STRPTR)dir, sizeof(dir));
+        UnLock(lock);
+    }
+
+    if (resolved) {
+        size_t len = strlen(dir);
+        const char *sep = (len && dir[len - 1] == ':') ? "" : "/";
+        snprintf(cmd, sizeof(cmd), "Multiview \"%s%sMintPrintSettings.guide\"",
+                 dir, sep);
+    } else {
+        /* Could not resolve PROGDIR: at all (should not happen for a
+         * normally-launched program) - fall back to the old string and
+         * let the failure path below report it, rather than not trying. */
+        strcpy(cmd, "Multiview PROGDIR:MintPrintSettings.guide");
+    }
+
+    if (SystemTags((CONST_STRPTR)cmd,
                    SYS_Asynch, TRUE,
                    SYS_Input, (ULONG)in, SYS_Output, (ULONG)out,
                    TAG_DONE) != 0) {
