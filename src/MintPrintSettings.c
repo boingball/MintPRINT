@@ -602,13 +602,13 @@ int current_unit_index = 0;
 char printer_make_model[128] = "";
 char printer_icon_uri[256] = "";
 
-#define MP_PRINTER_ICON_LEFT  411
+#define MP_PRINTER_ICON_LEFT  400
 /* TOP/SIZE fill the full gap between the ink/toner panel above (its
  * bottom row is MP_MARKER_AREA_BOTTOM, 115) and the Sides/Quality row
  * below (TopEdge 153) - 37 is the largest size that fits both exactly
  * flush with zero overlap; growing it further means moving one of those
  * two neighbours too. */
-#define MP_PRINTER_ICON_TOP   116
+#define MP_PRINTER_ICON_TOP   110
 #define MP_PRINTER_ICON_SIZE   37
 #define MP_PRINTER_ICON_TEMP  "T:MintPRINT-printer-icon.img"
 #define MP_PRINTER_ICON_PIXELS (MP_PRINTER_ICON_SIZE * MP_PRINTER_ICON_SIZE)
