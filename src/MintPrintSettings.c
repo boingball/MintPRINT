@@ -5407,14 +5407,25 @@ static void mp_refresh_printer_icon(void) {
         return;
     }
 
-    /* Fast path: the processed 35x35 RGBA cache includes the source URI.
-     * If it still matches, no HTTP transfer and no PNG decode are needed. */
-    if (mp_load_printer_icon_cache(TRUE))
-        return;
-
+    /* This only ever runs from an explicit Query press (the one call
+     * site is the Query success handler), which already does a much
+     * heavier IPP round-trip - so always attempt a genuinely fresh
+     * fetch+decode here rather than trusting a same-URI cache hit
+     * forever. That used to mean a single bad decode (a truncated
+     * transfer, or a genuinely malformed source image the printer
+     * briefly served) got written once and then displayed on every
+     * later Query indefinitely, since the printer's icon URI itself
+     * doesn't change - reported as "the corrupted image keeps
+     * displaying, guess it's cached". Query is now the icon's one
+     * chance to self-heal; the cache is only a fallback for when the
+     * live attempt itself fails (printer briefly unreachable etc.), not
+     * an assumption that a URI match means the art is still good. */
     if (mp_fetch_printer_icon_file(printer_icon_uri) &&
-        mp_load_printer_icon_rgba())
+        mp_load_printer_icon_rgba()) {
         mp_save_printer_icon_cache();
+    } else {
+        mp_load_printer_icon_cache(TRUE);
+    }
 
     DeleteFile((CONST_STRPTR)MP_PRINTER_ICON_TEMP);
 }
