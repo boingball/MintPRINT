@@ -603,8 +603,13 @@ char printer_make_model[128] = "";
 char printer_icon_uri[256] = "";
 
 #define MP_PRINTER_ICON_LEFT  411
-#define MP_PRINTER_ICON_TOP   117
-#define MP_PRINTER_ICON_SIZE   35
+/* TOP/SIZE fill the full gap between the ink/toner panel above (its
+ * bottom row is MP_MARKER_AREA_BOTTOM, 115) and the Sides/Quality row
+ * below (TopEdge 153) - 37 is the largest size that fits both exactly
+ * flush with zero overlap; growing it further means moving one of those
+ * two neighbours too. */
+#define MP_PRINTER_ICON_TOP   116
+#define MP_PRINTER_ICON_SIZE   37
 #define MP_PRINTER_ICON_TEMP  "T:MintPRINT-printer-icon.img"
 #define MP_PRINTER_ICON_PIXELS (MP_PRINTER_ICON_SIZE * MP_PRINTER_ICON_SIZE)
 #define MP_PRINTER_ICON_MAX_SOURCE_DIM 1024
@@ -7304,10 +7309,12 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
         return NULL;
     }
 
-    // Media dropdown
+    // Media dropdown - same width as Scaling below it now that the
+    // prettified labels ("A4 (Bypass Tray)") need far less room than the
+    // raw IPP keywords ("iso_a4_210x297mm (by-pass-tray)") did.
     ng.ng_LeftEdge = 130;
     ng.ng_TopEdge = 117 + topborder;
-    ng.ng_Width = 270;
+    ng.ng_Width = 150;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"Media (Tray):";
     ng.ng_GadgetID = GAD_MEDIA_DROPDOWN;
