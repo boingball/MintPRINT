@@ -12,27 +12,42 @@
 ;
 ; See docs/OS31_SUPPORT.md in the source repository for why two driver
 ; builds exist at all. This script detects which one this machine needs
-; from exec.library's own version (every AmigaOS release bumps exec.library
-; and printer.device together, so exec's version is a reliable stand-in -
-; see mp_needs_os31_driver() in src/MintPrintSettings.c), offers that as
-; the default choice, and lets you override it if you know better.
+; from workbench.library's version (see mp_needs_os31_driver()/
+; mp_os_version() in src/MintPrintSettings.c, which does the same native
+; check this script mirrors), offers that as the default choice, and lets
+; you override it if you know better.
 
 (set #mp-appname "MintPRINT")
 
-; (getversion) with NO arguments returns the CURRENTLY RUNNING Kickstart/
-; exec.library version - not (getversion "exec.library"), which tells
-; Installer to scan a FILE called "exec.library" for a "$VER:" string.
-; exec.library is resident in Kickstart ROM, not a plain LIBS: file, so
-; that file-based lookup finds nothing and silently returns 0 (seen as
-; "Detected exec.library v0" - always the classic-driver branch,
-; regardless of the real system). The no-arg form returns version and
-; revision packed together (version in the high word), matching
-; SysBase->LibNode.lib_Version/lib_Revision - split it out below rather
-; than printing the raw packed integer.
+; (getversion "workbench.library") opens workbench.library itself and
+; returns its version/revision packed together (version in the high
+; word), the same way the no-arg Kickstart/exec.library form does -
+; split it out below rather than printing the raw packed integer.
+;
+; workbench.library, not exec.library, is what's checked: AmigaOS 3.9 (and
+; other software-only OS updates layered on an existing Kickstart ROM)
+; commonly leaves exec.library's own version sitting at whatever the ROM
+; shipped with (3.1's exec v40 is common) even though workbench.library
+; and the rest of LIBS: - including the parts printer.device actually
+; depends on here - get bumped to V44+ (and higher again after Boing
+; Bags). Checking the bare/Kickstart exec.library version here previously
+; misdetected such a 3.9 system as needing the classic pre-V44 driver.
+(set #wb-version (getversion "workbench.library"))
+(set #wb-major (/ #wb-version 65536))
+(set #wb-minor (- #wb-version (* #wb-major 65536)))
+
+; A 0 result means workbench.library itself could not be found/opened -
+; should not happen on a real system, but fall back to the Kickstart/
+; exec.library reading rather than risk mis-defaulting to the classic
+; driver on an unknown one.
 (set #exec-version (getversion))
 (set #exec-major (/ #exec-version 65536))
 (set #exec-minor (- #exec-version (* #exec-major 65536)))
-(set #is-v44 (>= #exec-major 44))
+
+(set #have-wb-version (> #wb-major 0))
+(set #os-major (if #have-wb-version #wb-major #exec-major))
+(set #os-minor (if #have-wb-version #wb-minor #exec-minor))
+(set #is-v44 (>= #os-major 44))
 
 (set #os-hint
     (if #is-v44
@@ -43,7 +58,7 @@
 
 (message
     "MintPRINT setup\n\n"
-    "Detected exec.library v" #exec-major "." #exec-minor " on this system.\n\n"
+    "Detected workbench.library v" #os-major "." #os-minor " on this system.\n\n"
     #os-hint
 )
 
@@ -52,7 +67,7 @@
         (prompt
             "What AmigaOS / printer.device generation is this machine "
             "actually running? The option below was auto-detected from "
-            "exec.library's version - change it only if you know it's "
+            "workbench.library's version - change it only if you know it's "
             "wrong (for example, a 3.1 system with a hand-updated "
             "printer.device)."
         )

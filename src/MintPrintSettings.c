@@ -3572,29 +3572,58 @@ int convert_to_pwg(unsigned char *rgb, int w, int h, unsigned char **pwg_out, in
  * ------------------------------------------------------------------- */
 
 /* The extended V44 printer-driver interface (PPCF_EXTENDED / PRTA_NoIO /
- * PRTA_8BitGuns) shipped with AmigaOS 3.5, whose exec.library is v44.
+ * PRTA_8BitGuns) shipped with AmigaOS 3.5, whose components are v44.
  * Every component released together with a given AmigaOS version shares
- * that version's major library number, so exec.library's own version is a
- * reliable stand-in for "does this machine's printer.device understand
- * the V44 tags" without having to open printer.device just to ask. */
+ * that version's major library number - except exec.library itself on a
+ * software-only OS update layered on an existing Kickstart ROM. AmigaOS
+ * 3.9 is exactly this: real-world 3.9 systems keep whatever exec.library
+ * version their Kickstart ROM shipped with (3.1's exec v40 is common)
+ * while workbench.library and the rest of LIBS: - including the parts
+ * printer.device actually depends on here - get bumped to V44+ (v45,
+ * higher again after Boing Bags). Checking exec.library's version alone
+ * misdetected such a 3.9 system as needing the classic pre-V44 driver.
+ * workbench.library, being a plain LIBS: file every such update actually
+ * replaces, tracks "what AmigaOS is genuinely running" far more reliably
+ * than the Kickstart-resident exec.library does. */
 #define MP_EXEC_VERSION_V44 44
 
+/* Falls back to exec.library's version only if workbench.library can't be
+ * opened at all - should never happen on a real system, but that is a
+ * safer failure mode than mis-defaulting to the classic driver on an
+ * unknown one. */
+static UWORD mp_os_version(void) {
+    struct Library *wb_base = OpenLibrary((CONST_STRPTR)"workbench.library", 0);
+    UWORD ver;
+
+    if (!wb_base) return SysBase->LibNode.lib_Version;
+
+    ver = wb_base->lib_Version;
+    CloseLibrary(wb_base);
+    return ver;
+}
+
 static BOOL mp_needs_os31_driver(void) {
-    return SysBase->LibNode.lib_Version < MP_EXEC_VERSION_V44;
+    return mp_os_version() < MP_EXEC_VERSION_V44;
 }
 
 /* Short friendly label for EasyRequest prompts and the About box - kept
- * deliberately brief (no exec.library version number) because EasyRequest
- * sizes its window to the single longest \n-delimited line with no
- * wrapping, and a long line here easily pushes the whole requester off a
- * low-resolution AmigaOS screen. The exec.library numbers below are the
- * ones real AmigaOS 3.x releases shipped with; any version outside this
- * list (older or a future release) still gets a short label rather than
- * being left blank - see printf() callers for the exec.library number
- * itself, logged separately to the on-screen output box where a longer
- * line just wraps instead of resizing a window. */
+ * deliberately brief (no version number) because EasyRequest sizes its
+ * window to the single longest \n-delimited line with no wrapping, and a
+ * long line here easily pushes the whole requester off a low-resolution
+ * AmigaOS screen. workbench.library's version, not exec.library's, is
+ * what's checked (see mp_os_version() above) - the numbers below are the
+ * ones real AmigaOS 3.x releases shipped workbench.library with on an
+ * unpatched system; a 3.9 install with Boing Bags applied commonly reads
+ * higher than the plain "45" below and falls through to the generic
+ * fallback label instead, which is only cosmetic - mp_needs_os31_driver()'s
+ * own >=44 comparison does not depend on hitting one of these exact
+ * numbers. Any version outside this list (older, a future release, or a
+ * patched 3.9) still gets a short label rather than being left blank -
+ * see printf() callers for the version number itself, logged separately
+ * to the on-screen output box where a longer line just wraps instead of
+ * resizing a window. */
 static void mp_describe_amiga_os(char *buf, size_t bufsize) {
-    UWORD ver = SysBase->LibNode.lib_Version;
+    UWORD ver = mp_os_version();
     const char *label;
 
     switch (ver) {
@@ -3609,7 +3638,7 @@ static void mp_describe_amiga_os(char *buf, size_t bufsize) {
     if (label) {
         snprintf(buf, bufsize, "AmigaOS %s", label);
     } else {
-        snprintf(buf, bufsize, "AmigaOS (exec v%u)", (unsigned)ver);
+        snprintf(buf, bufsize, "AmigaOS (v%u)", (unsigned)ver);
     }
 }
 
@@ -3908,8 +3937,8 @@ static void check_and_offer_driver_install(struct Window *win) {
     CONST_STRPTR variant_name = mp_needs_os31_driver() ? "OS3.0/3.1" : "V44+";
 
     mp_describe_amiga_os(os_desc, sizeof(os_desc));
-    printf("Detected %s (exec.library v%u) - using the %s driver (%s).\n",
-           os_desc, (unsigned)SysBase->LibNode.lib_Version, variant_name, src_path);
+    printf("Detected %s (workbench.library v%u) - using the %s driver (%s).\n",
+           os_desc, (unsigned)mp_os_version(), variant_name, src_path);
 
     if (!mp_file_exists(src_path)) {
         printf("Bundled driver not found at %s; skipping install check.\n", src_path);

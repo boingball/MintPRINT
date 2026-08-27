@@ -47,8 +47,12 @@ testing it. Driver behaviour is unchanged (still driver revision 41.1).
   `docs/OS31_SUPPORT.md`. There is no longer a "which archive do I
   download" question.
 - **Automatic driver selection.** MintPrint Settings now reads
-  `SysBase->LibNode.lib_Version` at startup (`mp_needs_os31_driver()` /
-  `mp_driver_src_path()` in `src/MintPrintSettings.c`) and installs or
+  `workbench.library`'s version at startup (`mp_os_version()` /
+  `mp_needs_os31_driver()` / `mp_driver_src_path()` in
+  `src/MintPrintSettings.c` - checked instead of exec.library's, since
+  AmigaOS 3.9 and similar software-only OS updates can leave
+  exec.library's own version at whatever the Kickstart ROM shipped with)
+  and installs or
   offers to update whichever `Drivers/MintPRINT-<variant>/MintPRINT` this
   machine's printer.device generation actually needs. The detected AmigaOS
   version and chosen driver are shown in the install/update prompts and the
@@ -282,7 +286,7 @@ AmigaOS 3.2, 3.5, 3.9 (and later), `Drivers/MintPRINT-OS31/` for the
 classic pre-V44 AmigaOS 3.0/3.1 build (see `docs/OS31_SUPPORT.md`).
 
 Run `MintPrintSettings` - it detects which driver this machine needs from
-exec.library's version, tells you what it found, and offers to
+workbench.library's version, tells you what it found, and offers to
 install/update a missing or out-of-date `DEVS:Printers/MintPRINT` from the
 matching `Drivers/` subdrawer. **Reboot after any driver install or
 update** - a driver segment already resident in memory will not pick up a
