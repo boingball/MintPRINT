@@ -628,6 +628,18 @@ int num_marker_low_levels = 0;
 int marker_high_levels[MAX_MARKERS];
 int num_marker_high_levels = 0;
 
+/* Printer status (RFC 8011 5.4.11 printer-state / 5.4.12
+ * printer-state-reasons), reduced to one short word/phrase shown next to
+ * the ink/toner strips - see mp_printer_status_label() near the drawing
+ * code. Live-only, same as the marker-* fields above: reset alongside them,
+ * never written to the capability cache file. printer_state_value is the
+ * raw IPP enum (3 idle, 4 processing, 5 stopped); 0 means "not queried
+ * yet". printer-state-reasons is itself a 1setOf keyword, so it needs the
+ * same parallel-array treatment as marker_names/marker_colors/etc. */
+int printer_state_value = 0;
+char printer_state_reasons[MAX_MARKERS][MAX_ATTR_LEN];
+int num_printer_state_reasons = 0;
+
 STRPTR *unit_dropdown_labels = mp_unit_label_ptrs;
 /* MintPRINT prefs #6: queried job defaults are saved into Unit0. */
 /* MintPRINT prefs #7: saved-state placeholders, ghosting, layout and engine selector. */
@@ -2433,6 +2445,8 @@ static void mp_cache_clear_capabilities(void) {
     num_marker_levels = 0;
     num_marker_low_levels = 0;
     num_marker_high_levels = 0;
+    printer_state_value = 0;
+    num_printer_state_reasons = 0;
 }
 
 static BOOL mp_cache_write_file(CONST_STRPTR filename,
@@ -3072,10 +3086,65 @@ static void mp_release_marker_pens(void) {
     }
 }
 
+/* Reduces printer-state/printer-state-reasons to one short word/phrase
+ * shown to the right of the "Ink/Toner:" header, on the same line - see
+ * mp_draw_marker_strips(). That row is only ~12 characters wide after
+ * "Ink/Toner:" itself at the window's minimum size, so every label here
+ * is deliberately kept at or under that (checked against the longest,
+ * "Out of Paper", 12 chars) rather than spelled out in full - there is no
+ * spare row to give this its own line without either overlapping the
+ * printer icon just below (MP_PRINTER_ICON_TOP) or the Sides/DPI cycle
+ * gadgets below that.
+ *
+ * Matching is substring-based against the handful of reasons someone
+ * actually needs to act on, most severe first, rather than enumerating
+ * the full PWG reason-keyword registry (RFC 8011 5.4.12) - real printers
+ * commonly suffix these with "-error"/"-warning"/"-report" (e.g.
+ * "media-jam-error"), which a substring match still catches. An
+ * unrecognised reason falls back to the bare printer-state enum (RFC
+ * 8011 5.4.11) rather than being shown raw and risking a much longer,
+ * unbounded string on this same tight row. Blank before the first
+ * Query. */
+static void mp_printer_status_label(char *buf, size_t bufsize) {
+    static const struct { const char *needle; const char *label; } known_reasons[] = {
+        { "jam",                 "Jam"          },
+        { "door-open",           "Door Open"    },
+        { "cover-open",          "Door Open"    },
+        { "interlock-open",      "Door Open"    },
+        { "marker-supply-empty", "Toner Empty"  },
+        { "toner-empty",         "Toner Empty"  },
+        { "media-empty",         "Out of Paper" },
+        { "marker-supply-low",   "Supply Low"   },
+        { "toner-low",           "Supply Low"   },
+    };
+    size_t k;
+    int i;
+
+    if (!buf || !bufsize) return;
+    buf[0] = '\0';
+
+    for (k = 0; k < sizeof(known_reasons) / sizeof(known_reasons[0]); k++) {
+        for (i = 0; i < num_printer_state_reasons; i++) {
+            if (strstr(printer_state_reasons[i], known_reasons[k].needle)) {
+                snprintf(buf, bufsize, "%s", known_reasons[k].label);
+                return;
+            }
+        }
+    }
+
+    switch (printer_state_value) {
+        case 3: snprintf(buf, bufsize, "Ready");    break;
+        case 4: snprintf(buf, bufsize, "Busy");     break;
+        case 5: snprintf(buf, bufsize, "Stopped");  break;
+        default: break; /* not yet queried - leave blank */
+    }
+}
+
 static void mp_draw_marker_strips(void) {
     struct RastPort *rp;
     int area_left, area_right, area_top, area_bottom;
     int grid_top, cell_width, count, i;
+    char status_label[24];
 
     if (!window || !screen || !font) return;
 
@@ -3102,6 +3171,19 @@ static void mp_draw_marker_strips(void) {
     Move(rp, area_left, area_top + font->tf_Baseline);
     Text(rp, "Ink/Toner:", 10);
 
+    /* Printer status shares this header row, right-aligned - there is no
+     * spare row below the grid to give it its own line without reaching
+     * into the printer icon just below (MP_PRINTER_ICON_TOP) or the
+     * Sides/DPI cycle gadgets below that. See mp_printer_status_label()
+     * for why every possible label is kept short enough to fit here. */
+    mp_printer_status_label(status_label, sizeof(status_label));
+    if (status_label[0]) {
+        int len = (int)strlen(status_label);
+        SetAPen(rp, 1);
+        Move(rp, area_right - len * 8, area_top + font->tf_Baseline);
+        Text(rp, status_label, len);
+    }
+
     count = mp_marker_count();
     if (count <= 0) {
         Move(rp,
@@ -3111,9 +3193,9 @@ static void mp_draw_marker_strips(void) {
         return;
     }
 
+    grid_top = area_top + font->tf_YSize + 3;
     cell_width =
         (area_right - area_left - MP_MARKER_COL_GAP) / MP_MARKER_COLS;
-    grid_top = area_top + font->tf_YSize + 3;
 
     for (i = 0; i < count; i++) {
         int col = i % MP_MARKER_COLS;
@@ -5298,6 +5380,8 @@ int query_printer_attributes(const char *ip, int port, char *response, int maxle
     num_marker_levels = 0;
     num_marker_low_levels = 0;
     num_marker_high_levels = 0;
+    printer_state_value = 0;
+    num_printer_state_reasons = 0;
 
     // Allocate buffers for parsing
     char *name = malloc(512);
@@ -5368,7 +5452,7 @@ int query_printer_attributes(const char *ip, int port, char *response, int maxle
     {
         static const char *mp_requested_attrs[] = {
             "media-source-supported", "media-ready", "printer-input-tray",
-            "printer-state", "print-color-mode-supported",
+            "printer-state", "printer-state-reasons", "print-color-mode-supported",
             "print-scaling-supported", "print-quality-supported",
             "printer-resolution-default", "printer-resolution-supported",
             "pwg-raster-document-resolution-supported",
@@ -5886,11 +5970,19 @@ query_receive_pump_gui:
                     } else if (strcmp(name, "printer-state") == 0 &&
                                value_tag == 0x23 && value_len == 4) {
                         /* printer-state is an IPP enum (RFC 8011 5.4.11),
-                         * not the 0x21 'integer' tag - diagnostic only, does
-                         * not affect GUI behaviour. */
-                        unsigned long state = mp_ipp_decode_be32(
+                         * not the 0x21 'integer' tag. Fed into
+                         * mp_printer_status_label() and shown under the
+                         * ink/toner strips - see mp_draw_marker_strips(). */
+                        printer_state_value = (int)mp_ipp_decode_be32(
                             (const UBYTE *)ipp_start + pos - value_len);
-                        printf("Printer state: %lu\n", state);
+                        printf("Printer state: %d\n", printer_state_value);
+                    } else if (strcmp(name, "printer-state-reasons") == 0 &&
+                               value_tag == 0x44) {
+                        /* 1setOf keyword (RFC 8011 5.4.12), same parallel-
+                         * array shape as marker-names/marker-colors/etc.
+                         * above - see mp_printer_status_label(). */
+                        store_value(printer_state_reasons,
+                                    &num_printer_state_reasons, value);
                     } else if (strcmp(name, "print-color-mode-supported") == 0 && value_tag == 0x44) {
                         store_value(supported_print_modes, &num_supported_print_modes, value);
                         printf("Added print-color-mode-supported: %s\n", value); }

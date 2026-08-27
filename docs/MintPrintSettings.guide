@@ -113,6 +113,11 @@ real answer to fill in, or narrow down, most of the window:
       it - see @{" Duplex (Sides) " LINK "Duplex"}.
     - The printer's make/model, shown once Save has been used at least
       once for this Unit.
+    - A short status word next to the "Ink/Toner:" ink levels - "Ready",
+      "Busy", "Stopped", or a specific problem such as "Jam", "Door Open",
+      "Toner Empty", "Out of Paper" or "Supply Low", read from the
+      printer's own reported state. Blank until Query has been run at
+      least once.
 
 A field showing "Not Detected" simply means nothing has been queried
 and saved yet for the currently selected Unit; it is not an error.
