@@ -3365,6 +3365,13 @@ struct MPSidesHintImage {
     int width;
     int height;
     BOOL attempted;
+    /* Cached nearest-screen-pen index per pixel (width*height entries) -
+     * see mp_sides_hint_ensure_pens(). Rebuilt only when the screen
+     * palette actually changes, not on every redraw. */
+    UBYTE *pens;
+    BOOL pens_valid;
+    ULONG cached_palette[3 * 256];
+    int cached_pen_count;
 };
 
 struct MPSidesHintPen {
@@ -3458,6 +3465,45 @@ static UBYTE mp_sides_hint_nearest_pen(const ULONG *palette,
     return (UBYTE)best;
 }
 
+/* mp_sides_hint_nearest_pen() is a linear scan over the whole screen
+ * palette (up to 256 entries) - fine once, but mp_draw_sides_hint() used
+ * to call it for every pixel of the 32x32 hint image on every single
+ * redraw (Query, every gadget click, every window refresh, ...), up to
+ * ~1024*256 distance computations each time for no reason: the palette
+ * essentially never changes between redraws. Cache the per-pixel result
+ * here and only redo the scan when the palette actually differs from the
+ * one the cache was built against (a real screen depth/mode change,
+ * which is rare), rather than unconditionally every redraw. */
+static BOOL mp_sides_hint_ensure_pens(struct MPSidesHintImage *image,
+                                      const ULONG *palette, int pen_count) {
+    int pixels = image->width * image->height;
+    int i;
+
+    if (image->pens_valid && image->cached_pen_count == pen_count &&
+        memcmp(image->cached_palette, palette,
+               (size_t)pen_count * 3 * sizeof(ULONG)) == 0) {
+        return TRUE;
+    }
+
+    if (!image->pens) {
+        image->pens = AllocVec((ULONG)pixels, MEMF_ANY);
+        if (!image->pens) return FALSE;
+    }
+
+    for (i = 0; i < pixels; ++i) {
+        image->pens[i] = mp_sides_hint_nearest_pen(
+            palette, pen_count,
+            image->rgb[i * 3 + 0], image->rgb[i * 3 + 1],
+            image->rgb[i * 3 + 2]);
+    }
+
+    memcpy(image->cached_palette, palette,
+           (size_t)pen_count * 3 * sizeof(ULONG));
+    image->cached_pen_count = pen_count;
+    image->pens_valid = TRUE;
+    return TRUE;
+}
+
 static void mp_draw_sides_hint(void) {
     struct MPSidesHintImage *image;
     ULONG screen_palette[3 * 256];
@@ -3502,6 +3548,9 @@ static void mp_draw_sides_hint(void) {
         return;
 
     image = &mp_sides_hint_images[index];
+    if (!mp_sides_hint_ensure_pens(image, screen_palette, screen_pen_count))
+        return;
+
     draw_w = image->width < MP_SIDES_HINT_SIZE
            ? image->width : MP_SIDES_HINT_SIZE;
     draw_h = image->height < MP_SIDES_HINT_SIZE
@@ -3511,12 +3560,7 @@ static void mp_draw_sides_hint(void) {
         LONG last_pen = -1;
         for (x = 0; x < draw_w; ++x) {
             int pixel = y * image->width + x;
-            UBYTE r = image->rgb[pixel * 3 + 0];
-            UBYTE g = image->rgb[pixel * 3 + 1];
-            UBYTE b = image->rgb[pixel * 3 + 2];
-            UBYTE pen = mp_sides_hint_nearest_pen(screen_palette,
-                                                   screen_pen_count,
-                                                   r, g, b);
+            UBYTE pen = image->pens[pixel];
 
             if ((LONG)pen != last_pen) {
                 SetAPen(rp, pen);
@@ -3535,9 +3579,15 @@ static void mp_free_sides_hint_images(void) {
             FreeVec(mp_sides_hint_images[i].rgb);
             mp_sides_hint_images[i].rgb = NULL;
         }
+        if (mp_sides_hint_images[i].pens) {
+            FreeVec(mp_sides_hint_images[i].pens);
+            mp_sides_hint_images[i].pens = NULL;
+        }
         mp_sides_hint_images[i].width = 0;
         mp_sides_hint_images[i].height = 0;
         mp_sides_hint_images[i].attempted = FALSE;
+        mp_sides_hint_images[i].pens_valid = FALSE;
+        mp_sides_hint_images[i].cached_pen_count = 0;
     }
 }
 
