@@ -7276,7 +7276,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // still comfortably inside that at Topaz80's 8px/char, and the box's
     // right edge (130+140=270) now sits well clear of the ink panel at
     // x=320 instead of crowding it at the old 310.
-    ng.ng_LeftEdge = 130;
+    ng.ng_LeftEdge = 135;
     ng.ng_TopEdge = 78 + topborder;
     ng.ng_Width = 140;
     ng.ng_Height = 12;
@@ -7294,7 +7294,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // Enable/disable diagnostic logs and retained rendered jobs. Same
     // width as Printer Engine above so the two stacked cycle gadgets
     // stay visually aligned.
-    ng.ng_LeftEdge = 130;
+    ng.ng_LeftEdge = 135;
     ng.ng_TopEdge = 95 + topborder;
     ng.ng_Width = 140;
     ng.ng_Height = 12;
@@ -7312,7 +7312,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // Media dropdown - same width as Scaling below it now that the
     // prettified labels ("A4 (Bypass Tray)") need far less room than the
     // raw IPP keywords ("iso_a4_210x297mm (by-pass-tray)") did.
-    ng.ng_LeftEdge = 130;
+    ng.ng_LeftEdge = 135;
     ng.ng_TopEdge = 117 + topborder;
     ng.ng_Width = 150;
     ng.ng_Height = 12;
@@ -7331,7 +7331,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     media_dropdown = gad;  // Save it globally
 
     // Scaling dropdown
-    ng.ng_LeftEdge = 130;
+    ng.ng_LeftEdge = 135;
     ng.ng_TopEdge = 135 + topborder;
     ng.ng_Width = 150;
     ng.ng_Height = 12;
@@ -7344,7 +7344,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     TAG_DONE);
 
     // Quality dropdown
-    ng.ng_LeftEdge = 130;
+    ng.ng_LeftEdge = 135;
     ng.ng_TopEdge = 153 + topborder;
     ng.ng_Width = 150;
     ng.ng_Height = 12;
@@ -7375,7 +7375,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     }
 
     // Print Mode radio buttons
-    ng.ng_LeftEdge = 130;
+    ng.ng_LeftEdge = 135;
     ng.ng_TopEdge = 171 + topborder;
     ng.ng_Width = 150;
     ng.ng_Height = 12;
