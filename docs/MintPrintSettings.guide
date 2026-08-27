@@ -3,8 +3,6 @@
 @author "MintPRINT project (boingball)"
 @(c) "Copyright (c) 2026 Darren Banfi (boingball). MIT License."
 @width 74
-@wordwrap
-@smartwrap
 
 @node Main "MintPrint Settings Help"
 @toc Main
