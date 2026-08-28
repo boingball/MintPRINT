@@ -2,7 +2,7 @@ Short:        IPP/AirPrint driver and setup tool
 Author:       Darren Banfi (boingball)
 Uploader:     boingball@gmail.com
 Type:         driver/print
-Version:      1.2.6
+Version:      1.2.7
 Requires:     68000+; AmigaOS 3.0+; TCP/IP stack providing bsdsocket.library
 Architecture: m68k-amigaos >= 3.0.0
 
@@ -196,6 +196,24 @@ from Anthropic Claude.
 
 History
 -------
+
+1.2.7  Fixed two-sided printing of plain text, driver revision 41.4.
+
+       - Printing via PRT:/CMD_WRITE (e.g. Type ... TO PRT:) with Sides set
+         to two-sided-long-edge or two-sided-short-edge still produced a
+         stack of separate one-sided sheets instead of a real duplex print.
+         The text path (driver/command_table.c) submitted one independent
+         IPP job per page with sides= hardcoded to one-sided, a stopgap
+         carried since text printing was first added, pending real-hardware
+         duplex coverage.
+       - mp_text_print_document() now detects a duplex request on the PWG
+         Raster engine and accumulates the whole document into one
+         multi-page job (mirroring the graphics path's existing duplex
+         handling in driver_core.c) instead of one job per page, submitting
+         once with the real sides= attribute; backside pages needing PWG's
+         reverse feed order are buffered and replayed back-to-front the
+         same way the graphics duplex path already does. Confirmed fixed on
+         real hardware.
 
 1.2.6  Fixed monochrome jobs printing in colour, driver revision 41.3.
 

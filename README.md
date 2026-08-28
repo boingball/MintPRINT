@@ -32,6 +32,29 @@ printer.device driver plus a GUI setup tool.
 <img width="525" height="327" alt="image" src="https://github.com/user-attachments/assets/ba4cfd1f-8b0f-4aee-91b9-a6b221712ca5" />
 
 
+## What's new in 1.2.7
+
+MintPRINT 1.2.7 is a driver bug fix: **`PRT:`/CLI text printing now honours
+real duplex.** Driver revision **41.4**.
+
+- **Fixed two-sided printing of plain text.** Printing via `PRT:`/`CMD_WRITE`
+  (e.g. `type file >PRT:` or AmigaDOS `Type ... TO PRT:`) with `Sides` set to
+  two-sided-long-edge or two-sided-short-edge still produced a stack of
+  separate one-sided sheets instead of a real duplex print - see
+  [issue #68](https://github.com/boingball/MintPRINT/issues/68). The text
+  path (`driver/command_table.c`) submitted one independent IPP job per page
+  with `sides=` hardcoded to `one-sided`, a stopgap the code had carried
+  since text printing was first added, explicitly pending real-hardware
+  duplex coverage. `mp_text_print_document()` now detects a duplex request
+  on the PWG Raster engine and accumulates the whole document into one
+  multi-page job (mirroring the graphics path's existing duplex handling in
+  `driver_core.c`) instead of one job per page, submitting once with the
+  real `sides=` attribute; backside pages that need PWG's reverse feed order
+  are buffered and replayed back-to-front the same way the graphics duplex
+  path already does. Non-duplex text jobs and non-PWG engines are
+  unaffected. **Confirmed fixed on real hardware** by the issue #68
+  reporter.
+
 ## What's new in 1.2.6
 
 MintPRINT 1.2.6 is a driver bug fix: **Monochrome now actually prints in
@@ -446,8 +469,8 @@ be added with its AmigaOS version, TCP/IP stack, engine and exact print options.
 
 ## Status
 
-MintPRINT is now a real, working app: version **1.2.6** GUI with **driver
-revision 41.3**, with multiple printers confirmed fully working over IPP/AirPrint
+MintPRINT is now a real, working app: version **1.2.7** GUI with **driver
+revision 41.4**, with multiple printers confirmed fully working over IPP/AirPrint
 from real Amiga hardware. It's still actively developed and not every printer
 is confirmed yet, so check the
 [printer compatibility page](docs/PRINTER_COMPATIBILITY.md) for your specific

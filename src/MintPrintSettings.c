@@ -146,7 +146,7 @@ static struct MPTestPrintJob test_print_job;
 
 // Define the USED macro for GCC
 #define USED __attribute__((used))
-#define MINTPRINT_SETTINGS_VERSION "1.2.6"
+#define MINTPRINT_SETTINGS_VERSION "1.2.7"
 #define MINTPRINT_DRIVER_DEST ((CONST_STRPTR)"DEVS:Printers/MintPRINT")
 
 /* MintPrint Settings now ships as a single drawer containing both bundled
