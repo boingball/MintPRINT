@@ -78,7 +78,7 @@ printerName:
  * binary for that release.
  */
 mp_driver_version_marker:
-        .asciz  "$VER: MintPRINT 41.3 (27.08.2026)"
+        .asciz  "$VER: MintPRINT 41.4 (28.08.2026)"
         .even
 
 /* Human-readable marker useful when inspecting a built driver. */

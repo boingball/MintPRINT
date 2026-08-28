@@ -46,6 +46,7 @@
 #define MP_TEXT_FILE_PDF  ((CONST_STRPTR)"T:MintPRINT-text.pdf")
 #define MP_TEXT_FILE_PS   ((CONST_STRPTR)"T:MintPRINT-text.ps")
 #define MP_TEXT_FILE_URF  ((CONST_STRPTR)"T:MintPRINT-text.urf")
+#define MP_TEXT_FILE_BACK ((CONST_STRPTR)"T:MintPRINT-text-back.rgb")
 
 enum {
     MP_TEXT_ENGINE_JPEG = 0,
@@ -93,6 +94,21 @@ static MPPwgEncoder g_text_pwg;
 static MPPdfEncoder g_text_pdf;
 static MPPostScriptEncoder g_text_postscript;
 static MPUrfEncoder g_text_urf;
+/* Backside row reordering for duplex PRT text jobs - see
+ * mp_text_pwg_accept_row()/mp_text_pwg_replay_backside() below. Mirrors
+ * driver_core.c's g_pwg_aux_open/g_pwg_aux_bytes, kept as separate state
+ * since the text and graphics paths never render concurrently but each
+ * still own their PWG encoder instance. */
+static BOOL g_text_pwg_aux_open = FALSE;
+static ULONG g_text_pwg_aux_bytes = 0;
+
+static BOOL mp_text_streq(const char *a, const char *b)
+{
+    ULONG i = 0;
+    if (!a || !b) return FALSE;
+    while (a[i] && b[i] && a[i] == b[i]) ++i;
+    return a[i] == 0 && b[i] == 0;
+}
 
 static char unsupported[] = "\377";
 
@@ -492,6 +508,296 @@ static ULONG mp_text_scratch_size(int engine, ULONG width)
     }
 }
 
+static void mp_text_pwg_close_aux(void)
+{
+    if (g_text_pwg_aux_open) {
+        mp_spool_aux_close();
+        g_text_pwg_aux_open = FALSE;
+    }
+    mp_spool_job_delete(MP_TEXT_FILE_BACK);
+    g_text_pwg_aux_bytes = 0;
+}
+
+/* Appends one already-PWG-encoded row to the deferred backside store
+ * (length-prefixed the same way driver_core.c's mp_pwg_accept_row() does),
+ * or writes it straight through when no reordering is needed. */
+static BOOL mp_text_pwg_accept_row(BOOL defer, const UBYTE *rgb)
+{
+    const unsigned char *encoded;
+    unsigned long encoded_length;
+    UBYTE be[4];
+
+    if (!defer)
+        return mp_pwg_write_scanline(&g_text_pwg, rgb) ? TRUE : FALSE;
+
+    if (!g_text_pwg_aux_open ||
+        !mp_pwg_encode_scanline(&g_text_pwg, rgb, &encoded, &encoded_length) ||
+        encoded_length > 0xffffffffUL - 4UL - g_text_pwg_aux_bytes) {
+        return FALSE;
+    }
+
+    be[0] = (UBYTE)(encoded_length >> 24);
+    be[1] = (UBYTE)(encoded_length >> 16);
+    be[2] = (UBYTE)(encoded_length >> 8);
+    be[3] = (UBYTE)encoded_length;
+    if (!mp_spool_aux_write((const UBYTE *)encoded, (ULONG)encoded_length) ||
+        !mp_spool_aux_write(be, 4UL)) {
+        return FALSE;
+    }
+    g_text_pwg_aux_bytes += (ULONG)encoded_length + 4UL;
+    return TRUE;
+}
+
+/* Replays rows stored by mp_text_pwg_accept_row() in reverse, turning the
+ * forward render order this file's row loop needs (see mp_text_bit()'s
+ * dependency on ascending rows within a text line, in
+ * mp_text_print_page_duplex() below) into the reversed feed order a
+ * two-sided-*'s reverse-side sheet needs on the wire. Byte-for-byte the
+ * same walk as driver_core.c's mp_pwg_replay_backside(). */
+static BOOL mp_text_pwg_replay_backside(ULONG rows, UBYTE *scratch,
+                                        ULONG scratch_bytes)
+{
+    ULONG out_row;
+    ULONG cursor;
+
+    if (!g_text_pwg_aux_open) return TRUE;
+
+    cursor = g_text_pwg_aux_bytes;
+
+    for (out_row = 0; out_row < rows; ++out_row) {
+        UBYTE be[4];
+        ULONG encoded_length;
+
+        if (cursor < 4UL || !mp_spool_aux_read(cursor - 4UL, be, 4UL)) {
+            mp_text_log("MintPRINT: PRT text backside row length read failed");
+            return FALSE;
+        }
+        encoded_length = ((ULONG)be[0] << 24) | ((ULONG)be[1] << 16) |
+                         ((ULONG)be[2] << 8) | (ULONG)be[3];
+        if (!encoded_length || encoded_length > scratch_bytes ||
+            cursor < encoded_length + 4UL) {
+            mp_text_log("MintPRINT: PRT text backside row length invalid");
+            return FALSE;
+        }
+        cursor -= encoded_length + 4UL;
+        if (!mp_spool_aux_read(cursor, scratch, encoded_length)) {
+            mp_text_log("MintPRINT: PRT text backside row read failed");
+            return FALSE;
+        }
+        if (!mp_pwg_write_encoded_scanline(&g_text_pwg, scratch,
+                                           encoded_length)) {
+            mp_text_log("MintPRINT: PRT text backside encode failed");
+            return FALSE;
+        }
+    }
+
+    if (cursor != 0) {
+        mp_text_log("MintPRINT: PRT text backside row store trailing data");
+        return FALSE;
+    }
+
+    mp_text_pwg_close_aux();
+    return TRUE;
+}
+
+/* Duplex counterpart of mp_text_print_page(): renders one PWG page into the
+ * job file that mp_text_print_document() keeps open across every page of
+ * the document (instead of one independent per-page job), so the whole
+ * document submits as a single multi-page IPP job with the real sides=
+ * attribute honoured - see mp_pwg_backside_transform()'s cross_feed/feed
+ * and driver_core.c's mp_job_begin()/mp_page_finalize() for the graphics
+ * path this mirrors. page_index is 0-based across the whole document;
+ * odd physical pages (0, 2, 4, ...) are fronts, even ones are backs. */
+static BOOL mp_text_print_page_duplex(ULONG width, ULONG height, ULONG dpi,
+                                      ULONG left_px, ULONG cell_width,
+                                      ULONG line_height, ULONG glyph_height,
+                                      ULONG max_columns, UBYTE *lines,
+                                      UBYTE *lengths, ULONG line_count,
+                                      ULONG page_index)
+{
+    struct BitMap bitmap;
+    struct RastPort rp;
+    struct TextFont *font;
+    PLANEPTR plane = NULL;
+    UBYTE *rgb = NULL;
+    UBYTE *scratch = NULL;
+    ULONG rgb_bytes;
+    ULONG scratch_bytes;
+    ULONG source_width;
+    ULONG source_height;
+    ULONG top_margin;
+    ULONG y;
+    BOOL ok = FALSE;
+    BOOL backside;
+    BOOL tumble;
+    BOOL defer_rows;
+    BOOL write_sync;
+    LONG cross_feed = 1;
+    LONG feed = 1;
+
+    if (!GfxBase || !GfxBase->DefaultFont || !width || !height)
+        return FALSE;
+
+    font = GfxBase->DefaultFont;
+    source_height = (ULONG)font->tf_YSize;
+    source_width = max_columns * (ULONG)font->tf_XSize;
+    if (!source_width || !source_height)
+        return FALSE;
+
+    InitBitMap(&bitmap, 1, (LONG)source_width, (LONG)source_height);
+    plane = AllocRaster((ULONG)source_width, (ULONG)source_height);
+    if (!plane)
+        goto done;
+    bitmap.Planes[0] = plane;
+
+    InitRastPort(&rp);
+    rp.BitMap = &bitmap;
+    SetFont(&rp, font);
+    SetAPen(&rp, 1);
+    SetBPen(&rp, 0);
+    SetDrMd(&rp, JAM1);
+
+    rgb_bytes = width * 3UL;
+    rgb = (UBYTE *)AllocMem(rgb_bytes, MEMF_PUBLIC);
+    if (!rgb)
+        goto done;
+
+    scratch_bytes = mp_pwg_scratch_size(width);
+    if (!scratch_bytes)
+        goto done;
+    scratch = (UBYTE *)AllocMem(scratch_bytes, MEMF_PUBLIC);
+    if (!scratch)
+        goto done;
+
+    backside = ((page_index + 1UL) & 1UL) == 0UL;
+    tumble = mp_text_streq(g_text_config.sides, "two-sided-short-edge");
+    if (backside)
+        mp_pwg_backside_transform(g_text_config.sides,
+                                  g_text_config.pwg_sheet_back,
+                                  &cross_feed, &feed);
+    defer_rows = backside && feed < 0;
+    write_sync = (page_index == 0UL);
+
+    if (!mp_pwg_begin_page(&g_text_pwg, width, height, 0, 0, dpi,
+                           write_sync, TRUE, tumble, cross_feed, feed,
+                           scratch, scratch_bytes,
+                           mp_text_file_write, NULL)) {
+        mp_text_log("MintPRINT: PRT text duplex page begin failed");
+        goto done;
+    }
+
+    if (defer_rows) {
+        g_text_pwg_aux_open = mp_spool_aux_open(MP_TEXT_FILE_BACK);
+        if (!g_text_pwg_aux_open) {
+            mp_text_log("MintPRINT: PRT text backside row store open failed");
+            goto done;
+        }
+    }
+
+    top_margin = dpi / 4UL;
+
+    for (y = 0; y < height; ++y) {
+        ULONG i;
+        LONG rel_y = (LONG)y - (LONG)top_margin;
+
+        for (i = 0; i < rgb_bytes; ++i)
+            rgb[i] = 255;
+
+        if (rel_y >= 0 && line_height &&
+            (ULONG)rel_y / line_height < line_count) {
+            ULONG line_index = (ULONG)rel_y / line_height;
+            ULONG inside = (ULONG)rel_y % line_height;
+            ULONG glyph_top = (line_height > glyph_height) ?
+                              (line_height - glyph_height) / 2UL : 0;
+
+            if (inside == glyph_top) {
+                UBYTE *line = lines + line_index * (max_columns + 1UL);
+                SetRast(&rp, 0);
+                if (lengths[line_index]) {
+                    Move(&rp, 0, (LONG)font->tf_Baseline);
+                    Text(&rp, (CONST_STRPTR)line, (ULONG)lengths[line_index]);
+                    WaitBlit();
+                }
+            }
+
+            if (inside >= glyph_top && inside < glyph_top + glyph_height &&
+                lengths[line_index]) {
+                ULONG source_y = ((inside - glyph_top) * source_height) /
+                                 glyph_height;
+                ULONG char_index;
+                ULONG glyph_width = (cell_width * 3UL) / 4UL;
+                ULONG glyph_xoff;
+
+                if (!glyph_width)
+                    glyph_width = 1;
+                glyph_xoff = (cell_width > glyph_width) ?
+                             (cell_width - glyph_width) / 2UL : 0;
+
+                for (char_index = 0;
+                     char_index < (ULONG)lengths[line_index];
+                     ++char_index) {
+                    ULONG gx;
+                    ULONG out_base = left_px + char_index * cell_width;
+                    ULONG src_base = char_index * (ULONG)font->tf_XSize;
+
+                    if (out_base >= width)
+                        break;
+
+                    for (gx = 0; gx < glyph_width; ++gx) {
+                        ULONG out_x = out_base + glyph_xoff + gx;
+                        ULONG src_x;
+                        ULONG out;
+
+                        if (out_x >= width)
+                            break;
+                        src_x = src_base +
+                                (gx * (ULONG)font->tf_XSize) / glyph_width;
+                        if (src_x < source_width &&
+                            mp_text_bit(&bitmap, src_x, source_y)) {
+                            out = out_x * 3UL;
+                            rgb[out] = 0;
+                            rgb[out + 1UL] = 0;
+                            rgb[out + 2UL] = 0;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (cross_feed < 0)
+            mp_pwg_reverse_rgb_row(rgb, width);
+
+        if (!mp_text_pwg_accept_row(defer_rows, rgb)) {
+            mp_text_log("MintPRINT: PRT text duplex encoder row failed");
+            goto done;
+        }
+    }
+
+    if (defer_rows &&
+        !mp_text_pwg_replay_backside(height, scratch, scratch_bytes)) {
+        mp_text_log("MintPRINT: PRT text backside replay failed");
+        goto done;
+    }
+
+    if (!mp_pwg_finish(&g_text_pwg)) {
+        mp_text_log("MintPRINT: PRT text duplex encoder finish failed");
+        goto done;
+    }
+
+    ok = TRUE;
+
+done:
+    if (g_text_pwg_aux_open)
+        mp_text_pwg_close_aux();
+    if (scratch)
+        FreeMem(scratch, scratch_bytes);
+    if (rgb)
+        FreeMem(rgb, rgb_bytes);
+    if (plane)
+        FreeRaster(plane, (ULONG)source_width, (ULONG)source_height);
+    return ok;
+}
+
 static BOOL mp_text_print_page(int engine, ULONG width, ULONG height,
                                ULONG dpi, ULONG left_px, ULONG cell_width,
                                ULONG line_height, ULONG glyph_height,
@@ -650,10 +956,12 @@ static BOOL mp_text_print_page(int engine, ULONG width, ULONG height,
     mp_spool_job_close();
 
     submit_config = g_text_config;
-    /* The first PRT implementation submits one IPP job per text page.  Do not
-     * advertise duplex on those independent one-page jobs; doing so would
-     * create a blank reverse side on many printers.  Multi-page PWG duplex can
-     * be added once the basic PRT path has real-hardware coverage. */
+    /* This one-page-per-IPP-job route is only reached for engines that don't
+     * support PWG duplex accumulation (see mp_text_print_document()'s
+     * want_duplex check and mp_text_print_page_duplex() above, which handles
+     * real two-sided PWG text jobs as one multi-page submission instead).
+     * Never advertise duplex on these independent one-page jobs - doing so
+     * would create a blank reverse side on many printers. */
     submit_config.sides[0] = 0;
 
     ipp_rc = mp_spool_ipp_submit(&submit_config, filename,
@@ -701,6 +1009,8 @@ static BOOL mp_text_print_document(void)
     UBYTE *lengths = NULL;
     int engine;
     BOOL all_ok = TRUE;
+    BOOL want_duplex;
+    ULONG page_count = 0;
 
     if (!g_text_seen || !g_text_head)
         return TRUE;
@@ -759,8 +1069,17 @@ static BOOL mp_text_print_document(void)
     }
 
     engine = mp_text_engine(&g_text_config);
-    if (g_text_config.sides[0] == 't')
-        mp_text_log("MintPRINT: PRT text beta uses one-sided page jobs");
+    /* Real two-sided output needs every page in one multi-page PWG job
+     * (see mp_text_print_page_duplex()); other engines still fall back to
+     * the original one-sided-per-page route below. */
+    want_duplex = (engine == MP_TEXT_ENGINE_PWG) && g_text_config.sides[0] == 't';
+    if (want_duplex) {
+        if (!mp_spool_job_open(mp_text_filename(engine))) {
+            mp_text_log("MintPRINT: PRT text duplex job open failed");
+            all_ok = FALSE;
+            goto done;
+        }
+    }
 
     cursor.block = g_text_head;
     cursor.offset = 0;
@@ -781,12 +1100,42 @@ static BOOL mp_text_print_document(void)
         if (!line_count && !form_feed)
             break;
 
-        if (!mp_text_print_page(engine, width, height, dpi, left_px,
-                                cell_width, line_height, glyph_height,
-                                max_columns, lines, lengths, line_count)) {
+        if (want_duplex) {
+            if (!mp_text_print_page_duplex(width, height, dpi, left_px,
+                                           cell_width, line_height,
+                                           glyph_height, max_columns,
+                                           lines, lengths, line_count,
+                                           page_count)) {
+                all_ok = FALSE;
+                break;
+            }
+            ++page_count;
+        } else if (!mp_text_print_page(engine, width, height, dpi, left_px,
+                                       cell_width, line_height, glyph_height,
+                                       max_columns, lines, lengths,
+                                       line_count)) {
             all_ok = FALSE;
             break;
         }
+    }
+
+    if (want_duplex) {
+        mp_spool_job_close();
+        if (all_ok && page_count > 0) {
+            struct MPIPPResult result;
+            LONG ipp_rc = mp_spool_ipp_submit(&g_text_config,
+                                              mp_text_filename(engine),
+                                              mp_text_format(engine),
+                                              &result);
+            if (ipp_rc != 0) {
+                mp_text_log("MintPRINT: PRT text duplex IPP submission failed");
+                all_ok = FALSE;
+            } else {
+                mp_text_log("MintPRINT: PRT text duplex job submitted");
+            }
+        }
+        if (!g_text_config.debug)
+            mp_spool_job_delete(mp_text_filename(engine));
     }
 
 done:
