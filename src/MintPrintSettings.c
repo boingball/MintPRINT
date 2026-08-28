@@ -8168,6 +8168,7 @@ int main(void) {
 
     // Offer to install DEVS:Printers/MintPRINT if it is missing.
     check_and_offer_driver_install(window);
+    printf("Startup: driver install check done\n");
 
     if (load_capability_cache_for_current_endpoint()) {
         apply_cached_capabilities(window);
@@ -8221,9 +8222,11 @@ int main(void) {
     redraw_output_box();
     mp_draw_marker_strips();
     mp_draw_sides_hint();
+    printf("Startup: final pre-loop redraw done - entering event loop\n");
 
     // Process events
     process_window_events(window);
+    printf("Event loop: process_window_events() returned\n");
 
     // Save print mode before exiting
     save_print_mode();
