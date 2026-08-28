@@ -55,7 +55,7 @@
  * MP_DRIVER_REV (the version half) only bumps for something that
  * warrants a new version number outright, not on every rebuild. */
 #define MP_DRIVER_REV 41
-#define MP_DRIVER_SUBREV 3
+#define MP_DRIVER_SUBREV 4
 
 struct ExecBase *SysBase = NULL;
 struct DosLibrary *DOSBase = NULL;
