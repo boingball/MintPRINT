@@ -802,6 +802,20 @@ static BOOL mp_color_mode_wants_grayscale(const char *color)
            mp_streq(color, "process-monochrome");
 }
 
+/* The classic pre-V44 printer.device supplies 4-bit Y/M/C/B guns.
+ * Expand at the point of consumption instead of allocating and copying a
+ * second PrtInfo row in classic_render_shim.c. The >15 guard keeps this
+ * harmless with replacement printer.device implementations that already
+ * provide 8-bit values through the classic ABI. */
+static UBYTE mp_gun_to_8bit(UBYTE value)
+{
+#ifdef MINTPRINT_CLASSIC_GUNS
+    if (value <= 15)
+        return (UBYTE)((value << 4) | value);
+#endif
+    return value;
+}
+
 static BOOL mp_job_write_row(struct PrtInfo *pi, ULONG row_number)
 {
     ULONG src_x;
@@ -857,9 +871,12 @@ static BOOL mp_job_write_row(struct PrtInfo *pi, ULONG row_number)
     for (src_x = 0; src_x < (ULONG)pi->pi_width && dst_x < g_page_width; ++src_x) {
         union colorEntry *pixel = &pi->pi_ColorInt[src_x];
         ULONG repeat = pi->pi_ScaleX ? (ULONG)pi->pi_ScaleX[src_x] : 1UL;
-        UBYTE red   = (UBYTE)(255U - pixel->colorByte[PCMCYAN]);
-        UBYTE green = (UBYTE)(255U - pixel->colorByte[PCMMAGENTA]);
-        UBYTE blue  = (UBYTE)(255U - pixel->colorByte[PCMYELLOW]);
+        UBYTE red = (UBYTE)(255U -
+            mp_gun_to_8bit(pixel->colorByte[PCMCYAN]));
+        UBYTE green = (UBYTE)(255U -
+            mp_gun_to_8bit(pixel->colorByte[PCMMAGENTA]));
+        UBYTE blue = (UBYTE)(255U -
+            mp_gun_to_8bit(pixel->colorByte[PCMYELLOW]));
 
         while (repeat-- && dst_x < g_page_width) {
             ULONG out = dst_x * 3UL;
