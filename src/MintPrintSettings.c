@@ -948,145 +948,42 @@ static void warn_if_engine_unsupported(const char *engine) {
     }
 }
 
+/* GT_GetGadgetAttrsA() is V39. GadTools STRING_KIND wraps a standard
+ * Intuition StringInfo whose Buffer field is available on v37, so use that
+ * directly. Cycle values are retained from IDCMP_GADGETUP message codes in
+ * process_window_events(), which is the documented pre-V39 mechanism. */
+static char *mp_string_gadget_value(struct Gadget *g) {
+    struct StringInfo *si;
+
+    if (!g || !g->SpecialInfo)
+        return NULL;
+    si = (struct StringInfo *)g->SpecialInfo;
+    return si->Buffer;
+}
+
 static void capture_driver_settings(struct Window *win) {
     struct Gadget *g;
-    char *value = NULL;
-    ULONG active = driver_debug ? 1UL : 0UL;
+    char *value;
 
     if (!win) return;
 
     g = find_gadget_by_id(GAD_IP_STRING);
-    if (g && GT_GetGadgetAttrs(g, win, NULL,
-                               GTST_String, (ULONG)&value,
-                               TAG_DONE) && value) {
+    value = mp_string_gadget_value(g);
+    if (value) {
         strncpy(ip_buffer, value, sizeof(ip_buffer) - 1);
         ip_buffer[sizeof(ip_buffer) - 1] = '\0';
     }
 
-    value = NULL;
     g = find_gadget_by_id(GAD_IPP_PATH);
-    if (g && GT_GetGadgetAttrs(g, win, NULL,
-                               GTST_String, (ULONG)&value,
-                               TAG_DONE) && value) {
+    value = mp_string_gadget_value(g);
+    if (value) {
         strncpy(driver_path_buffer, value, sizeof(driver_path_buffer) - 1);
         driver_path_buffer[sizeof(driver_path_buffer) - 1] = '\0';
     }
 
-    g = find_gadget_by_id(GAD_DEBUG);
-    if (g) {
-        GT_GetGadgetAttrs(g, win, NULL,
-                          GTCY_Active, (ULONG)&active,
-                          TAG_DONE);
-        driver_debug = active ? TRUE : FALSE;
-    }
-
-    g = find_gadget_by_id(GAD_ENGINE);
-    if (g) {
-        ULONG engine_active = 0;
-        GT_GetGadgetAttrs(g, win, NULL,
-                          GTCY_Active, (ULONG)&engine_active,
-                          TAG_DONE);
-        if (engine_active < (ULONG)mp_engine_count &&
-            mp_engine_value_map[engine_active]) {
-            strncpy(driver_engine_buffer, mp_engine_value_map[engine_active],
-                    sizeof(driver_engine_buffer) - 1);
-            driver_engine_buffer[sizeof(driver_engine_buffer) - 1] = '\0';
-        }
-        warn_if_engine_unsupported(driver_engine_buffer);
-    }
-
-    g = find_gadget_by_id(GAD_RESOLUTION);
-    if (g) {
-        ULONG res_active = 0;
-        GT_GetGadgetAttrs(g, win, NULL,
-                          GTCY_Active, (ULONG)&res_active,
-                          TAG_DONE);
-        if (res_active < (ULONG)mp_dpi_options.count) {
-            driver_resolution = mp_dpi_options.values[res_active];
-            driver_resolution_explicit = TRUE;
-        }
-    }
-
-    /* Persist the capability-backed choices currently visible in the GUI. */
-    if (media_dropdown && num_media_tray_mappings > 0) {
-        ULONG selected = 0;
-        GT_GetGadgetAttrs(media_dropdown, win, NULL,
-                          GTCY_Active, (ULONG)&selected,
-                          TAG_DONE);
-        if (selected < (ULONG)num_media_tray_mappings) {
-            strncpy(driver_media_buffer, media_tray_map[selected].media,
-                    sizeof(driver_media_buffer) - 1);
-            driver_media_buffer[sizeof(driver_media_buffer) - 1] = '\0';
-            strncpy(driver_source_buffer, media_tray_map[selected].source,
-                    sizeof(driver_source_buffer) - 1);
-            driver_source_buffer[sizeof(driver_source_buffer) - 1] = '\0';
-        }
-    }
-
-    g = find_gadget_by_id(GAD_PRINT_MODE);
-    if (g && num_supported_print_modes > 0) {
-        ULONG selected = 0;
-        GT_GetGadgetAttrs(g, win, NULL,
-                          GTCY_Active, (ULONG)&selected,
-                          TAG_DONE);
-        if (selected < (ULONG)num_supported_print_modes) {
-            strncpy(driver_color_buffer, supported_print_modes[selected],
-                    sizeof(driver_color_buffer) - 1);
-            driver_color_buffer[sizeof(driver_color_buffer) - 1] = '\0';
-            strncpy(selected_print_mode, supported_print_modes[selected],
-                    sizeof(selected_print_mode) - 1);
-            selected_print_mode[sizeof(selected_print_mode) - 1] = '\0';
-        }
-    }
-
-    g = find_gadget_by_id(GAD_SCALING_MODE);
-    if (g && num_supported_scaling > 0) {
-        ULONG selected = 0;
-        GT_GetGadgetAttrs(g, win, NULL,
-                          GTCY_Active, (ULONG)&selected,
-                          TAG_DONE);
-        if (selected < (ULONG)num_supported_scaling) {
-            strncpy(driver_scaling_buffer, supported_scaling[selected],
-                    sizeof(driver_scaling_buffer) - 1);
-            driver_scaling_buffer[sizeof(driver_scaling_buffer) - 1] = '\0';
-            strncpy(selected_scaling, supported_scaling[selected],
-                    sizeof(selected_scaling) - 1);
-            selected_scaling[sizeof(selected_scaling) - 1] = '\0';
-        }
-    }
-
-    g = find_gadget_by_id(GAD_QUALITY_MODE);
-    if (g && num_supported_quality > 0) {
-        ULONG selected = 0;
-        GT_GetGadgetAttrs(g, win, NULL,
-                          GTCY_Active, (ULONG)&selected,
-                          TAG_DONE);
-        if (selected < (ULONG)num_supported_quality) {
-            strncpy(driver_quality_buffer, supported_quality[selected],
-                    sizeof(driver_quality_buffer) - 1);
-            driver_quality_buffer[sizeof(driver_quality_buffer) - 1] = '\0';
-            strncpy(selected_quality, supported_quality[selected],
-                    sizeof(selected_quality) - 1);
-            selected_quality[sizeof(selected_quality) - 1] = '\0';
-        }
-    }
-
-    g = find_gadget_by_id(GAD_SIDES);
-    if (g && mp_sides_option_count > 1) {
-        ULONG selected = 0;
-        GT_GetGadgetAttrs(g, win, NULL,
-                          GTCY_Active, (ULONG)&selected,
-                          TAG_DONE);
-        if (selected < (ULONG)mp_sides_option_count) {
-            strncpy(driver_sides_buffer, mp_sides_value_storage[selected],
-                    sizeof(driver_sides_buffer) - 1);
-            driver_sides_buffer[sizeof(driver_sides_buffer) - 1] = '\0';
-        }
-    } else if (mp_sides_option_count <= 1) {
-        /* Absence already means one-sided. Avoid adding a `sides` Job
-         * Template attribute to a printer that did not advertise it. */
-        driver_sides_buffer[0] = '\0';
-    }
+    /* Every cycle gadget updates its persisted backing value from the
+     * IDCMP message code as the user changes it. */
+    warn_if_engine_unsupported(driver_engine_buffer);
 }
 
 static BOOL write_driver_config_file(CONST_STRPTR filename) {
@@ -4735,6 +4632,7 @@ static BOOL run_discovery_selection(struct Window *parent,
     BOOL terminated = FALSE;
     UWORD topborder;
     int i;
+    ULONG selected = 0;
 
     (void)parent;
 
@@ -4855,6 +4753,7 @@ static BOOL run_discovery_selection(struct Window *parent,
         while (!terminated && imsg) {
             struct Gadget *g = (struct Gadget *)imsg->IAddress;
             ULONG cls = imsg->Class;
+            UWORD code = imsg->Code;
             GT_ReplyIMsg(imsg);
 
             if (cls == IDCMP_CLOSEWINDOW) {
@@ -4863,17 +4762,12 @@ static BOOL run_discovery_selection(struct Window *parent,
                 GT_BeginRefresh(dwin);
                 GT_EndRefresh(dwin, TRUE);
             } else if (cls == IDCMP_GADGETUP) {
-                if (g->GadgetID == GAD_DISC_CANCEL) {
+                if (g->GadgetID == GAD_DISC_CYCLE) {
+                    if ((ULONG)code < (ULONG)count)
+                        selected = (ULONG)code;
+                } else if (g->GadgetID == GAD_DISC_CANCEL) {
                     terminated = TRUE;
                 } else if (g->GadgetID == GAD_DISC_USE) {
-                    struct Gadget *cyc = dglist;
-                    ULONG selected = 0;
-                    while (cyc && cyc->GadgetID != GAD_DISC_CYCLE) cyc = cyc->NextGadget;
-                    if (cyc) {
-                        GT_GetGadgetAttrs(cyc, dwin, NULL,
-                                          GTCY_Active, (ULONG)&selected,
-                                          TAG_DONE);
-                    }
                     if (selected < (ULONG)count) {
                         strncpy(chosen_ip, results[selected].ip, chosen_ip_size - 1);
                         chosen_ip[chosen_ip_size - 1] = '\0';
@@ -7609,10 +7503,7 @@ void process_window_events(struct Window *win) {
                     switch (gad->GadgetID) {
                         case GAD_UNIT_DROPDOWN:
                         {
-                            ULONG selected = 0;
-                            GT_GetGadgetAttrs(gad, win, NULL,
-                                              GTCY_Active, (ULONG)&selected,
-                                              TAG_DONE);
+                            ULONG selected = (ULONG)imsgCode;
                             if (selected < (ULONG)MAX_UNITS && (int)selected != current_unit_index) {
                                 current_unit_index = (int)selected;
                                 custom_printf("CLEAR");
@@ -7686,11 +7577,16 @@ void process_window_events(struct Window *win) {
 
                         case GAD_MEDIA_DROPDOWN:
                         {
-                            ULONG selected = ~0UL;
-                            GT_GetGadgetAttrs(media_dropdown, win, NULL,
-                                              GTCY_Active, (ULONG)&selected,
-                                              TAG_DONE);
+                            ULONG selected = (ULONG)imsgCode;
                             if (selected < (ULONG)num_media_tray_mappings) {
+                                strncpy(driver_media_buffer,
+                                        media_tray_map[selected].media,
+                                        sizeof(driver_media_buffer) - 1);
+                                driver_media_buffer[sizeof(driver_media_buffer) - 1] = '\0';
+                                strncpy(driver_source_buffer,
+                                        media_tray_map[selected].source,
+                                        sizeof(driver_source_buffer) - 1);
+                                driver_source_buffer[sizeof(driver_source_buffer) - 1] = '\0';
                                 printf("Selected index = %lu, value = %s\n",
                                        selected, media_tray_map[selected].media);
                             } else {
@@ -7701,11 +7597,9 @@ void process_window_events(struct Window *win) {
 
                         case GAD_IP_STRING:
                         {
-                            char *current_ip = NULL;
+                            char *current_ip;
                             GT_RefreshWindow(win, NULL);
-                            GT_GetGadgetAttrs(gad, window, NULL,
-                                GTST_String, (ULONG)&current_ip,
-                                TAG_DONE);
+                            current_ip = mp_string_gadget_value(gad);
                             printf("Got pointer: %p\n", current_ip);
                             if (current_ip) {
                                 printf("Raw IP string from gadget: '%s'\n", current_ip);
@@ -7717,16 +7611,45 @@ void process_window_events(struct Window *win) {
                             }
                         }
                         break;
+                        case GAD_IPP_PATH:
+                        {
+                            char *path = mp_string_gadget_value(gad);
+                            if (path) {
+                                strncpy(driver_path_buffer, path,
+                                        sizeof(driver_path_buffer) - 1);
+                                driver_path_buffer[sizeof(driver_path_buffer) - 1] = '\0';
+                            }
+                        }
+                        break;
+
+                        case GAD_DEBUG:
+                            driver_debug = imsgCode ? TRUE : FALSE;
+                            break;
+
+                        case GAD_QUALITY_MODE:
+                        {
+                            ULONG selected = (ULONG)imsgCode;
+                            if (selected < (ULONG)num_supported_quality) {
+                                strncpy(selected_quality, supported_quality[selected],
+                                        sizeof(selected_quality) - 1);
+                                selected_quality[sizeof(selected_quality) - 1] = '\0';
+                                strncpy(driver_quality_buffer, supported_quality[selected],
+                                        sizeof(driver_quality_buffer) - 1);
+                                driver_quality_buffer[sizeof(driver_quality_buffer) - 1] = '\0';
+                            }
+                        }
+                        break;
+
                         case GAD_PRINT_MODE:
                         {
-                            ULONG selected = ~0UL;
-                            GT_GetGadgetAttrs(gad, win, NULL,
-                                              GTCY_Active, (ULONG)&selected,
-                                              TAG_DONE);
+                            ULONG selected = (ULONG)imsgCode;
                             print_mode = selected;
                             if (selected < num_supported_print_modes) {
                                 strncpy(selected_print_mode, supported_print_modes[selected], MAX_ATTR_LEN - 1);
                                 selected_print_mode[MAX_ATTR_LEN - 1] = '\0';
+                                strncpy(driver_color_buffer, supported_print_modes[selected],
+                                        sizeof(driver_color_buffer) - 1);
+                                driver_color_buffer[sizeof(driver_color_buffer) - 1] = '\0';
                                 printf("Print mode set to: %s\n", selected_print_mode);
                             }
                         }
@@ -7734,10 +7657,7 @@ void process_window_events(struct Window *win) {
 
                         case GAD_ENGINE:
                         {
-                            ULONG selected = 0;
-                            GT_GetGadgetAttrs(gad, win, NULL,
-                                              GTCY_Active, (ULONG)&selected,
-                                              TAG_DONE);
+                            ULONG selected = (ULONG)imsgCode;
                             if (selected < (ULONG)mp_engine_count) {
                                 strncpy(driver_engine_buffer,
                                         mp_engine_value_map[selected],
@@ -7754,10 +7674,7 @@ void process_window_events(struct Window *win) {
 
                         case GAD_SIDES:
                         {
-                            ULONG selected = 0;
-                            GT_GetGadgetAttrs(gad, win, NULL,
-                                              GTCY_Active, (ULONG)&selected,
-                                              TAG_DONE);
+                            ULONG selected = (ULONG)imsgCode;
                             if (selected < (ULONG)mp_sides_option_count) {
                                 strncpy(driver_sides_buffer,
                                         mp_sides_value_storage[selected],
@@ -7772,10 +7689,7 @@ void process_window_events(struct Window *win) {
 
                         case GAD_RESOLUTION:
                         {
-                            ULONG selected = 0;
-                            GT_GetGadgetAttrs(gad, win, NULL,
-                                              GTCY_Active, (ULONG)&selected,
-                                              TAG_DONE);
+                            ULONG selected = (ULONG)imsgCode;
                             if (selected < (ULONG)mp_dpi_options.count) {
                                 driver_resolution =
                                     mp_dpi_options.values[selected];
@@ -7790,13 +7704,13 @@ void process_window_events(struct Window *win) {
 
                         case GAD_SCALING_MODE:
                         {
-                            ULONG selected = ~0UL;
-                            GT_GetGadgetAttrs(gad, win, NULL,
-                                            GTCY_Active, (ULONG)&selected,
-                                            TAG_DONE);
-                            if (selected < num_supported_scaling) {
+                            ULONG selected = (ULONG)imsgCode;
+                            if (selected < (ULONG)num_supported_scaling) {
                                 strncpy(selected_scaling, supported_scaling[selected], MAX_ATTR_LEN - 1);
                                 selected_scaling[MAX_ATTR_LEN - 1] = '\0';
+                                strncpy(driver_scaling_buffer, supported_scaling[selected],
+                                        sizeof(driver_scaling_buffer) - 1);
+                                driver_scaling_buffer[sizeof(driver_scaling_buffer) - 1] = '\0';
                                 printf("Scaling mode set to: %s\n", selected_scaling);
                             }
                         }
@@ -7813,11 +7727,8 @@ void process_window_events(struct Window *win) {
                             }
                         
                             if (ip_gadget) {
-                                char *ip_string = NULL;
-                                ULONG success = GT_GetGadgetAttrs(ip_gadget, win, NULL,
-                                                                  GTST_String, (ULONG)&ip_string,
-                                                                  TAG_DONE);
-                                if (success && ip_string) {
+                                char *ip_string = mp_string_gadget_value(ip_gadget);
+                                if (ip_string) {
                                     strncpy(ip_buffer, ip_string, sizeof(ip_buffer) - 1);
                                     ip_buffer[sizeof(ip_buffer) - 1] = '\0';
                                     printf("IP buffer updated to: '%s'\n", ip_buffer);
