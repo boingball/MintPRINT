@@ -8,9 +8,10 @@
  * That means printer.device V40 (AmigaOS 3.1) never sees the later
  * PRTA_NoIO / PRTA_8BitGuns interface used by the normal MintPRINT driver.
  *
- * The matching classic_render_shim.c expands the classic printer.device
- * 4-bit Y/M/C/B intensity values to the 8-bit values expected by MintPRINT's
- * existing document encoders.
+ * The shared renderer is compiled with MINTPRINT_CLASSIC_GUNS so it expands
+ * classic printer.device's 4-bit Y/M/C/B intensity values exactly where the
+ * components are consumed.  classic_render_shim.c only exports the classic
+ * Render ABI symbol; it performs no per-row allocation or copy.
  */
 
         .section .text
@@ -78,7 +79,7 @@ printerName:
  * binary for that release.
  */
 mp_driver_version_marker:
-        .asciz  "$VER: MintPRINT 41.4 (28.08.2026)"
+        .asciz  "$VER: MintPRINT 41.5 (28.08.2026)"
         .even
 
 /* Human-readable marker useful when inspecting a built driver. */
