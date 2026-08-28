@@ -7934,10 +7934,11 @@ int main(void) {
      * intuition.library/graphics.library/gadtools.library all existed at
      * v37; the driver-side library opens (dos.library/graphics.library in
      * driver/driver_core.c and driver/command_table.c) already only ever
-     * asked for v37. GT_SetGadgetAttrs/GTCY_*/GetVisualInfo() below are all
-     * v36+ gadtools.library API. The one caller-side v39-only call this file
-     * makes, ObtainBestPenA() (graphics.library v39, marker-colour ink
-     * strip), is separately guarded at its call site - see there.
+     * asked for v37. GT_SetGadgetAttrs, the GTCY_ tags, and GetVisualInfo()
+     * below are all v36+ gadtools.library API. The one caller-side v39-only
+     * call this file makes, ObtainBestPenA() (graphics.library v39,
+     * marker-colour ink strip), is separately guarded at its call site -
+     * see there.
      *
      * NOT YET PHYSICALLY CONFIRMED on real AmigaOS 2.0/2.04 hardware or
      * emulation - unlike every other AmigaOS-version claim in this codebase,
