@@ -6532,7 +6532,8 @@ query_receive_pump_gui:
  * tries 631 first (falling back to a user-typed port or 80), and on
  * success applies the fetched capabilities to the gadgets exactly like a
  * manual Query click. */
-static void perform_query_flow(struct Window *win, const char *ip_only, int port_hint, char *response) {
+static void perform_query_flow(struct Window *win, const char *ip_only, int port_hint,
+                               char *response, int response_size) {
     /* 631 is the IANA-registered IPP port and the one real printers' full
      * capability set lives on; port 80 is only ever a bonus/compat
      * endpoint some printers also answer on, sometimes with a lesser or
@@ -6560,7 +6561,8 @@ static void perform_query_flow(struct Window *win, const char *ip_only, int port
         for (attempt = 0; attempt < 3 && !ok; attempt++) {
             int qrc;
             printf("Trying %s:%d (attempt %d/3)...\n", ip_only, ports_to_try[i], attempt + 1);
-            qrc = query_printer_attributes(ip_only, ports_to_try[i], response, MAX_BUFFER);
+            qrc = query_printer_attributes(ip_only, ports_to_try[i], response,
+                                           response_size);
             if (qrc == 0) {
                 struct Gadget *ip_gadget;
 
@@ -6626,6 +6628,50 @@ static void perform_query_flow(struct Window *win, const char *ip_only, int port
     mp_draw_marker_strips();
     mp_draw_sides_hint();
     mp_draw_printer_icon();
+}
+
+/* Allocate the Query response only while a Query is running. Classic
+ * systems may not have a contiguous 250 KiB block available even when
+ * their total free memory is healthy, so retain the full buffer where
+ * possible and fall back to still-useful 128 KiB or 64 KiB capacities.
+ * query_printer_attributes() receives the actual capacity and therefore
+ * cannot write as though a smaller fallback were still MAX_BUFFER bytes. */
+static char *mp_alloc_query_response(int *out_size) {
+    static const ULONG sizes[] = {
+        (ULONG)MAX_BUFFER, 131072UL, 65536UL
+    };
+    int i;
+
+    if (!out_size)
+        return NULL;
+    *out_size = 0;
+
+    for (i = 0; i < (int)(sizeof(sizes) / sizeof(sizes[0])); ++i) {
+        char *response = (char *)AllocVec(sizes[i], MEMF_ANY);
+        if (response) {
+            *out_size = (int)sizes[i];
+            if (sizes[i] < (ULONG)MAX_BUFFER)
+                printf("Using reduced %lu-byte Query response buffer\n",
+                       (unsigned long)sizes[i]);
+            return response;
+        }
+    }
+
+    printf("Could not allocate a Query response buffer (minimum 65536 bytes)\n");
+    return NULL;
+}
+
+static void perform_query_flow_allocated(struct Window *win,
+                                         const char *ip_only,
+                                         int port_hint) {
+    int response_size;
+    char *response = mp_alloc_query_response(&response_size);
+
+    if (!response)
+        return;
+
+    perform_query_flow(win, ip_only, port_hint, response, response_size);
+    FreeVec(response);
 }
 
 int send_pwg_print_job(const char *ip, int port, const char *media, const char *print_mode, unsigned char *pwg_data, int pwg_size) {
@@ -7522,19 +7568,6 @@ void process_window_events(struct Window *win) {
     BOOL terminated = FALSE;
     char ip_only[64];
     int port = -1;
-    char *response;
-
-    /* This must be the first observable operation in the function. The
-     * previous "entering" trace was after the response allocation, so a crash in
-     * the function prologue or the 250 KiB allocation looked identical. */
-    printf("Event loop: function entered before response allocation\n");
-    response = (char *)AllocVec((ULONG)MAX_BUFFER, MEMF_ANY);
-    if (!response) {
-        printf("Failed to allocate %lu-byte response buffer\n",
-               (unsigned long)MAX_BUFFER);
-        return;
-    }
-    printf("Event loop: response buffer allocated\n");
 
     printf("Event loop: entering while(!terminated)\n");
     while (!terminated) {
@@ -7804,7 +7837,7 @@ void process_window_events(struct Window *win) {
                             }
                         
                             // Try default + fallback ports, apply capabilities on success
-                            perform_query_flow(win, ip_only, port, response);
+                            perform_query_flow_allocated(win, ip_only, port);
                         }
                         break;
 
@@ -7839,7 +7872,7 @@ void process_window_events(struct Window *win) {
                                                           TAG_DONE);
                                     }
 
-                                    perform_query_flow(win, chosen_ip, 0, response);
+                                    perform_query_flow_allocated(win, chosen_ip, 0);
                                 } else {
                                     printf("Discovery selection cancelled.\n");
                                 }
@@ -7943,7 +7976,6 @@ void process_window_events(struct Window *win) {
     if (test_print_job.active)
         mp_test_print_cancel(win);
 
-    FreeVec(response); // Free the OS-native response buffer
 }
 
 static BOOL mp_open_tcp_stack(void) {
@@ -8217,21 +8249,14 @@ int main(void) {
     if (ip_buffer[0]) {
         char startup_ip[64];
         int startup_port = -1;
-        char *startup_response = (char *)AllocVec((ULONG)MAX_BUFFER, MEMF_ANY);
 
-        if (!startup_response) {
-            printf("Could not allocate startup Query response buffer - skipping live refresh\n");
+        if (parse_ip_and_port(ip_buffer, startup_ip,
+                              sizeof(startup_ip), &startup_port)) {
+            printf("Refreshing saved printer status on startup: %s\n", ip_buffer);
+            perform_query_flow_allocated(window, startup_ip, startup_port);
         } else {
-            if (parse_ip_and_port(ip_buffer, startup_ip,
-                                  sizeof(startup_ip), &startup_port)) {
-                printf("Refreshing saved printer status on startup: %s\n", ip_buffer);
-                perform_query_flow(window, startup_ip, startup_port,
-                                   startup_response);
-            } else {
-                printf("Saved printer address '%s' is invalid - skipping startup Query\n",
-                       ip_buffer);
-            }
-            FreeVec(startup_response);
+            printf("Saved printer address '%s' is invalid - skipping startup Query\n",
+                   ip_buffer);
         }
     }
 
