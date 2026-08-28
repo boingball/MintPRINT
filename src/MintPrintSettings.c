@@ -122,8 +122,10 @@ struct MPTestPrintJob {
     struct MsgPort *port;
     struct IODRPReq *request;
     struct BitMap *bitmap;
+    struct BitMap bitmap_storage;
     struct ColorMap *colormap;
     struct RastPort rastport;
+    BOOL bitmap_manual;
     BOOL device_open;
     BOOL active;
 };
@@ -1604,8 +1606,20 @@ static void mp_test_print_release(struct Window *win)
         test_print_job.port = NULL;
     }
     if (test_print_job.bitmap) {
-        FreeBitMap(test_print_job.bitmap);
+        if (test_print_job.bitmap_manual) {
+            int plane;
+            for (plane = 0; plane < MP_TESTPAGE_DEPTH; ++plane) {
+                if (test_print_job.bitmap_storage.Planes[plane]) {
+                    FreeRaster(test_print_job.bitmap_storage.Planes[plane],
+                               MP_TESTPAGE_WIDTH, MP_TESTPAGE_HEIGHT);
+                    test_print_job.bitmap_storage.Planes[plane] = NULL;
+                }
+            }
+        } else {
+            FreeBitMap(test_print_job.bitmap);
+        }
         test_print_job.bitmap = NULL;
+        test_print_job.bitmap_manual = FALSE;
     }
     if (test_print_job.colormap) {
         FreeColorMap(test_print_job.colormap);
@@ -1775,11 +1789,43 @@ static BOOL mintprint_test_page(struct Window *win) {
     SetRGB4CM(test_print_job.colormap, 6, 15, 0, 15);  /* magenta */
     SetRGB4CM(test_print_job.colormap, 7, 15, 15, 0);  /* yellow */
 
-    /* No screen "friend" - this bitmap has nothing to do with the display,
-     * only with the private ColorMap above. BMF_CLEAR zeroes every pixel to
-     * pen 0, which is already true white, so no background fill is needed. */
-    test_print_job.bitmap = AllocBitMap(MP_TESTPAGE_WIDTH, MP_TESTPAGE_HEIGHT,
-                                        MP_TESTPAGE_DEPTH, BMF_CLEAR, NULL);
+    /* AllocBitMap()/FreeBitMap() were added in graphics.library V39.
+     * On V37 build the same ordinary planar bitmap from the original
+     * InitBitMap()/AllocRaster() API. Keep AllocBitMap on V39+ so newer
+     * systems retain their normal graphics.library allocation path. */
+    test_print_job.bitmap_manual = FALSE;
+    if (GfxBase->LibNode.lib_Version >= 39) {
+        test_print_job.bitmap = AllocBitMap(MP_TESTPAGE_WIDTH,
+                                            MP_TESTPAGE_HEIGHT,
+                                            MP_TESTPAGE_DEPTH,
+                                            BMF_CLEAR, NULL);
+    } else {
+        int plane;
+
+        memset(&test_print_job.bitmap_storage, 0,
+               sizeof(test_print_job.bitmap_storage));
+        InitBitMap(&test_print_job.bitmap_storage, MP_TESTPAGE_DEPTH,
+                   MP_TESTPAGE_WIDTH, MP_TESTPAGE_HEIGHT);
+        test_print_job.bitmap = &test_print_job.bitmap_storage;
+        test_print_job.bitmap_manual = TRUE;
+
+        for (plane = 0; plane < MP_TESTPAGE_DEPTH; ++plane) {
+            PLANEPTR raster = AllocRaster(MP_TESTPAGE_WIDTH,
+                                          MP_TESTPAGE_HEIGHT);
+            if (!raster)
+                break;
+            memset(raster, 0, RASSIZE(MP_TESTPAGE_WIDTH,
+                                     MP_TESTPAGE_HEIGHT));
+            test_print_job.bitmap_storage.Planes[plane] = raster;
+        }
+        if (plane != MP_TESTPAGE_DEPTH) {
+            printf("Test Print: could not allocate V37 bitmap plane %d\n",
+                   plane);
+            mp_test_print_release(win);
+            return FALSE;
+        }
+        printf("Test Print: using V37 planar bitmap allocation\n");
+    }
     if (!test_print_job.bitmap) {
         printf("Test Print: could not allocate test bitmap\n");
         mp_test_print_release(win);
