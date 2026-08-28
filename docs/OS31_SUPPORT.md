@@ -89,6 +89,31 @@ which driver it picked (and why) before installing it. The `Install`
 script at the repository root offers the same auto-detect-then-confirm
 flow for anyone installing without running MintPrintSettings first.
 
+## AmigaOS 2.0/2.04 (experimental, unconfirmed)
+
+The classic driver's own printer.device interface (pre-V44
+`PrinterExtendedData`, `PPC_COLORGFX` only) is the same interface that's
+existed since well before AmigaOS 3.1, and `driver/driver_core.c` and
+`driver/command_table.c` already only ever `OpenLibrary()` `dos.library` and
+`graphics.library` at v37 - AmigaOS 2.04, where `gadtools.library` (and this
+driver's own minimum) was introduced. So the driver side of this build has
+never actually required 3.0/3.1 specifically.
+
+**MintPrint Settings** (the GUI) did, though: it pinned
+`intuition.library`/`graphics.library`/`gadtools.library` at v39 (AmigaOS
+3.0) even though nothing else in it needed more than v37, until that pin was
+lowered as an experiment. The one real v39-only call it made,
+`ObtainPen()`/`ObtainBestPenA()` (graphics.library's shared-pen allocator,
+used only for the printer-status ink/toner strip's marker-colour fill), is
+now skipped on a sub-v39 `graphics.library` - that strip just shows no fill
+on such a system rather than calling an entry point that doesn't exist.
+
+This has **not been physically tested** on real AmigaOS 2.0/2.04 hardware or
+emulation - unlike the "Test status" section below, which only makes a claim
+after a real test. Building and running MintPrint Settings itself
+successfully on a v37 system is the first thing to confirm; the driver
+binary's own behaviour there is the second, separate question.
+
 ## Test status
 
 **Physically confirmed on a real AmigaOS 3.1 system**: MintPrint Settings

@@ -3386,7 +3386,14 @@ static void mp_draw_marker_strips(void) {
 
         have_rgb = mp_marker_rgb(marker_colors[i], &r, &g, &b);
         pen = -1;
-        if (have_rgb) {
+        /* ObtainPen()/ObtainBestPenA()/ReleasePen() are graphics.library v39
+         * (AmigaOS 3.0) additions - this file now opens graphics.library at
+         * v37 (see main()) to try running on AmigaOS 2.04, which has no such
+         * shared-pen-allocation API at all. Skip straight to "no marker
+         * fill" there rather than calling an entry point that doesn't exist
+         * in a v37 graphics.library - mp_marker_pens[i] staying -1 already
+         * means mp_release_marker_pens() never calls ReleasePen() either. */
+        if (have_rgb && GfxBase->LibNode.lib_Version >= 39) {
             /* This is a shared PUBLIC screen (LockPubScreen(NULL) below),
              * so on a constrained low-colour Workbench (e.g. 32 colours)
              * most pens are usually already in use by Workbench or other
@@ -3892,6 +3899,8 @@ static void mp_describe_amiga_os(char *buf, size_t bufsize) {
     const char *label;
 
     switch (ver) {
+        case 36: label = "2.0/2.03"; break;
+        case 37: label = "2.04/2.1"; break;
         case 39: label = "3.0";  break;
         case 40: label = "3.1";  break;
         case 44: label = "3.5";  break;
@@ -4186,7 +4195,7 @@ static void show_about(struct Window *win) {
     char os_desc[64];
     struct MPDriverVersion installed_ver, bundled_ver;
     CONST_STRPTR src_path = MINTPRINT_DRIVER_SRC;
-    CONST_STRPTR variant_name = mp_needs_os31_driver() ? "OS3.0/3.1" : "V44+";
+    CONST_STRPTR variant_name = mp_needs_os31_driver() ? "OS2.0-3.1" : "V44+";
 
     mp_describe_amiga_os(os_desc, sizeof(os_desc));
 
@@ -4237,7 +4246,7 @@ static void check_and_offer_driver_install(struct Window *win) {
     struct MPDriverVersion src_ver, dest_ver;
     BOOL have_src_ver, have_dest_ver;
     CONST_STRPTR src_path = MINTPRINT_DRIVER_SRC;
-    CONST_STRPTR variant_name = mp_needs_os31_driver() ? "OS3.0/3.1" : "V44+";
+    CONST_STRPTR variant_name = mp_needs_os31_driver() ? "OS2.0-3.1" : "V44+";
 
     mp_describe_amiga_os(os_desc, sizeof(os_desc));
     printf("Detected %s (workbench.library v%u) - using the %s driver (%s).\n",
@@ -7918,21 +7927,38 @@ static void mp_show_tcp_stack_required(void) {
 int main(void) {
     UWORD topborder;
 
-    // Open libraries with version checks
-    IntuitionBase = (struct IntuitionBase *)OpenLibrary("intuition.library", 39);
+    /* Open libraries with version checks.
+     *
+     * EXPERIMENTAL: pinned at v37 (AmigaOS 2.04, where gadtools.library was
+     * introduced) rather than the v39 (AmigaOS 3.0) this used to require.
+     * intuition.library/graphics.library/gadtools.library all existed at
+     * v37; the driver-side library opens (dos.library/graphics.library in
+     * driver/driver_core.c and driver/command_table.c) already only ever
+     * asked for v37. GT_SetGadgetAttrs/GTCY_*/GetVisualInfo() below are all
+     * v36+ gadtools.library API. The one caller-side v39-only call this file
+     * makes, ObtainBestPenA() (graphics.library v39, marker-colour ink
+     * strip), is separately guarded at its call site - see there.
+     *
+     * NOT YET PHYSICALLY CONFIRMED on real AmigaOS 2.0/2.04 hardware or
+     * emulation - unlike every other AmigaOS-version claim in this codebase,
+     * which only gets made after a real test (see README.md's changelog and
+     * docs/OS31_SUPPORT.md for that convention). This is exactly that
+     * pending test; a v37-class system may still hit some other v38+-only
+     * behaviour this audit missed. */
+    IntuitionBase = (struct IntuitionBase *)OpenLibrary("intuition.library", 37);
     if (!IntuitionBase) {
         printf("Failed to open intuition.library\n");
         return 1;
     }
 
-    GfxBase = (struct GfxBase *)OpenLibrary("graphics.library", 39);
+    GfxBase = (struct GfxBase *)OpenLibrary("graphics.library", 37);
     if (!GfxBase) {
         printf("Failed to open graphics.library\n");
         CloseLibrary((struct Library *)IntuitionBase);
         return 1;
     }
 
-    GadToolsBase = OpenLibrary("gadtools.library", 39);
+    GadToolsBase = OpenLibrary("gadtools.library", 37);
     if (!GadToolsBase) {
         printf("Requires V37 gadtools.library\n");
         CloseLibrary((struct Library *)GfxBase);
