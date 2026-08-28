@@ -1,5 +1,5 @@
 @database MintPrintSettings.guide
-@$VER: MintPrintSettings.guide 1.2.6 (27.08.2026)
+@$VER: MintPrintSettings.guide 1.2.7 (28.08.2026)
 @author "MintPRINT project (boingball)"
 @(c) "Copyright (c) 2026 Darren Banfi (boingball). MIT License."
 @width 74
@@ -31,6 +31,7 @@ Topics:
     @{" Scaling and Quality "    LINK "ScalingQuality"}
     @{" Multiple printers (Units) " LINK "Units"}
     @{" Installing the driver "  LINK "DriverInstall"}
+    @{" Why two driver builds? "  LINK "TwoDrivers"}
     @{" Test Print "             LINK "TestPrint"}
     @{" Troubleshooting "        LINK "Troubleshooting"}
     @{" Reporting a problem "    LINK "ReportingProblems"}
@@ -306,6 +307,10 @@ compiled driver builds, under Drivers/:
     Drivers/MintPRINT-OS31/MintPRINT   AmigaOS 3.0 and 3.1 (classic
                                         pre-V44 printer.device)
 
+This is a real ABI split in printer.device itself, not just a build
+option - see @{" Why two driver builds? " LINK "TwoDrivers"} for what
+actually differs between them.
+
 There is no separate archive to choose between AmigaOS versions.
 MintPrint Settings detects which build this machine needs (from
 workbench.library's version - or exec.library's if workbench.library
@@ -337,6 +342,56 @@ On AmigaOS 3.0/3.1, both the classic driver and MintPrint Settings
 itself require a bsdsocket.library V4-compatible TCP/IP stack
 (Roadshow, AmiTCP, Miami or similar) - Settings checks for a usable
 socket before opening its window, and refuses to start without one.
+
+@{" Back to Contents " LINK "Main"}
+@endnode
+
+@node TwoDrivers "Why two driver builds?"
+@toc Main
+                          Why two driver builds?
+                          -----------------------
+
+This is a genuine change in the Amiga printer.device driver ABI, made
+when AmigaOS introduced printer.device V44 (AmigaOS 3.2) - not
+something MintPRINT invented, and not a mistake in this help file.
+The split is documented in Commodore/Amiga's own printer.device
+material (see the Amiga Developer CD 2.1 printer.device
+documentation), and MintPRINT's OS3.1 driver build exists specifically
+to bridge it.
+
+What actually changed at V44:
+
+    - Before V44 (AmigaOS 3.0/3.1's "classic" printer.device), a
+      driver only sees the original PrinterExtendedData layout, and
+      printer.device's own graphics pipeline only ever supplies
+      4-bit-per-gun (0-15) Yellow/Magenta/Cyan/Black intensity values
+      per pixel - the same depth the classic printer.device
+      documentation's built-in 4x4 ordered-dither matrix was designed
+      around.
+    - V44 (AmigaOS 3.2 and later) added an extended tag-list
+      interface a driver can opt into, including PRTA_8BitGuns
+      (request full 0-255 intensity per gun instead of 0-15) and
+      PRTA_NoIO (tell printer.device this driver never needs its own
+      parallel/serial transport, since MintPRINT only ever talks IPP
+      over the network).
+
+MintPRINT's normal driver (Drivers/MintPRINT-V44/) uses that V44
+extended interface and gets ready-to-use 8-bit colour straight from
+printer.device. The classic build (Drivers/MintPRINT-OS31/) targets
+the older ABI instead, so it only ever receives 4-bit values - and a
+small compatibility shim (driver/classic_render_shim.c in the source
+tree) expands each one to 8 bits (0x0->0x00, 0x1->0x11, ... 0xF->0xFF)
+before handing that row to the exact same renderer, encoders and IPP
+code the V44 build uses. Nothing past that point differs between the
+two builds.
+
+That is also why one binary can't just run everywhere: a driver built
+for V44's extended interface has nothing to talk to on 3.0/3.1
+(printer.device there has never heard of PRTA_8BitGuns), and a driver
+built for the classic interface would leave a V44+ system's own 8-bit
+colour path unused. MintPrint Settings' automatic detection (see
+@{" Installing the driver " LINK "DriverInstall"}) exists so you never
+have to work out which build you need by hand.
 
 @{" Back to Contents " LINK "Main"}
 @endnode
