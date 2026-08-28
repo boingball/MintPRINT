@@ -7527,6 +7527,7 @@ void process_window_events(struct Window *win) {
         return;
     }
 
+    printf("Event loop: entering while(!terminated)\n");
     while (!terminated) {
         ULONG window_signal = 1L << win->UserPort->mp_SigBit;
         ULONG wait_mask = window_signal;
@@ -7535,7 +7536,10 @@ void process_window_events(struct Window *win) {
         if (test_print_job.active && test_print_job.port)
             wait_mask |= 1L << test_print_job.port->mp_SigBit;
 
+        printf("Event loop: calling Wait()\n");
         received_signals = Wait(wait_mask);
+        printf("Event loop: Wait() returned 0x%08lx\n",
+               (unsigned long)received_signals);
         if (test_print_job.active && test_print_job.port &&
             (received_signals & (1L << test_print_job.port->mp_SigBit))) {
             mp_test_print_complete(win);
