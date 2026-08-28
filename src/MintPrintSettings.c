@@ -7544,10 +7544,17 @@ void process_window_events(struct Window *win) {
             continue;
 
         imsg = GT_GetIMsg(win->UserPort);
+        printf("Event: GT_GetIMsg returned %s\n", imsg ? "a message" : "NULL");
         while (!terminated && imsg) {
             gad = (struct Gadget *)imsg->IAddress;
             imsgClass = imsg->Class;
             imsgCode = imsg->Code;
+            /* IAddress is only actually a struct Gadget* for gadget-related
+             * classes - deliberately NOT dereferencing gad->GadgetID here
+             * for other classes (e.g. IDCMP_REFRESHWINDOW), where it can be
+             * something else entirely. */
+            printf("Event: dispatching class=0x%08lx code=%u\n",
+                   (unsigned long)imsgClass, (unsigned)imsgCode);
 
             GT_ReplyIMsg(imsg);
 
