@@ -7521,11 +7521,19 @@ void process_window_events(struct Window *win) {
     BOOL terminated = FALSE;
     char ip_only[64];
     int port = -1;
-    char *response = malloc(MAX_BUFFER); // Dynamically allocate
+    char *response;
+
+    /* This must be the first observable operation in the function. The
+     * previous "entering" trace was after malloc(MAX_BUFFER), so a crash in
+     * the function prologue or the 250 KiB allocation looked identical. */
+    printf("Event loop: function entered before response allocation\n");
+    response = malloc(MAX_BUFFER);
     if (!response) {
-        printf("Failed to allocate memory for response buffer\n");
+        printf("Failed to allocate %lu-byte response buffer\n",
+               (unsigned long)MAX_BUFFER);
         return;
     }
+    printf("Event loop: response buffer allocated\n");
 
     printf("Event loop: entering while(!terminated)\n");
     while (!terminated) {
