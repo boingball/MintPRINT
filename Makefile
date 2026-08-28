@@ -130,7 +130,8 @@ $(DRIVER31_BUILD)/printertag.o: driver/printertag_classic.s | $(DRIVER31_BUILD)
 	$(CC) -m68000 -c $< -o $@
 
 $(DRIVER31_BUILD)/driver_core.o: driver/driver_core.c | $(DRIVER31_BUILD)
-	$(CC) $(CFLAGS) -DRender=MintPRINT_RenderCore -c $< -o $@
+	$(CC) $(CFLAGS) -DRender=MintPRINT_RenderCore \
+		-DMINTPRINT_CLASSIC_GUNS -c $< -o $@
 
 $(DRIVER31_BUILD)/classic_render_shim.o: driver/classic_render_shim.c | $(DRIVER31_BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
