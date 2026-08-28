@@ -120,9 +120,9 @@ $(DRIVER_OUT): $(DRIVER_BUILD)/printertag.o $(DRIVER_BUILD)/driver_core.o $(DRIV
 #
 # printer.device V40 does not understand the V44 extended PED/tag interface
 # (PRTA_NoIO / PRTA_8BitGuns).  The classic printer tag therefore exposes the
-# pre-V44 PrinterExtendedData layout and the Render shim expands printer.device's
-# native 4-bit-per-gun Y/M/C/B intensities to the 8-bit values used internally
-# by the existing JPEG/PostScript/PWG/PDF pipeline.
+# pre-V44 PrinterExtendedData layout.  MINTPRINT_CLASSIC_GUNS makes the shared
+# renderer expand printer.device's native 4-bit-per-gun Y/M/C/B intensities at
+# the point of consumption, avoiding a second per-row allocation and copy.
 #
 # Only driver_core.c is rebuilt with Render renamed.  Everything below the
 # printer.device ABI boundary is shared bit-for-bit with the normal driver.
