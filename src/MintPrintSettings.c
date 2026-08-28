@@ -718,6 +718,34 @@ static struct Gadget *find_gadget_by_id(UWORD id) {
     return g;
 }
 
+/* V37 TEXT_KIND does not reliably erase the previous text when GTTX_Text
+ * changes. Clear only the gadget's value rectangle first; the descriptive
+ * "Printer Model:" label sits outside this box and is left untouched.
+ * This is harmless on V39+ and keeps one shared executable. */
+static void mp_update_model_display(struct Window *win) {
+    struct Gadget *g;
+    struct RastPort *rp;
+    UBYTE old_apen;
+
+    if (!win || !win->RPort)
+        return;
+    g = find_gadget_by_id(GAD_MODEL_DISPLAY);
+    if (!g)
+        return;
+
+    rp = win->RPort;
+    old_apen = rp->FgPen;
+    SetAPen(rp, 0);
+    RectFill(rp, g->LeftEdge, g->TopEdge,
+             g->LeftEdge + g->Width - 1,
+             g->TopEdge + g->Height - 1);
+    SetAPen(rp, old_apen);
+
+    GT_SetGadgetAttrs(g, win, NULL,
+                      GTTX_Text, (ULONG)printer_make_model,
+                      TAG_DONE);
+}
+
 static void trim_config_line(char *s) {
     size_t n;
     if (!s) return;
@@ -1935,11 +1963,7 @@ static void apply_driver_config_to_gadgets(struct Window *win) {
                           GTCY_Active, mp_sides_active_index(),
                           TAG_DONE);
 
-    g = find_gadget_by_id(GAD_MODEL_DISPLAY);
-    if (g)
-        GT_SetGadgetAttrs(g, win, NULL,
-                          GTTX_Text, (ULONG)printer_make_model,
-                          TAG_DONE);
+    mp_update_model_display(win);
 
     GT_RefreshWindow(win, NULL);
 }
@@ -6396,12 +6420,7 @@ query_receive_pump_gui:
     }
 
     if (window) {
-        struct Gadget *model_gadget = find_gadget_by_id(GAD_MODEL_DISPLAY);
-        if (model_gadget) {
-            GT_SetGadgetAttrs(model_gadget, window, NULL,
-                              GTTX_Text, (ULONG)printer_make_model,
-                              TAG_DONE);
-        }
+        mp_update_model_display(window);
         /* Preview the freshly-queried (not yet saved) model in the Unit
          * dropdown's current entry, rather than waiting for Save. */
         refresh_unit_dropdown(window);
