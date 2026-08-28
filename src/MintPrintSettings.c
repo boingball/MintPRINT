@@ -7852,17 +7852,23 @@ void process_window_events(struct Window *win) {
                     break;
 
                 case IDCMP_REFRESHWINDOW:
+                    printf("Refresh: begin\n");
                     GT_BeginRefresh(win);
                     GT_EndRefresh(win, TRUE);
+                    printf("Refresh: GT_BeginRefresh/EndRefresh done\n");
                     /* GT_BeginRefresh/EndRefresh only repaints GadTools
                      * gadgets - the status box is hand-drawn and needs its
                      * own replay here, or it looks emptied out any time
                      * something forces a refresh (e.g. Printer Prefs
                      * opening on top of this window and closing again). */
                     redraw_output_box();
+                    printf("Refresh: output box redrawn\n");
                     mp_draw_marker_strips();
+                    printf("Refresh: marker strips drawn\n");
                     mp_draw_sides_hint();
+                    printf("Refresh: sides hint drawn\n");
                     mp_draw_printer_icon();
+                    printf("Refresh: printer icon drawn\n");
                     break;
 
                     case IDCMP_MENUPICK:
