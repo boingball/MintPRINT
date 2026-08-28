@@ -1608,10 +1608,13 @@ static void mp_test_print_release(struct Window *win)
     if (test_print_job.bitmap) {
         if (test_print_job.bitmap_manual) {
             int plane;
-            for (plane = 0; plane < MP_TESTPAGE_DEPTH; ++plane) {
+            for (plane = 0;
+                 plane < (int)test_print_job.bitmap_storage.Depth;
+                 ++plane) {
                 if (test_print_job.bitmap_storage.Planes[plane]) {
                     FreeRaster(test_print_job.bitmap_storage.Planes[plane],
-                               MP_TESTPAGE_WIDTH, MP_TESTPAGE_HEIGHT);
+                               (ULONG)test_print_job.bitmap_storage.BytesPerRow * 8UL,
+                               (ULONG)test_print_job.bitmap_storage.Rows);
                     test_print_job.bitmap_storage.Planes[plane] = NULL;
                 }
             }
