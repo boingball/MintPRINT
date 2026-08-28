@@ -3644,6 +3644,39 @@ static BOOL mp_sides_hint_ensure_pens(struct MPSidesHintImage *image,
     return TRUE;
 }
 
+/* GetRGB32() is a graphics.library v39 (AmigaOS 3.0/AGA) addition and does
+ * not exist in a v37 (AmigaOS 2.04) graphics.library - calling it there
+ * jumps through a library vector that was never filled in, which is
+ * exactly the illegal-instruction crash a real AmigaOS 2.0/2.04 test of
+ * this build hit, right after mp_draw_marker_strips() (no v39-only calls
+ * on its own code path) and before mp_draw_sides_hint() had a chance to
+ * log a trace line. GetRGB4() - 4 bits per component, 0x0RGB packed into
+ * one ULONG - has existed since Kickstart 1.x, so build the same
+ * top-byte-significant 32-bit-per-component table GetRGB32() would have,
+ * one pen at a time, expanding each nibble to a full byte
+ * (0x0..0xF -> 0x00..0xFF) exactly the way driver/classic_render_shim.c
+ * already does for the OS3.1 driver's own 4-bit-gun input. Shared by
+ * mp_draw_sides_hint() and mp_draw_printer_icon() below, which both used
+ * to call GetRGB32() directly. */
+static void mp_fill_screen_palette32(struct ColorMap *cm, int pen_count,
+                                     ULONG *out_palette) {
+    if (GfxBase->LibNode.lib_Version >= 39) {
+        GetRGB32(cm, 0, (ULONG)pen_count, out_palette);
+        return;
+    }
+
+    int pen;
+    for (pen = 0; pen < pen_count; ++pen) {
+        ULONG rgb4 = GetRGB4(cm, pen);
+        UBYTE r4 = (UBYTE)((rgb4 >> 8) & 0xF);
+        UBYTE g4 = (UBYTE)((rgb4 >> 4) & 0xF);
+        UBYTE b4 = (UBYTE)(rgb4 & 0xF);
+        out_palette[pen * 3 + 0] = (ULONG)((r4 << 4) | r4) << 24;
+        out_palette[pen * 3 + 1] = (ULONG)((g4 << 4) | g4) << 24;
+        out_palette[pen * 3 + 2] = (ULONG)((b4 << 4) | b4) << 24;
+    }
+}
+
 static void mp_draw_sides_hint(void) {
     struct MPSidesHintImage *image;
     ULONG screen_palette[3 * 256];
@@ -3667,7 +3700,7 @@ static void mp_draw_sides_hint(void) {
     screen_pen_count = (int)cm->Count;
     if (screen_pen_count > 256)
         screen_pen_count = 256;
-    GetRGB32(cm, 0, (ULONG)screen_pen_count, screen_palette);
+    mp_fill_screen_palette32(cm, screen_pen_count, screen_palette);
 
     SetDrMd(rp, JAM1);
     SetAPen(rp, 0);
@@ -5485,7 +5518,7 @@ static void mp_draw_printer_icon(void) {
     screen_pen_count = (int)cm->Count;
     if (screen_pen_count > 256)
         screen_pen_count = 256;
-    GetRGB32(cm, 0, (ULONG)screen_pen_count, screen_palette);
+    mp_fill_screen_palette32(cm, screen_pen_count, screen_palette);
 
     SetDrMd(rp, JAM1);
     SetAPen(rp, 0);
@@ -8084,10 +8117,23 @@ int main(void) {
     }
 
     /* Draw the status box's empty border immediately, rather than leaving
-     * it invisible until the first status line happens to draw it. */
+     * it invisible until the first status line happens to draw it.
+     *
+     * TEMPORARY: the printf() trace calls through this block (each one
+     * routes through custom_printf(), which appends to T:MintPRINT-gui.log
+     * whenever Debug is on - see custom_printf()'s own comment) exist only
+     * to bisect a real AmigaOS 2.0/2.04 startup crash (illegal instruction,
+     * #80000004) that leaves T:MintPRINT-gui.log completely empty, meaning
+     * it happens somewhere in this span - custom_printf("CLEAR") itself
+     * returns before ever reaching the log-write code, and nothing else
+     * here logs anything on its own success path. Remove once the crash is
+     * isolated to one call. */
     custom_printf("CLEAR");
+    printf("Startup: status box cleared\n");
     mp_draw_marker_strips();
+    printf("Startup: marker strips drawn\n");
     mp_draw_sides_hint();
+    printf("Startup: sides hint drawn\n");
 
     // Set the initial state of the print mode radio buttons
     struct Gadget *print_mode_gadget = glist;
@@ -8099,21 +8145,26 @@ int main(void) {
                           GTCY_Active, print_mode,
                           TAG_DONE);
     }
+    printf("Startup: print mode gadget set\n");
 
     menu = CreateMenus(menu_template, TAG_DONE);
+    printf("Startup: CreateMenus done\n");
     if (menu) {
         LayoutMenus(menu, vi,
             GTMN_NewLookMenus, TRUE,           // Enable standard white/grey look
             GTMN_FrontPen, 1,                  // Text pen (usually black)
             GTNM_BackPen, 0,                   // Background pen (usually white)
             TAG_DONE);
+        printf("Startup: LayoutMenus done\n");
         SetMenuStrip(window, menu);
+        printf("Startup: SetMenuStrip done\n");
     } else {
         printf("Failed to create menus\n");
     }
 
     // Refresh window
     GT_RefreshWindow(window, NULL);
+    printf("Startup: window refreshed\n");
 
     // Offer to install DEVS:Printers/MintPRINT if it is missing.
     check_and_offer_driver_install(window);
