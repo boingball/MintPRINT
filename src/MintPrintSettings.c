@@ -14,6 +14,7 @@
 #include <proto/exec.h>
 #include <exec/execbase.h>
 #include <exec/libraries.h>
+#include <exec/memory.h> /* MEMF_ANY for OS-native response buffers */
 #include <ctype.h> // for tolower()
 #include <proto/dos.h>
 #include <dos/dostags.h> // for SYS_Asynch (SystemTags)
@@ -7524,10 +7525,10 @@ void process_window_events(struct Window *win) {
     char *response;
 
     /* This must be the first observable operation in the function. The
-     * previous "entering" trace was after malloc(MAX_BUFFER), so a crash in
+     * previous "entering" trace was after the response allocation, so a crash in
      * the function prologue or the 250 KiB allocation looked identical. */
     printf("Event loop: function entered before response allocation\n");
-    response = malloc(MAX_BUFFER);
+    response = (char *)AllocVec((ULONG)MAX_BUFFER, MEMF_ANY);
     if (!response) {
         printf("Failed to allocate %lu-byte response buffer\n",
                (unsigned long)MAX_BUFFER);
@@ -7942,7 +7943,7 @@ void process_window_events(struct Window *win) {
     if (test_print_job.active)
         mp_test_print_cancel(win);
 
-    free(response); // Free the dynamically allocated buffer
+    FreeVec(response); // Free the OS-native response buffer
 }
 
 static BOOL mp_open_tcp_stack(void) {
@@ -8216,7 +8217,7 @@ int main(void) {
     if (ip_buffer[0]) {
         char startup_ip[64];
         int startup_port = -1;
-        char *startup_response = malloc(MAX_BUFFER);
+        char *startup_response = (char *)AllocVec((ULONG)MAX_BUFFER, MEMF_ANY);
 
         if (!startup_response) {
             printf("Could not allocate startup Query response buffer - skipping live refresh\n");
@@ -8230,7 +8231,7 @@ int main(void) {
                 printf("Saved printer address '%s' is invalid - skipping startup Query\n",
                        ip_buffer);
             }
-            free(startup_response);
+            FreeVec(startup_response);
         }
     }
 
