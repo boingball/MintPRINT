@@ -7,11 +7,11 @@
  * the configured IPP Print-Job endpoint.
  *
  * Trace output: T:MintPRINT-driver.log
- * Debug JPEG:       T:MintPRINT-job.jpg
- * Debug PWG Raster: T:MintPRINT-job.pwg
- * Debug PDF:        T:MintPRINT-job.pdf
- * Debug PostScript: T:MintPRINT-job.ps
- * Debug URF:        T:MintPRINT-job.urf
+ *
+ * Job files (Debug JPEG/PWG Raster/PDF/PostScript/URF: MintPRINT-job.<ext>)
+ * spool under T: by default, or under the Spooler option's configured hard
+ * drive device (e.g. DH0:) on memory-tight systems - see SPOOL= in
+ * driver/config.c and mp_build_spool_paths() below.
  */
 
 #include <exec/types.h>
@@ -55,7 +55,7 @@
  * MP_DRIVER_REV (the version half) only bumps for something that
  * warrants a new version number outright, not on every rebuild. */
 #define MP_DRIVER_REV 41
-#define MP_DRIVER_SUBREV 6
+#define MP_DRIVER_SUBREV 7
 
 struct ExecBase *SysBase = NULL;
 struct DosLibrary *DOSBase = NULL;
@@ -79,12 +79,27 @@ struct TagItem DriverTags[] = {
     { TAG_DONE,      0 }
 };
 
-#define MP_JOB_FILE_JPEG ((CONST_STRPTR)"T:MintPRINT-job.jpg")
-#define MP_JOB_FILE_PWG  ((CONST_STRPTR)"T:MintPRINT-job.pwg")
-#define MP_JOB_FILE_PDF  ((CONST_STRPTR)"T:MintPRINT-job.pdf")
-#define MP_JOB_FILE_PS   ((CONST_STRPTR)"T:MintPRINT-job.ps")
-#define MP_JOB_FILE_URF  ((CONST_STRPTR)"T:MintPRINT-job.urf")
-#define MP_JOB_FILE_BACK ((CONST_STRPTR)"T:MintPRINT-back.rgb")
+/* Job file base names, combined with the configured spool location
+ * (g_config.spool: "RAM", meaning T: exactly as MintPRINT has always used
+ * - whatever T: is assigned to, normally RAM: on a stock system - or a
+ * real device such as "DH0:") into the g_job_file_* buffers below by
+ * mp_build_spool_paths(), once per Open() bracket right after g_config is
+ * loaded. See the Spooler option in MintPrint Settings and
+ * driver/config.c's SPOOL=. */
+#define MP_JOB_BASE_JPEG ((CONST_STRPTR)"MintPRINT-job.jpg")
+#define MP_JOB_BASE_PWG  ((CONST_STRPTR)"MintPRINT-job.pwg")
+#define MP_JOB_BASE_PDF  ((CONST_STRPTR)"MintPRINT-job.pdf")
+#define MP_JOB_BASE_PS   ((CONST_STRPTR)"MintPRINT-job.ps")
+#define MP_JOB_BASE_URF  ((CONST_STRPTR)"MintPRINT-job.urf")
+#define MP_JOB_BASE_BACK ((CONST_STRPTR)"MintPRINT-back.rgb")
+
+#define MP_SPOOL_PATH_MAX (MP_CONFIG_OPTION_MAX + 24)
+static char g_job_file_jpeg[MP_SPOOL_PATH_MAX];
+static char g_job_file_pwg[MP_SPOOL_PATH_MAX];
+static char g_job_file_pdf[MP_SPOOL_PATH_MAX];
+static char g_job_file_ps[MP_SPOOL_PATH_MAX];
+static char g_job_file_urf[MP_SPOOL_PATH_MAX];
+static char g_job_file_back[MP_SPOOL_PATH_MAX];
 
 /* Multiple Render(status=0 begin -> rows -> status=4 end) cycles inside one
  * Open()/Close() bracket is legitimate - that's how a real multi-page
@@ -256,11 +271,11 @@ static int mp_detect_engine(const struct MPConfig *cfg)
 static CONST_STRPTR mp_job_filename(void)
 {
     switch (g_engine) {
-        case MP_ENGINE_PWG: return MP_JOB_FILE_PWG;
-        case MP_ENGINE_PDF: return MP_JOB_FILE_PDF;
-        case MP_ENGINE_POSTSCRIPT: return MP_JOB_FILE_PS;
-        case MP_ENGINE_URF: return MP_JOB_FILE_URF;
-        default:            return MP_JOB_FILE_JPEG;
+        case MP_ENGINE_PWG: return (CONST_STRPTR)g_job_file_pwg;
+        case MP_ENGINE_PDF: return (CONST_STRPTR)g_job_file_pdf;
+        case MP_ENGINE_POSTSCRIPT: return (CONST_STRPTR)g_job_file_ps;
+        case MP_ENGINE_URF: return (CONST_STRPTR)g_job_file_urf;
+        default:            return (CONST_STRPTR)g_job_file_jpeg;
     }
 }
 
@@ -309,6 +324,40 @@ static BOOL mp_streq(const char *a, const char *b)
     if (!a || !b) return FALSE;
     while (a[i] && b[i] && a[i] == b[i]) ++i;
     return a[i] == 0 && b[i] == 0;
+}
+
+/* Builds "<prefix><base_name>" into dst (bounded by cap). prefix is "T:"
+ * when g_config.spool is empty or "RAM" - MintPRINT's original,
+ * unconfigurable behaviour - or the configured device otherwise. No
+ * snprintf/strcpy here: this driver is built freestanding (-nostartfiles,
+ * no libc), same as every other string helper in this file. */
+static void mp_build_spool_path(char *dst, ULONG cap, const char *base_name)
+{
+    const char *prefix;
+    ULONG i, j;
+
+    prefix = (g_config.spool[0] && !mp_streq(g_config.spool, "RAM"))
+        ? g_config.spool : "T:";
+
+    i = 0;
+    while (prefix[i] && i + 1 < cap) { dst[i] = prefix[i]; ++i; }
+    for (j = 0; base_name[j] && i + 1 < cap; ++j, ++i) dst[i] = base_name[j];
+    dst[i] = 0;
+}
+
+/* Called once per Open() bracket, right after g_config is (re)loaded in
+ * Init()/DriverOpen(), so every job filename this job uses reflects
+ * whichever Spooler location was in effect when the config was saved -
+ * "RAM" (the historical T: behaviour) or a real hard drive partition for
+ * memory-tight systems where even T:'s usual RAM: backing is scarce. */
+static void mp_build_spool_paths(void)
+{
+    mp_build_spool_path(g_job_file_jpeg, sizeof(g_job_file_jpeg), MP_JOB_BASE_JPEG);
+    mp_build_spool_path(g_job_file_pwg,  sizeof(g_job_file_pwg),  MP_JOB_BASE_PWG);
+    mp_build_spool_path(g_job_file_pdf,  sizeof(g_job_file_pdf),  MP_JOB_BASE_PDF);
+    mp_build_spool_path(g_job_file_ps,   sizeof(g_job_file_ps),   MP_JOB_BASE_PS);
+    mp_build_spool_path(g_job_file_urf,  sizeof(g_job_file_urf),  MP_JOB_BASE_URF);
+    mp_build_spool_path(g_job_file_back, sizeof(g_job_file_back), MP_JOB_BASE_BACK);
 }
 
 /* Every log call below builds one line into this buffer, then hands it to
@@ -435,6 +484,8 @@ static void mp_log_config(const struct MPConfig *cfg, LONG source)
     }
     mp_log_append(" engine=");
     mp_log_append(cfg->engine[0] ? cfg->engine : "jpeg");
+    mp_log_append(" spool=");
+    mp_log_append(cfg->spool[0] ? cfg->spool : "RAM");
     mp_spool_log(g_log_line);
 }
 
@@ -486,7 +537,7 @@ static void mp_pwg_close_aux(void)
         mp_spool_aux_close();
         g_pwg_aux_open = FALSE;
     }
-    mp_spool_job_delete(MP_JOB_FILE_BACK);
+    mp_spool_job_delete((CONST_STRPTR)g_job_file_back);
     g_pwg_defer_rows = FALSE;
     g_pwg_reverse_x = FALSE;
     g_pwg_reverse_y = FALSE;
@@ -683,7 +734,7 @@ static BOOL mp_job_begin(ULONG width, ULONG height)
                 return FALSE;
             }
             if (g_pwg_defer_rows) {
-                g_pwg_aux_open = mp_spool_aux_open(MP_JOB_FILE_BACK);
+                g_pwg_aux_open = mp_spool_aux_open((CONST_STRPTR)g_job_file_back);
                 if (!g_pwg_aux_open) {
                     mp_log_text("PWG backside row store open failed");
                     g_job_failed = TRUE;
@@ -1472,6 +1523,7 @@ LONG PRT_STDARGS Init(struct PrinterData *pd)
         return -1;
     }
     g_config_source = mp_spool_config_load(&g_config);
+    mp_build_spool_paths();
     mp_log_text("Init");
     if (g_config.debug) {
         mp_log_reset();
@@ -1538,6 +1590,7 @@ int PRT_STDARGS DriverOpen(struct IORequest *ior)
      * first page, so it needs the real configured resolution available
      * here already, not just Init()'s one-time compiled-in default. */
     g_config_source = mp_spool_config_load(&g_config);
+    mp_build_spool_paths();
     g_engine = mp_detect_engine(&g_config);
     if (g_config.sides[0] == 't' &&
         g_engine != MP_ENGINE_PWG && g_engine != MP_ENGINE_URF) {

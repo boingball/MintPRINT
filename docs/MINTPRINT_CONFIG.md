@@ -32,6 +32,7 @@ Settings always fills in a real printer address before saving):
     PATH=/ipp/print
     DEBUG=0
     SIDES=
+    SPOOL=RAM
     PWG_SHEET_BACK=normal
 
 `DEBUG=0` is the default: no `T:MintPRINT-gui.log` or
@@ -49,6 +50,17 @@ not advertise duplex, Settings saves an empty `SIDES=` value so the driver
 omits the optional IPP attribute; absence still means one-sided. Old profiles
 without a `SIDES=` line preserve the historical request shape. See
 `docs/DUPLEX_PRINTING.md`.
+
+`SPOOL=` selects where job files (the rendered JPEG/PWG Raster/PDF/
+PostScript/URF document, plus its captured-text-mode equivalent) are
+written before submission. `RAM` (the default) is MintPRINT's original,
+unconfigurable behaviour: files go under `T:`, which is normally assigned
+to `RAM:` on a stock system. Any other value is used as a literal device
+prefix (e.g. `DH0:`), so job files spool to a real hard drive instead -
+useful on memory-tight systems (see `docs/OS31_SUPPORT.md`'s memory
+preflight check) where even `T:`'s usual RAM: backing is scarce. MintPrint
+Settings' Spooler gadget lists `RAM` plus one entry per `DHn:`-named
+device it finds mounted, and writes this value when saved.
 
 `PWG_SHEET_BACK=` records the printer's
 `pwg-raster-document-sheet-back` capability (`normal`, `rotated`, `flipped`,

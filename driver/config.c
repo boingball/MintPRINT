@@ -109,6 +109,7 @@ void mp_config_defaults(struct MPConfig *cfg)
      * job-template attribute to printers that were already working. */
     cfg->sides[0] = 0;
     mp_cfg_copy(cfg->pwg_sheet_back, sizeof(cfg->pwg_sheet_back), "normal");
+    mp_cfg_copy(cfg->spool, sizeof(cfg->spool), "RAM");
     cfg->margin_left_100mm = 0;
     cfg->margin_right_100mm = 0;
     cfg->margin_top_100mm = 0;
@@ -244,6 +245,11 @@ LONG mp_config_load(struct MPConfig *cfg)
                  mp_cfg_len(value) == 20)) {
                 mp_cfg_copy(cfg->sides, sizeof(cfg->sides), value);
             }
+            continue;
+        }
+        if (mp_cfg_starts(g_config_line, "SPOOL=")) {
+            value = g_config_line + 6;
+            if (value[0]) mp_cfg_copy(cfg->spool, sizeof(cfg->spool), value);
             continue;
         }
         if (mp_cfg_starts(g_config_line, "PWG_SHEET_BACK=")) {

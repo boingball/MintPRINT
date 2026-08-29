@@ -26,6 +26,11 @@ struct MPConfig {
     char scaling[MP_CONFIG_OPTION_MAX];
     char sides[MP_CONFIG_OPTION_MAX];
     char pwg_sheet_back[MP_CONFIG_OPTION_MAX];
+    /* Where job files spool: "RAM" (default - whatever T: is assigned to,
+     * normally RAM: on a stock system) or a real device name such as
+     * "DH0:" for memory-tight systems where even T:'s usual RAM: backing
+     * is scarce. See SPOOL= below and driver_core.c's mp_build_spool_paths(). */
+    char spool[MP_CONFIG_OPTION_MAX];
     /* IPP media-*-margin values, in hundredths of a millimetre. */
     ULONG margin_left_100mm;
     ULONG margin_right_100mm;

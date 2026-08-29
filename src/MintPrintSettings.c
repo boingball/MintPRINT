@@ -17,6 +17,8 @@
 #include <exec/memory.h> /* MEMF_ANY for OS-native response buffers */
 #include <ctype.h> // for tolower()
 #include <proto/dos.h>
+#include <dos/dos.h>
+#include <dos/dosextens.h> // for struct DosList/LDF_DEVICES (Spooler HDD detection)
 #include <dos/dostags.h> // for SYS_Asynch (SystemTags)
 #include <proto/intuition.h>
 #include <proto/gadtools.h>
@@ -102,6 +104,7 @@ extern struct ExecBase *SysBase;
 #define GAD_MODEL_DISPLAY 17
 #define GAD_RESOLUTION 18
 #define GAD_SIDES 19
+#define GAD_SPOOLER 20
 
 // Discovery selection dialog gadget IDs (separate window/gadget list)
 #define GAD_DISC_CYCLE  1
@@ -453,6 +456,68 @@ static ULONG mp_sides_active_index(void) {
     return 0;
 }
 
+static ULONG mp_spool_active_index(void) {
+    int i;
+
+    for (i = 0; i < mp_spool_option_count; ++i) {
+        if (strcmp(driver_spool_buffer, mp_spool_value_storage[i]) == 0)
+            return (ULONG)i;
+    }
+    return 0;
+}
+
+/* Populates the Spooler cycle gadget's choices: "RAM" (index 0, always
+ * present) plus one "HDD (DHn:)" entry per DHn hard drive device this
+ * machine's DOS device list actually has mounted - the standard Amiga
+ * IDE/SCSI partition naming convention (a name-based heuristic, not a
+ * hardware check: a controller using some other naming scheme, e.g. a
+ * vendor-specific CF/SD adapter, will not show up here). Called once at
+ * startup, before the window/gadgets exist - see the static-storage
+ * comment above driver_spool_buffer. LockDosList()/UnLockDosList() take
+ * the DOS list's own internal semaphore, so no Forbid() is needed around
+ * the walk. dol_Name is a BCPL BSTR (length-prefixed, not
+ * NUL-terminated), hence BADDR() and an explicit length rather than a
+ * plain string copy. */
+static void mp_build_spool_options(void) {
+    struct DosList *dl;
+    int count = 0;
+
+    mp_spool_label_ptrs[0] = mp_spool_label_storage[0];
+    strcpy(mp_spool_label_storage[0], "RAM");
+    strcpy(mp_spool_value_storage[0], "RAM");
+    count = 1;
+
+    dl = LockDosList(LDF_DEVICES | LDF_READ);
+    while (count < MP_MAX_SPOOL_OPTIONS &&
+           (dl = NextDosEntry(dl, LDF_DEVICES)) != NULL) {
+        UBYTE *bname = (UBYTE *)BADDR(dl->dol_Name);
+        UBYTE blen;
+        char name[32];
+        UBYTE i;
+
+        if (!bname) continue;
+        blen = bname[0];
+        if (blen > sizeof(name) - 1) blen = (UBYTE)(sizeof(name) - 1);
+        for (i = 0; i < blen; ++i) name[i] = (char)bname[i + 1];
+        name[blen] = '\0';
+
+        if (blen >= 2 && (name[0] == 'D' || name[0] == 'd') &&
+            (name[1] == 'H' || name[1] == 'h')) {
+            snprintf(mp_spool_label_storage[count],
+                     sizeof(mp_spool_label_storage[0]),
+                     "HDD (%s:)", name);
+            mp_spool_label_ptrs[count] = mp_spool_label_storage[count];
+            snprintf(mp_spool_value_storage[count],
+                     sizeof(mp_spool_value_storage[0]), "%s:", name);
+            ++count;
+        }
+    }
+    UnLockDosList(LDF_DEVICES | LDF_READ);
+
+    mp_spool_label_ptrs[count] = NULL;
+    mp_spool_option_count = count;
+}
+
 // Media Size Helper
 BOOL parse_media_dimensions(const char *media_str, int *x, int *y) {
     const char *dim_part = strchr(media_str, '_');
@@ -536,7 +601,7 @@ struct GfxBase *GfxBase = NULL;
 char ip_buffer[256] = "";
 char driver_path_buffer[96] = "/ipp/print";
 BOOL driver_debug = FALSE;
-static STRPTR debug_labels[] = { "Off", "On", NULL };
+static STRPTR debug_labels[] = { "Debug Off", "Debug On", NULL };
 /* Capture resolution driver.device reports to the app and renders at.
  * 600dpi quadruples raster size/RAM use for a real quality gain; 300dpi
  * (index 0) stays the default so existing users see no behaviour change. */
@@ -601,6 +666,20 @@ char driver_color_buffer[MAX_ATTR_LEN] = "";
 char driver_quality_buffer[MAX_ATTR_LEN] = "";
 char driver_scaling_buffer[MAX_ATTR_LEN] = "";
 char driver_sides_buffer[MAX_ATTR_LEN] = "";
+/* Where the driver spools job files: "RAM" (default - whatever T: is
+ * assigned to, normally RAM: on a stock system) or a real hard drive
+ * device such as "DH0:", for memory-tight systems where even T:'s usual
+ * RAM: backing is scarce. mp_build_spool_options() below populates the
+ * Spooler cycle gadget's choices from the DOS device list actually
+ * present on this machine. Same static-storage/fixed-array-address
+ * discipline as mp_sides_label_ptrs above (see its comment) - built once
+ * at startup, never reallocated while the gadget is live. */
+char driver_spool_buffer[MAX_ATTR_LEN] = "RAM";
+#define MP_MAX_SPOOL_OPTIONS 9 /* RAM + up to 8 detected hard drive devices */
+static char mp_spool_label_storage[MP_MAX_SPOOL_OPTIONS][24];
+static char mp_spool_value_storage[MP_MAX_SPOOL_OPTIONS][MAX_ATTR_LEN];
+static STRPTR mp_spool_label_ptrs[MP_MAX_SPOOL_OPTIONS + 1];
+static int mp_spool_option_count = 1;
 int current_unit_index = 0;
 char printer_make_model[128] = "";
 char printer_icon_uri[256] = "";
@@ -1065,6 +1144,8 @@ static BOOL write_driver_config_file(CONST_STRPTR filename) {
     FPuts(file, line);
     snprintf(line, sizeof(line), "SIDES=%s\n", driver_sides_buffer);
     FPuts(file, line);
+    snprintf(line, sizeof(line), "SPOOL=%s\n", driver_spool_buffer);
+    FPuts(file, line);
     snprintf(line, sizeof(line), "PWG_SHEET_BACK=%s\n", pwg_sheet_back_value);
     FPuts(file, line);
     snprintf(line, sizeof(line), "MODEL=%s\n", printer_make_model);
@@ -1141,6 +1222,7 @@ static BOOL load_driver_config(void) {
     driver_quality_buffer[0] = '\0';
     driver_scaling_buffer[0] = '\0';
     driver_sides_buffer[0] = '\0';
+    strcpy(driver_spool_buffer, "RAM");
     strcpy(pwg_sheet_back_value, "normal");
     printer_make_model[0] = '\0';
 
@@ -1228,6 +1310,13 @@ static BOOL load_driver_config(void) {
                 strncpy(driver_sides_buffer, sides,
                         sizeof(driver_sides_buffer) - 1);
                 driver_sides_buffer[sizeof(driver_sides_buffer) - 1] = '\0';
+            }
+        } else if (strncmp(line, "SPOOL=", 6) == 0) {
+            const char *spool = line + 6;
+            if (spool[0]) {
+                strncpy(driver_spool_buffer, spool,
+                        sizeof(driver_spool_buffer) - 1);
+                driver_spool_buffer[sizeof(driver_spool_buffer) - 1] = '\0';
             }
         } else if (strncmp(line, "PWG_SHEET_BACK=", 15) == 0) {
             const char *sheet_back = line + 15;
@@ -2010,6 +2099,12 @@ static void apply_driver_config_to_gadgets(struct Window *win) {
     if (g)
         GT_SetGadgetAttrs(g, win, NULL,
                           GTCY_Active, mp_sides_active_index(),
+                          TAG_DONE);
+
+    g = find_gadget_by_id(GAD_SPOOLER);
+    if (g)
+        GT_SetGadgetAttrs(g, win, NULL,
+                          GTCY_Active, mp_spool_active_index(),
                           TAG_DONE);
 
     mp_update_model_display(win);
@@ -7353,21 +7448,23 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
         return NULL;
     }
 
-    // Enable/disable diagnostic logs and retained rendered jobs. Same
-    // width as Printer Engine above so the two stacked cycle gadgets
-    // stay visually aligned.
+    // Where job files spool: RAM (T:, as MintPRINT has always done) or a
+    // real hard drive device, for memory-tight systems - see
+    // mp_build_spool_options(). Same width/row as the old Debug slot so
+    // the stacked cycle gadgets stay visually aligned; Debug itself now
+    // lives on the button row next to Save.
     ng.ng_LeftEdge = 135;
     ng.ng_TopEdge = 95 + topborder;
     ng.ng_Width = 140;
     ng.ng_Height = 12;
-    ng.ng_GadgetText = (STRPTR)"Debug:";
-    ng.ng_GadgetID = GAD_DEBUG;
+    ng.ng_GadgetText = (STRPTR)"Spooler:";
+    ng.ng_GadgetID = GAD_SPOOLER;
     gad = CreateGadget(CYCLE_KIND, gad, &ng,
-        GTCY_Labels, (ULONG)debug_labels,
-        GTCY_Active, driver_debug ? 1 : 0,
+        GTCY_Labels, (ULONG)mp_spool_label_ptrs,
+        GTCY_Active, mp_spool_active_index(),
         TAG_DONE);
     if (!gad) {
-        printf("Failed to create debug gadget\n");
+        printf("Failed to create spooler gadget\n");
         return NULL;
     }
 
@@ -7487,6 +7584,25 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
         return NULL;
     }
 
+    // Enable/disable diagnostic logs and retained rendered jobs. Shares
+    // the button row's spare space between Test Print and Save; the
+    // cycle's own label text ("Debug On"/"Debug Off") is self-explanatory
+    // so it needs no separate GadgetText prefix, unlike the stacked
+    // Printer Engine/Spooler cycles above.
+    ng.ng_LeftEdge = 160;
+    ng.ng_TopEdge = 198 + topborder;
+    ng.ng_Width = 110;
+    ng.ng_Height = 12;
+    ng.ng_GadgetText = NULL;
+    ng.ng_GadgetID = GAD_DEBUG;
+    gad = CreateGadget(CYCLE_KIND, gad, &ng,
+        GTCY_Labels, (ULONG)debug_labels,
+        GTCY_Active, driver_debug ? 1 : 0,
+        TAG_DONE);
+    if (!gad) {
+        printf("Failed to create debug gadget\n");
+        return NULL;
+    }
 
     // Save button - same action as File -> Save Driver Settings.
     ng.ng_LeftEdge = 304;
@@ -7686,6 +7802,19 @@ void process_window_events(struct Window *win) {
                         case GAD_DEBUG:
                             driver_debug = imsgCode ? TRUE : FALSE;
                             break;
+
+                        case GAD_SPOOLER:
+                        {
+                            ULONG selected = (ULONG)imsgCode;
+                            if (selected < (ULONG)mp_spool_option_count) {
+                                strncpy(driver_spool_buffer,
+                                        mp_spool_value_storage[selected],
+                                        sizeof(driver_spool_buffer) - 1);
+                                driver_spool_buffer[
+                                    sizeof(driver_spool_buffer) - 1] = '\0';
+                            }
+                        }
+                        break;
 
                         case GAD_QUALITY_MODE:
                         {
@@ -8082,6 +8211,7 @@ int main(void) {
      * seed_saved_option_labels() populated those arrays above. */
     // Load the same Unit0 profile used by DEVS:Printers/MintPRINT.
     load_driver_config();
+    mp_build_spool_options();
     seed_saved_option_labels();
 
     // Load print mode from ENV:

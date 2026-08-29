@@ -46,6 +46,25 @@ as one contiguous free block, which matters on a fragmented, memory-tight
 system. This replaces silently attempting the allocation and failing deep
 into a print with a single clear rejection up front.
 
+This check only covers the small per-row/scratch buffers, which always
+live in RAM regardless of configuration. The *encoded job file itself*
+(the full rendered JPEG/PWG Raster/PDF/PostScript/URF document, which can
+run to several MB) is a separate concern, covered by the Spooler option
+below.
+
+## Spooler: RAM vs. hard drive
+
+MintPRINT has always spooled its rendered job file to `T:` before
+submitting it over IPP. On a stock system `T:` is assigned to `RAM:`, so
+that file - potentially several MB for a full-page raster - was always
+competing with everything else for the same scarce RAM on a memory-tight
+system like the one above. MintPrint Settings' Spooler gadget now offers
+an alternative: any `DHn:`-named hard drive device it finds mounted
+(`RAM` stays the default - see `SPOOL=` in `docs/MINTPRINT_CONFIG.md`).
+Choosing a hard drive moves that entire file off RAM and onto disk,
+independent of the small preflight-checked buffers above - the two
+address different parts of the same low-memory problem.
+
 ## Network requirement
 
 AmigaOS 3.1 does not itself provide the TCP/IP socket environment MintPRINT
