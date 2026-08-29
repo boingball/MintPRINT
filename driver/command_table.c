@@ -292,14 +292,6 @@ static BOOL mp_text_has_more(const struct MPTextCursor *cursor)
     return FALSE;
 }
 
-static BOOL mp_text_streq(const char *a, const char *b)
-{
-    ULONG i = 0;
-    if (!a || !b) return FALSE;
-    while (a[i] && b[i] && a[i] == b[i]) ++i;
-    return a[i] == 0 && b[i] == 0;
-}
-
 /* Same scheme as driver_core.c's mp_build_spool_path() - see that comment
  * for why there's no snprintf/strcpy. Called once per TextDriverClose()
  * right after g_text_config is loaded, mirroring mp_build_spool_paths(). */
