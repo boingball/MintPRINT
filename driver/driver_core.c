@@ -20,7 +20,6 @@
 #include <exec/memory.h>
 #include <dos/dos.h>
 #include <dos/dosextens.h>
-#include <dos/datetime.h> /* struct ClockData/Amiga2Date() - job timestamp naming */
 #include <utility/tagitem.h>
 #include <devices/printer.h>
 #include <devices/prtbase.h>
@@ -380,6 +379,28 @@ static void mp_build_spool_paths(void)
     mp_build_spool_path(g_job_file_back, sizeof(g_job_file_back), MP_JOB_BASE_BACK);
 }
 
+/* Days-since-1970-01-01 (may assume non-negative here - the earliest an
+ * Amiga clock ever reads is the 1978 epoch) to proleptic-Gregorian
+ * civil date. The standard "civil_from_days" construction (Howard
+ * Hinnant's days-to-civil algorithm): self-contained arithmetic, no
+ * calendar table or library call needed - see mp_build_job_timestamp()
+ * below for why that matters here. */
+static void mp_civil_from_days(ULONG z, UWORD *y, UWORD *m, UWORD *d)
+{
+    ULONG era, doe, yoe, doy, mp;
+
+    z += 719468UL;
+    era = z / 146097UL;
+    doe = z - era * 146097UL;                                   /* [0,146096] */
+    yoe = (doe - doe / 1460UL + doe / 36524UL - doe / 146096UL) / 365UL; /* [0,399] */
+    doy = doe - (365UL * yoe + yoe / 4UL - yoe / 100UL);         /* [0,365] */
+    mp = (5UL * doy + 2UL) / 153UL;                              /* [0,11] */
+
+    *d = (UWORD)(doy - (153UL * mp + 2UL) / 5UL + 1UL);          /* [1,31] */
+    *m = (UWORD)(mp + (mp < 10UL ? 3UL : (ULONG)(-9)));          /* [1,12] */
+    *y = (UWORD)(yoe + era * 400UL + (*m <= 2 ? 1UL : 0UL));
+}
+
 /* Builds "DDMMYYHHMMSS" (the Spooler management window's job-naming
  * convention) from the current AmigaDOS clock into out, which must be at
  * least 13 bytes. A machine with no battery-backed RTC - or one whose
@@ -387,34 +408,42 @@ static void mp_build_spool_paths(void)
  * (1 Jan 1978), so every job built that day gets the same candidate
  * name; mp_spool_job_open_unique()'s "-1", "-2", ... collision suffix
  * (spool.c) is what actually disambiguates those, so nothing special is
- * needed here beyond building whatever the clock currently reads. */
+ * needed here beyond building whatever the clock currently reads.
+ *
+ * Built from DateStamp() alone (days/minutes/ticks since 1 Jan 1978) via
+ * mp_civil_from_days() above, rather than dos.library's own Amiga2Date()
+ * - struct ClockData isn't declared by every NDK this project builds
+ * against, and DateStamp() is the one dos.library clock call already
+ * proven to compile here (mp_config_load() etc. via FGets/Open, this
+ * driver's whole freestanding-C discipline). */
 static void mp_build_job_timestamp(char *out)
 {
     struct DateStamp ds;
-    struct ClockData cd;
-    ULONG total_seconds;
+    UWORD year, month, mday, hour, min, sec;
     UWORD yy;
 
     DateStamp(&ds);
-    total_seconds = (ULONG)ds.ds_Days * 86400UL +
-                    (ULONG)ds.ds_Minute * 60UL +
-                    (ULONG)ds.ds_Tick / 50UL;
-    Amiga2Date(total_seconds, &cd);
+    /* 2922 = days from 1970-01-01 to the Amiga epoch (1978-01-01): eight
+     * years (1970..1977), two of them leap (1972, 1976) -> 8*365 + 2. */
+    mp_civil_from_days((ULONG)ds.ds_Days + 2922UL, &year, &month, &mday);
+    hour = (UWORD)(ds.ds_Minute / 60);
+    min  = (UWORD)(ds.ds_Minute % 60);
+    sec  = (UWORD)(ds.ds_Tick / 50);
 
-    yy = (UWORD)(cd.year % 100U);
+    yy = (UWORD)(year % 100U);
 
-    out[0]  = (char)('0' + (cd.mday  / 10) % 10);
-    out[1]  = (char)('0' +  cd.mday        % 10);
-    out[2]  = (char)('0' + (cd.month / 10) % 10);
-    out[3]  = (char)('0' +  cd.month       % 10);
-    out[4]  = (char)('0' + (yy       / 10) % 10);
-    out[5]  = (char)('0' +  yy             % 10);
-    out[6]  = (char)('0' + (cd.hour  / 10) % 10);
-    out[7]  = (char)('0' +  cd.hour        % 10);
-    out[8]  = (char)('0' + (cd.min   / 10) % 10);
-    out[9]  = (char)('0' +  cd.min         % 10);
-    out[10] = (char)('0' + (cd.sec   / 10) % 10);
-    out[11] = (char)('0' +  cd.sec         % 10);
+    out[0]  = (char)('0' + (mday  / 10) % 10);
+    out[1]  = (char)('0' +  mday        % 10);
+    out[2]  = (char)('0' + (month / 10) % 10);
+    out[3]  = (char)('0' +  month       % 10);
+    out[4]  = (char)('0' + (yy    / 10) % 10);
+    out[5]  = (char)('0' +  yy          % 10);
+    out[6]  = (char)('0' + (hour  / 10) % 10);
+    out[7]  = (char)('0' +  hour        % 10);
+    out[8]  = (char)('0' + (min   / 10) % 10);
+    out[9]  = (char)('0' +  min         % 10);
+    out[10] = (char)('0' + (sec   / 10) % 10);
+    out[11] = (char)('0' +  sec         % 10);
     out[12] = 0;
 }
 
@@ -862,8 +891,8 @@ static BOOL mp_job_begin(ULONG width, ULONG height)
             char resolved[MP_SPOOL_PATH_MAX];
 
             mp_build_job_timestamp(timestamp);
-            mp_insert_name_suffix(mp_job_filename(), timestamp, candidate,
-                                  sizeof(candidate));
+            mp_insert_name_suffix((const char *)mp_job_filename(), timestamp,
+                                  candidate, sizeof(candidate));
             g_job_open = mp_spool_job_open_unique((CONST_STRPTR)candidate,
                                                   resolved, sizeof(resolved));
             if (g_job_open) {
