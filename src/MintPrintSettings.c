@@ -5541,9 +5541,16 @@ static void run_spooler_window(struct Window *parent)
          * cannot select an entry at all", which is exactly why rows
          * couldn't be clicked. Selectable-but-not-editable is simply the
          * GadTools default with no tag needed. */
+        /* GTLV_Selected starts at ~0 (no row pre-highlighted), the same
+         * sentinel MintAMP's working radio-results listview uses - not 0,
+         * which pre-selects row 0 and can confuse the "did my click do
+         * anything" read on the very first paint. GTLV_ShowSelected is
+         * included too, matching that same gadget, even though this list
+         * has no companion display gadget to copy the selection into. */
         gad = CreateGadget(LISTVIEW_KIND, gad, &ng,
             GTLV_Labels, (ULONG)&job_list,
-            GTLV_Selected, 0,
+            GTLV_Selected, (ULONG)~0,
+            GTLV_ShowSelected, (ULONG)NULL,
             GA_Disabled, (ULONG)(count > 0 ? FALSE : TRUE),
             TAG_DONE);
         if (!gad) { FreeGadgets(sglist); break; }
@@ -5590,9 +5597,13 @@ static void run_spooler_window(struct Window *parent)
         gad = CreateGadget(BUTTON_KIND, gad, &ng, GT_Underscore, '_', TAG_DONE);
         if (!gad) { FreeGadgets(sglist); break; }
 
+        /* Gadgets are attached after OpenWindowTags via AddGList/RefreshGList,
+         * not the WA_Gadgets tag - the same sequence MintAMP's working
+         * listview windows use. WA_Gadgets attaches the list at open time
+         * too in principle, but this is the pattern proven to leave a
+         * GadTools LISTVIEW_KIND actually clickable on real hardware. */
         swin = OpenWindowTags(NULL,
             WA_Title, (ULONG)"Spooler Management",
-            WA_Gadgets, (ULONG)sglist,
             WA_Width, 560,
             WA_InnerHeight, 196,
             WA_DragBar, TRUE,
@@ -5605,6 +5616,8 @@ static void run_spooler_window(struct Window *parent)
             TAG_DONE);
         if (!swin) { FreeGadgets(sglist); break; }
 
+        AddGList(swin, sglist, (UWORD)-1, -1, NULL);
+        RefreshGList(sglist, swin, NULL, -1);
         GT_RefreshWindow(swin, NULL);
 
         while (!terminated) {
