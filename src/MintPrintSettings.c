@@ -297,6 +297,17 @@ static char mp_sides_value_storage[MP_MAX_SIDES_OPTIONS][MAX_ATTR_LEN];
 static STRPTR mp_sides_label_ptrs[MP_MAX_SIDES_OPTIONS + 1];
 static int mp_sides_option_count = 1;
 
+/* Spooler cycle gadget storage - same static-storage/fixed-array-address
+ * discipline as mp_sides_* above (see driver_spool_buffer's own comment,
+ * defined with the other persisted Unit0 buffers below, for why). Built
+ * once at startup by mp_build_spool_options() from this machine's DOS
+ * device list, never reallocated while the gadget is live. */
+#define MP_MAX_SPOOL_OPTIONS 9 /* RAM + up to 8 detected hard drive devices */
+static char mp_spool_label_storage[MP_MAX_SPOOL_OPTIONS][24];
+static char mp_spool_value_storage[MP_MAX_SPOOL_OPTIONS][MAX_ATTR_LEN];
+static STRPTR mp_spool_label_ptrs[MP_MAX_SPOOL_OPTIONS + 1];
+static int mp_spool_option_count = 1;
+
 static char mp_unit_label_storage[MAX_UNITS][MP_UNIT_LABEL_LEN];
 static STRPTR mp_unit_label_ptrs[MAX_UNITS + 1];
 
@@ -414,6 +425,7 @@ static int mp_dpi_active_index(int dpi) {
 /* Defined with the other persisted Unit0 buffers below. */
 extern char driver_sides_buffer[MAX_ATTR_LEN];
 extern char driver_engine_buffer[32];
+extern char driver_spool_buffer[MAX_ATTR_LEN];
 
 static BOOL mp_supported_side(const char *value) {
     int i;
@@ -669,17 +681,10 @@ char driver_sides_buffer[MAX_ATTR_LEN] = "";
 /* Where the driver spools job files: "RAM" (default - whatever T: is
  * assigned to, normally RAM: on a stock system) or a real hard drive
  * device such as "DH0:", for memory-tight systems where even T:'s usual
- * RAM: backing is scarce. mp_build_spool_options() below populates the
- * Spooler cycle gadget's choices from the DOS device list actually
- * present on this machine. Same static-storage/fixed-array-address
- * discipline as mp_sides_label_ptrs above (see its comment) - built once
- * at startup, never reallocated while the gadget is live. */
+ * RAM: backing is scarce. See mp_build_spool_options()'s comment (above,
+ * with the rest of the Spooler gadget's static storage) for how its
+ * choices are populated. */
 char driver_spool_buffer[MAX_ATTR_LEN] = "RAM";
-#define MP_MAX_SPOOL_OPTIONS 9 /* RAM + up to 8 detected hard drive devices */
-static char mp_spool_label_storage[MP_MAX_SPOOL_OPTIONS][24];
-static char mp_spool_value_storage[MP_MAX_SPOOL_OPTIONS][MAX_ATTR_LEN];
-static STRPTR mp_spool_label_ptrs[MP_MAX_SPOOL_OPTIONS + 1];
-static int mp_spool_option_count = 1;
 int current_unit_index = 0;
 char printer_make_model[128] = "";
 char printer_icon_uri[256] = "";
