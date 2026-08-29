@@ -5506,6 +5506,7 @@ static void run_spooler_window(struct Window *parent)
     do {
         struct Gadget *sglist = NULL;
         struct Gadget *gad;
+        struct Gadget *job_listview;
         struct NewGadget ng;
         struct Window *swin;
         BOOL terminated = FALSE;
@@ -5542,9 +5543,11 @@ static void run_spooler_window(struct Window *parent)
          * GadTools default with no tag needed. */
         gad = CreateGadget(LISTVIEW_KIND, gad, &ng,
             GTLV_Labels, (ULONG)&job_list,
+            GTLV_Selected, 0,
             GA_Disabled, (ULONG)(count > 0 ? FALSE : TRUE),
             TAG_DONE);
         if (!gad) { FreeGadgets(sglist); break; }
+        job_listview = gad;
 
         ng.ng_TopEdge += 162;
         ng.ng_LeftEdge = 10;
@@ -5622,8 +5625,23 @@ static void run_spooler_window(struct Window *parent)
                     GT_EndRefresh(swin, TRUE);
                 } else if (cls == IDCMP_GADGETUP) {
                     if (g->GadgetID == GAD_SPOOL_JOB_LIST) {
-                        if ((ULONG)code < (ULONG)count)
+                        if ((ULONG)code < (ULONG)count) {
                             selected = (ULONG)code;
+                            /* GadTools does not persist which row a click
+                             * selected on its own - a later
+                             * IDCMP_REFRESHWINDOW (there are more of
+                             * those than you'd expect: window
+                             * activation, another window uncovering
+                             * this one, ...) repaints the listview from
+                             * its own stored GTLV_Selected, which
+                             * otherwise still says "none", making the
+                             * highlight vanish right after the click.
+                             * Mirroring the selection back here is what
+                             * makes it stick. */
+                            GT_SetGadgetAttrs(job_listview, swin, NULL,
+                                              GTLV_Selected, selected,
+                                              TAG_DONE);
+                        }
                     } else if (g->GadgetID == GAD_SPOOL_CLOSE) {
                         terminated = TRUE;
                     } else if (g->GadgetID == GAD_SPOOL_REFRESH) {
