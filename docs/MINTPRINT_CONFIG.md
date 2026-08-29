@@ -54,13 +54,18 @@ without a `SIDES=` line preserve the historical request shape. See
 `SPOOL=` selects where job files (the rendered JPEG/PWG Raster/PDF/
 PostScript/URF document, plus its captured-text-mode equivalent) are
 written before submission. `RAM` (the default) is MintPRINT's original,
-unconfigurable behaviour: files go under `T:`, which is normally assigned
-to `RAM:` on a stock system. Any other value is used as a literal device
-prefix (e.g. `DH0:`), so job files spool to a real hard drive instead -
-useful on memory-tight systems (see `docs/OS31_SUPPORT.md`'s memory
-preflight check) where even `T:`'s usual RAM: backing is scarce. MintPrint
+unconfigurable behaviour: files go flat under `T:`, which is normally
+assigned to `RAM:` on a stock system. Any other value is used as a
+literal device prefix (e.g. `DH0:`), so job files spool to a hidden
+`MPSPOOL` drawer at that device's root instead (`DH0:MPSPOOL/`) - useful
+on memory-tight systems (see `docs/OS31_SUPPORT.md`'s memory preflight
+check) where even `T:`'s usual RAM: backing is scarce. MintPrint
 Settings' Spooler gadget lists `RAM` plus one entry per `DHn:`-named
-device it finds mounted, and writes this value when saved.
+device it finds mounted, writes this value when saved, and creates the
+`MPSPOOL` drawer (hidden, no `.info` icon) on that device at the same
+time if it doesn't already exist - the driver itself never creates it,
+only writes into it, so a Unit0 pointing at a since-deleted `MPSPOOL`
+will fail to open its job file rather than silently recreating it.
 
 `PWG_SHEET_BACK=` records the printer's
 `pwg-raster-document-sheet-back` capability (`normal`, `rotated`, `flipped`,

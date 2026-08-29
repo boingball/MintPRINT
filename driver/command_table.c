@@ -54,7 +54,7 @@
 #define MP_TEXT_BASE_URF  ((const char *)"MintPRINT-text.urf")
 #define MP_TEXT_BASE_BACK ((const char *)"MintPRINT-text-back.rgb")
 
-#define MP_TEXT_SPOOL_PATH_MAX (MP_CONFIG_OPTION_MAX + 24)
+#define MP_TEXT_SPOOL_PATH_MAX (MP_CONFIG_OPTION_MAX + 40) /* + "MPSPOOL/" + base name */
 static char g_text_file_jpeg[MP_TEXT_SPOOL_PATH_MAX];
 static char g_text_file_pwg[MP_TEXT_SPOOL_PATH_MAX];
 static char g_text_file_pdf[MP_TEXT_SPOOL_PATH_MAX];
@@ -298,15 +298,17 @@ static BOOL mp_text_has_more(const struct MPTextCursor *cursor)
 static void mp_build_text_spool_path(char *dst, ULONG cap,
                                      const char *base_name)
 {
-    const char *prefix;
+    BOOL use_ram = !g_text_config.spool[0] ||
+                   mp_text_streq(g_text_config.spool, "RAM");
+    const char *prefix = use_ram ? "T:" : g_text_config.spool;
     ULONG i, j;
-
-    prefix = (g_text_config.spool[0] &&
-              !mp_text_streq(g_text_config.spool, "RAM"))
-        ? g_text_config.spool : "T:";
 
     i = 0;
     while (prefix[i] && i + 1 < cap) { dst[i] = prefix[i]; ++i; }
+    if (!use_ram) {
+        const char *dirname = MP_SPOOL_DIR_NAME "/";
+        for (j = 0; dirname[j] && i + 1 < cap; ++j, ++i) dst[i] = dirname[j];
+    }
     for (j = 0; base_name[j] && i + 1 < cap; ++j, ++i) dst[i] = base_name[j];
     dst[i] = 0;
 }

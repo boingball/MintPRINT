@@ -55,7 +55,7 @@
  * MP_DRIVER_REV (the version half) only bumps for something that
  * warrants a new version number outright, not on every rebuild. */
 #define MP_DRIVER_REV 41
-#define MP_DRIVER_SUBREV 7
+#define MP_DRIVER_SUBREV 8
 
 struct ExecBase *SysBase = NULL;
 struct DosLibrary *DOSBase = NULL;
@@ -97,7 +97,7 @@ struct TagItem DriverTags[] = {
 #define MP_JOB_BASE_URF  ((const char *)"MintPRINT-job.urf")
 #define MP_JOB_BASE_BACK ((const char *)"MintPRINT-back.rgb")
 
-#define MP_SPOOL_PATH_MAX (MP_CONFIG_OPTION_MAX + 24)
+#define MP_SPOOL_PATH_MAX (MP_CONFIG_OPTION_MAX + 40) /* + "MPSPOOL/" + base name */
 static char g_job_file_jpeg[MP_SPOOL_PATH_MAX];
 static char g_job_file_pwg[MP_SPOOL_PATH_MAX];
 static char g_job_file_pdf[MP_SPOOL_PATH_MAX];
@@ -332,19 +332,25 @@ static BOOL mp_streq(const char *a, const char *b)
 
 /* Builds "<prefix><base_name>" into dst (bounded by cap). prefix is "T:"
  * when g_config.spool is empty or "RAM" - MintPRINT's original,
- * unconfigurable behaviour - or the configured device otherwise. No
- * snprintf/strcpy here: this driver is built freestanding (-nostartfiles,
- * no libc), same as every other string helper in this file. */
+ * unconfigurable behaviour, spooling flat exactly as before - or
+ * "<device>MPSPOOL/" for a configured hard drive device: MintPrint
+ * Settings creates that drawer (hidden, no icon) the first time it's
+ * saved - see MP_SPOOL_DIR_NAME (config.h) and
+ * mp_ensure_hidden_spool_dir() (src/MintPrintSettings.c). No snprintf/
+ * strcpy here: this driver is built freestanding (-nostartfiles, no
+ * libc), same as every other string helper in this file. */
 static void mp_build_spool_path(char *dst, ULONG cap, const char *base_name)
 {
-    const char *prefix;
+    BOOL use_ram = !g_config.spool[0] || mp_streq(g_config.spool, "RAM");
+    const char *prefix = use_ram ? "T:" : g_config.spool;
     ULONG i, j;
-
-    prefix = (g_config.spool[0] && !mp_streq(g_config.spool, "RAM"))
-        ? g_config.spool : "T:";
 
     i = 0;
     while (prefix[i] && i + 1 < cap) { dst[i] = prefix[i]; ++i; }
+    if (!use_ram) {
+        const char *dirname = MP_SPOOL_DIR_NAME "/";
+        for (j = 0; dirname[j] && i + 1 < cap; ++j, ++i) dst[i] = dirname[j];
+    }
     for (j = 0; base_name[j] && i + 1 < cap; ++j, ++i) dst[i] = base_name[j];
     dst[i] = 0;
 }

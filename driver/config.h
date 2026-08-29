@@ -12,6 +12,14 @@
 #define MP_CONFIG_SOURCE_ENV      1
 #define MP_CONFIG_SOURCE_ENVARC   2
 
+/* Drawer name job files spool into on a real hard drive Spooler location
+ * (never used for "RAM" - that keeps spooling flat under T: exactly as
+ * before). MintPrint Settings creates it hidden, with no .info icon, the
+ * first time a device is saved as SPOOL= (mp_ensure_hidden_spool_dir() in
+ * src/MintPrintSettings.c) - the driver itself only ever builds paths
+ * into it, never creates it. */
+#define MP_SPOOL_DIR_NAME "MPSPOOL"
+
 struct MPConfig {
     char host[MP_CONFIG_HOST_MAX];
     UWORD port;

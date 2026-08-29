@@ -61,9 +61,10 @@ competing with everything else for the same scarce RAM on a memory-tight
 system like the one above. MintPrint Settings' Spooler gadget now offers
 an alternative: any `DHn:`-named hard drive device it finds mounted
 (`RAM` stays the default - see `SPOOL=` in `docs/MINTPRINT_CONFIG.md`).
-Choosing a hard drive moves that entire file off RAM and onto disk,
-independent of the small preflight-checked buffers above - the two
-address different parts of the same low-memory problem.
+Choosing a hard drive moves that entire file off RAM and onto disk, into
+a hidden `MPSPOOL` drawer MintPrint Settings creates on that device when
+the choice is saved, independent of the small preflight-checked buffers
+above - the two address different parts of the same low-memory problem.
 
 ## Network requirement
 

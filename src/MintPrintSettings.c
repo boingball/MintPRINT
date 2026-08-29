@@ -20,6 +20,13 @@
 #include <dos/dos.h>
 #include <dos/dosextens.h> // for struct DosList/LDF_DEVICES (Spooler HDD detection)
 #include <dos/dostags.h> // for SYS_Asynch (SystemTags)
+
+/* The H (hidden) protection bit - Protect's HSPARWED flags, present since
+ * AmigaOS 2.04 (this project's own minimum) though not always defined by
+ * an older NDK's <dos/dos.h>. Guarded rather than assumed. */
+#ifndef FIBF_HIDDEN
+#define FIBF_HIDDEN 0x00000080L
+#endif
 #include <proto/intuition.h>
 #include <proto/gadtools.h>
 #include <proto/graphics.h>
@@ -857,6 +864,42 @@ static BOOL ensure_config_dir(CONST_STRPTR name) {
     return TRUE;
 }
 
+/* Every hard-drive Spooler location keeps its job files in a dedicated
+ * MPSPOOL drawer on that device rather than loose at the volume's root -
+ * see mp_build_spool_path()/mp_build_text_spool_path() (driver_core.c/
+ * command_table.c), which spool there instead of T: once SPOOL= names a
+ * real device. Marked hidden (Protect's H bit - best-effort: an older
+ * filesystem that ignores it just leaves the drawer visible, nothing
+ * breaks) and given no .info icon, the same way the release build's own
+ * driver binaries deliberately go without one - this is a working
+ * directory, not something meant to be opened or double-clicked. Called
+ * once per Save, from save_driver_config() below; a failure here doesn't
+ * block saving the rest of Unit0 - the driver will simply fail to open
+ * its job file at print time and log why, same as any other missing
+ * destination. */
+static void mp_ensure_hidden_spool_dir(const char *device) {
+    char path[MAX_ATTR_LEN + 16];
+    BPTR lock;
+
+    if (!device || !device[0] || strcmp(device, "RAM") == 0) return;
+
+    snprintf(path, sizeof(path), "%sMPSPOOL", device);
+
+    lock = Lock((CONST_STRPTR)path, ACCESS_READ);
+    if (lock) {
+        UnLock(lock);
+    } else {
+        lock = CreateDir((CONST_STRPTR)path);
+        if (!lock) {
+            printf("Could not create spool directory %s\n", path);
+            return;
+        }
+        UnLock(lock);
+    }
+
+    SetProtection((CONST_STRPTR)path, FIBF_HIDDEN);
+}
+
 static void unit_config_path(int idx, BOOL envarc, char *out, int out_size) {
     snprintf(out, out_size, "%s:MintPRINT/Unit%d", envarc ? "ENVARC" : "ENV", idx);
 }
@@ -1166,6 +1209,7 @@ static BOOL save_driver_config(struct Window *win) {
     char envarc_path[64];
 
     capture_driver_settings(win);
+    mp_ensure_hidden_spool_dir(driver_spool_buffer);
 
     if (!ensure_config_dir((CONST_STRPTR)"ENV:MintPRINT")) {
         printf("Could not create/find ENV:MintPRINT\n");
