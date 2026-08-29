@@ -7,11 +7,11 @@
  * the configured IPP Print-Job endpoint.
  *
  * Trace output: T:MintPRINT-driver.log
- * Debug JPEG:       T:MintPRINT-job.jpg
- * Debug PWG Raster: T:MintPRINT-job.pwg
- * Debug PDF:        T:MintPRINT-job.pdf
- * Debug PostScript: T:MintPRINT-job.ps
- * Debug URF:        T:MintPRINT-job.urf
+ *
+ * Job files (Debug JPEG/PWG Raster/PDF/PostScript/URF: MintPRINT-job.<ext>)
+ * spool under T: by default, or under the Spooler option's configured hard
+ * drive device (e.g. DH0:) on memory-tight systems - see SPOOL= in
+ * driver/config.c and mp_build_spool_paths() below.
  */
 
 #include <exec/types.h>
@@ -55,7 +55,7 @@
  * MP_DRIVER_REV (the version half) only bumps for something that
  * warrants a new version number outright, not on every rebuild. */
 #define MP_DRIVER_REV 41
-#define MP_DRIVER_SUBREV 4
+#define MP_DRIVER_SUBREV 8
 
 struct ExecBase *SysBase = NULL;
 struct DosLibrary *DOSBase = NULL;
@@ -79,12 +79,31 @@ struct TagItem DriverTags[] = {
     { TAG_DONE,      0 }
 };
 
-#define MP_JOB_FILE_JPEG ((CONST_STRPTR)"T:MintPRINT-job.jpg")
-#define MP_JOB_FILE_PWG  ((CONST_STRPTR)"T:MintPRINT-job.pwg")
-#define MP_JOB_FILE_PDF  ((CONST_STRPTR)"T:MintPRINT-job.pdf")
-#define MP_JOB_FILE_PS   ((CONST_STRPTR)"T:MintPRINT-job.ps")
-#define MP_JOB_FILE_URF  ((CONST_STRPTR)"T:MintPRINT-job.urf")
-#define MP_JOB_FILE_BACK ((CONST_STRPTR)"T:MintPRINT-back.rgb")
+/* Job file base names, combined with the configured spool location
+ * (g_config.spool: "RAM", meaning T: exactly as MintPRINT has always used
+ * - whatever T: is assigned to, normally RAM: on a stock system - or a
+ * real device such as "DH0:") into the g_job_file_* buffers below by
+ * mp_build_spool_paths(), once per Open() bracket right after g_config is
+ * loaded. See the Spooler option in MintPrint Settings and
+ * driver/config.c's SPOOL=. */
+/* const char *, not CONST_STRPTR (const UBYTE *): these are only ever
+ * passed to mp_build_spool_path()'s plain-char base_name parameter below,
+ * never straight to a dos.library call - the CONST_STRPTR cast belongs on
+ * the finished g_job_file_* path instead (see its own call sites). */
+#define MP_JOB_BASE_JPEG ((const char *)"MintPRINT-job.jpg")
+#define MP_JOB_BASE_PWG  ((const char *)"MintPRINT-job.pwg")
+#define MP_JOB_BASE_PDF  ((const char *)"MintPRINT-job.pdf")
+#define MP_JOB_BASE_PS   ((const char *)"MintPRINT-job.ps")
+#define MP_JOB_BASE_URF  ((const char *)"MintPRINT-job.urf")
+#define MP_JOB_BASE_BACK ((const char *)"MintPRINT-back.rgb")
+
+#define MP_SPOOL_PATH_MAX (MP_CONFIG_OPTION_MAX + 40) /* + "MPSPOOL/" + base name */
+static char g_job_file_jpeg[MP_SPOOL_PATH_MAX];
+static char g_job_file_pwg[MP_SPOOL_PATH_MAX];
+static char g_job_file_pdf[MP_SPOOL_PATH_MAX];
+static char g_job_file_ps[MP_SPOOL_PATH_MAX];
+static char g_job_file_urf[MP_SPOOL_PATH_MAX];
+static char g_job_file_back[MP_SPOOL_PATH_MAX];
 
 /* Multiple Render(status=0 begin -> rows -> status=4 end) cycles inside one
  * Open()/Close() bracket is legitimate - that's how a real multi-page
@@ -256,11 +275,11 @@ static int mp_detect_engine(const struct MPConfig *cfg)
 static CONST_STRPTR mp_job_filename(void)
 {
     switch (g_engine) {
-        case MP_ENGINE_PWG: return MP_JOB_FILE_PWG;
-        case MP_ENGINE_PDF: return MP_JOB_FILE_PDF;
-        case MP_ENGINE_POSTSCRIPT: return MP_JOB_FILE_PS;
-        case MP_ENGINE_URF: return MP_JOB_FILE_URF;
-        default:            return MP_JOB_FILE_JPEG;
+        case MP_ENGINE_PWG: return (CONST_STRPTR)g_job_file_pwg;
+        case MP_ENGINE_PDF: return (CONST_STRPTR)g_job_file_pdf;
+        case MP_ENGINE_POSTSCRIPT: return (CONST_STRPTR)g_job_file_ps;
+        case MP_ENGINE_URF: return (CONST_STRPTR)g_job_file_urf;
+        default:            return (CONST_STRPTR)g_job_file_jpeg;
     }
 }
 
@@ -309,6 +328,46 @@ static BOOL mp_streq(const char *a, const char *b)
     if (!a || !b) return FALSE;
     while (a[i] && b[i] && a[i] == b[i]) ++i;
     return a[i] == 0 && b[i] == 0;
+}
+
+/* Builds "<prefix><base_name>" into dst (bounded by cap). prefix is "T:"
+ * when g_config.spool is empty or "RAM" - MintPRINT's original,
+ * unconfigurable behaviour, spooling flat exactly as before - or
+ * "<device>MPSPOOL/" for a configured hard drive device: MintPrint
+ * Settings creates that drawer (hidden, no icon) the first time it's
+ * saved - see MP_SPOOL_DIR_NAME (config.h) and
+ * mp_ensure_hidden_spool_dir() (src/MintPrintSettings.c). No snprintf/
+ * strcpy here: this driver is built freestanding (-nostartfiles, no
+ * libc), same as every other string helper in this file. */
+static void mp_build_spool_path(char *dst, ULONG cap, const char *base_name)
+{
+    BOOL use_ram = !g_config.spool[0] || mp_streq(g_config.spool, "RAM");
+    const char *prefix = use_ram ? "T:" : g_config.spool;
+    ULONG i, j;
+
+    i = 0;
+    while (prefix[i] && i + 1 < cap) { dst[i] = prefix[i]; ++i; }
+    if (!use_ram) {
+        const char *dirname = MP_SPOOL_DIR_NAME "/";
+        for (j = 0; dirname[j] && i + 1 < cap; ++j, ++i) dst[i] = dirname[j];
+    }
+    for (j = 0; base_name[j] && i + 1 < cap; ++j, ++i) dst[i] = base_name[j];
+    dst[i] = 0;
+}
+
+/* Called once per Open() bracket, right after g_config is (re)loaded in
+ * Init()/DriverOpen(), so every job filename this job uses reflects
+ * whichever Spooler location was in effect when the config was saved -
+ * "RAM" (the historical T: behaviour) or a real hard drive partition for
+ * memory-tight systems where even T:'s usual RAM: backing is scarce. */
+static void mp_build_spool_paths(void)
+{
+    mp_build_spool_path(g_job_file_jpeg, sizeof(g_job_file_jpeg), MP_JOB_BASE_JPEG);
+    mp_build_spool_path(g_job_file_pwg,  sizeof(g_job_file_pwg),  MP_JOB_BASE_PWG);
+    mp_build_spool_path(g_job_file_pdf,  sizeof(g_job_file_pdf),  MP_JOB_BASE_PDF);
+    mp_build_spool_path(g_job_file_ps,   sizeof(g_job_file_ps),   MP_JOB_BASE_PS);
+    mp_build_spool_path(g_job_file_urf,  sizeof(g_job_file_urf),  MP_JOB_BASE_URF);
+    mp_build_spool_path(g_job_file_back, sizeof(g_job_file_back), MP_JOB_BASE_BACK);
 }
 
 /* Every log call below builds one line into this buffer, then hands it to
@@ -435,6 +494,8 @@ static void mp_log_config(const struct MPConfig *cfg, LONG source)
     }
     mp_log_append(" engine=");
     mp_log_append(cfg->engine[0] ? cfg->engine : "jpeg");
+    mp_log_append(" spool=");
+    mp_log_append(cfg->spool[0] ? cfg->spool : "RAM");
     mp_spool_log(g_log_line);
 }
 
@@ -486,7 +547,7 @@ static void mp_pwg_close_aux(void)
         mp_spool_aux_close();
         g_pwg_aux_open = FALSE;
     }
-    mp_spool_job_delete(MP_JOB_FILE_BACK);
+    mp_spool_job_delete((CONST_STRPTR)g_job_file_back);
     g_pwg_defer_rows = FALSE;
     g_pwg_reverse_x = FALSE;
     g_pwg_reverse_y = FALSE;
@@ -557,12 +618,6 @@ static BOOL mp_job_begin(ULONG width, ULONG height)
     }
 
     g_rgb_row_bytes = width * 3UL;
-    g_rgb_row = (UBYTE *)AllocMem(g_rgb_row_bytes, MEMF_PUBLIC);
-    if (!g_rgb_row) {
-        mp_log_text("RGB row allocation failed");
-        mp_job_cleanup();
-        return FALSE;
-    }
 
     switch (g_engine) {
         case MP_ENGINE_PWG: need = mp_pwg_scratch_size(width); break;
@@ -573,6 +628,33 @@ static BOOL mp_job_begin(ULONG width, ULONG height)
     }
     if (!need) {
         mp_log_text("Encoder scratch size rejected width");
+        mp_job_cleanup();
+        return FALSE;
+    }
+
+    /* Preflight both allocations below as one combined estimate against the
+     * largest free MEMF_PUBLIC block, before touching AllocMem() at all.
+     * On a memory-tight system (AmigaOS 2.04 minimum-spec, ~2MB total) a
+     * page that is going to fail belongs failing here - with one clear log
+     * line naming what was needed and what was free - rather than after
+     * g_rgb_row's own AllocMem() already succeeded, fragmenting the free
+     * list, only for the (usually larger) encoder scratch buffer to fail
+     * right after it. MEMF_LARGEST asks for the size of the biggest
+     * contiguous free block, which is exactly what a single AllocMem() call
+     * of that size needs - a fragmented free list can show plenty of total
+     * free memory while still being unable to satisfy either request. */
+    if (AvailMem(MEMF_LARGEST | MEMF_PUBLIC) < (ULONG)(g_rgb_row_bytes + need)) {
+        mp_log_3("Job begin rejected: insufficient memory needed/free/width",
+                 (LONG)(g_rgb_row_bytes + need),
+                 (LONG)AvailMem(MEMF_LARGEST | MEMF_PUBLIC),
+                 (LONG)width);
+        mp_job_cleanup();
+        return FALSE;
+    }
+
+    g_rgb_row = (UBYTE *)AllocMem(g_rgb_row_bytes, MEMF_PUBLIC);
+    if (!g_rgb_row) {
+        mp_log_text("RGB row allocation failed");
         mp_job_cleanup();
         return FALSE;
     }
@@ -662,7 +744,7 @@ static BOOL mp_job_begin(ULONG width, ULONG height)
                 return FALSE;
             }
             if (g_pwg_defer_rows) {
-                g_pwg_aux_open = mp_spool_aux_open(MP_JOB_FILE_BACK);
+                g_pwg_aux_open = mp_spool_aux_open((CONST_STRPTR)g_job_file_back);
                 if (!g_pwg_aux_open) {
                     mp_log_text("PWG backside row store open failed");
                     g_job_failed = TRUE;
@@ -802,6 +884,20 @@ static BOOL mp_color_mode_wants_grayscale(const char *color)
            mp_streq(color, "process-monochrome");
 }
 
+/* The classic pre-V44 printer.device supplies 4-bit Y/M/C/B guns.
+ * Expand at the point of consumption instead of allocating and copying a
+ * second PrtInfo row in classic_render_shim.c. The >15 guard keeps this
+ * harmless with replacement printer.device implementations that already
+ * provide 8-bit values through the classic ABI. */
+static UBYTE mp_gun_to_8bit(UBYTE value)
+{
+#ifdef MINTPRINT_CLASSIC_GUNS
+    if (value <= 15)
+        return (UBYTE)((value << 4) | value);
+#endif
+    return value;
+}
+
 static BOOL mp_job_write_row(struct PrtInfo *pi, ULONG row_number)
 {
     ULONG src_x;
@@ -857,9 +953,12 @@ static BOOL mp_job_write_row(struct PrtInfo *pi, ULONG row_number)
     for (src_x = 0; src_x < (ULONG)pi->pi_width && dst_x < g_page_width; ++src_x) {
         union colorEntry *pixel = &pi->pi_ColorInt[src_x];
         ULONG repeat = pi->pi_ScaleX ? (ULONG)pi->pi_ScaleX[src_x] : 1UL;
-        UBYTE red   = (UBYTE)(255U - pixel->colorByte[PCMCYAN]);
-        UBYTE green = (UBYTE)(255U - pixel->colorByte[PCMMAGENTA]);
-        UBYTE blue  = (UBYTE)(255U - pixel->colorByte[PCMYELLOW]);
+        UBYTE red = (UBYTE)(255U -
+            mp_gun_to_8bit(pixel->colorByte[PCMCYAN]));
+        UBYTE green = (UBYTE)(255U -
+            mp_gun_to_8bit(pixel->colorByte[PCMMAGENTA]));
+        UBYTE blue = (UBYTE)(255U -
+            mp_gun_to_8bit(pixel->colorByte[PCMYELLOW]));
 
         while (repeat-- && dst_x < g_page_width) {
             ULONG out = dst_x * 3UL;
@@ -1434,6 +1533,7 @@ LONG PRT_STDARGS Init(struct PrinterData *pd)
         return -1;
     }
     g_config_source = mp_spool_config_load(&g_config);
+    mp_build_spool_paths();
     mp_log_text("Init");
     if (g_config.debug) {
         mp_log_reset();
@@ -1500,6 +1600,7 @@ int PRT_STDARGS DriverOpen(struct IORequest *ior)
      * first page, so it needs the real configured resolution available
      * here already, not just Init()'s one-time compiled-in default. */
     g_config_source = mp_spool_config_load(&g_config);
+    mp_build_spool_paths();
     g_engine = mp_detect_engine(&g_config);
     if (g_config.sides[0] == 't' &&
         g_engine != MP_ENGINE_PWG && g_engine != MP_ENGINE_URF) {

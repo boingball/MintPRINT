@@ -8,6 +8,10 @@ PORT=80
 PATH=/ipp/print
 ENGINE=jpeg
 DEBUG=0
+# SPOOL= is "RAM" (default - job files spool under T:, normally RAM: on a
+# stock system) or a real hard drive device name such as "DH0:" for
+# memory-tight systems where even T:'s usual RAM: backing is scarce.
+SPOOL=RAM
 # Capability-backed defaults written by MintPrint Settings after Query Printer.
 MEDIA=
 SOURCE=

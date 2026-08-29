@@ -41,12 +41,26 @@
 #define MP_TEXT_MAX_COLUMNS 136UL
 #define MP_TEXT_TAB_COLUMNS 8UL
 
-#define MP_TEXT_FILE_JPEG ((CONST_STRPTR)"T:MintPRINT-text.jpg")
-#define MP_TEXT_FILE_PWG  ((CONST_STRPTR)"T:MintPRINT-text.pwg")
-#define MP_TEXT_FILE_PDF  ((CONST_STRPTR)"T:MintPRINT-text.pdf")
-#define MP_TEXT_FILE_PS   ((CONST_STRPTR)"T:MintPRINT-text.ps")
-#define MP_TEXT_FILE_URF  ((CONST_STRPTR)"T:MintPRINT-text.urf")
-#define MP_TEXT_FILE_BACK ((CONST_STRPTR)"T:MintPRINT-text-back.rgb")
+/* Text-capture job file base names, combined with g_text_config.spool (see
+ * driver_core.c's identical MP_JOB_BASE_ names and mp_build_spool_paths()
+ * for the graphics-dump path, and driver/config.c's SPOOL=) into the
+ * g_text_file_* buffers below by mp_build_text_spool_paths(). */
+/* const char *, not CONST_STRPTR - see driver_core.c's identical
+ * MP_JOB_BASE_* comment for why. */
+#define MP_TEXT_BASE_JPEG ((const char *)"MintPRINT-text.jpg")
+#define MP_TEXT_BASE_PWG  ((const char *)"MintPRINT-text.pwg")
+#define MP_TEXT_BASE_PDF  ((const char *)"MintPRINT-text.pdf")
+#define MP_TEXT_BASE_PS   ((const char *)"MintPRINT-text.ps")
+#define MP_TEXT_BASE_URF  ((const char *)"MintPRINT-text.urf")
+#define MP_TEXT_BASE_BACK ((const char *)"MintPRINT-text-back.rgb")
+
+#define MP_TEXT_SPOOL_PATH_MAX (MP_CONFIG_OPTION_MAX + 40) /* + "MPSPOOL/" + base name */
+static char g_text_file_jpeg[MP_TEXT_SPOOL_PATH_MAX];
+static char g_text_file_pwg[MP_TEXT_SPOOL_PATH_MAX];
+static char g_text_file_pdf[MP_TEXT_SPOOL_PATH_MAX];
+static char g_text_file_ps[MP_TEXT_SPOOL_PATH_MAX];
+static char g_text_file_urf[MP_TEXT_SPOOL_PATH_MAX];
+static char g_text_file_back[MP_TEXT_SPOOL_PATH_MAX];
 
 enum {
     MP_TEXT_ENGINE_JPEG = 0,
@@ -278,6 +292,37 @@ static BOOL mp_text_has_more(const struct MPTextCursor *cursor)
     return FALSE;
 }
 
+/* Same scheme as driver_core.c's mp_build_spool_path() - see that comment
+ * for why there's no snprintf/strcpy. Called once per TextDriverClose()
+ * right after g_text_config is loaded, mirroring mp_build_spool_paths(). */
+static void mp_build_text_spool_path(char *dst, ULONG cap,
+                                     const char *base_name)
+{
+    BOOL use_ram = !g_text_config.spool[0] ||
+                   mp_text_streq(g_text_config.spool, "RAM");
+    const char *prefix = use_ram ? "T:" : g_text_config.spool;
+    ULONG i, j;
+
+    i = 0;
+    while (prefix[i] && i + 1 < cap) { dst[i] = prefix[i]; ++i; }
+    if (!use_ram) {
+        const char *dirname = MP_SPOOL_DIR_NAME "/";
+        for (j = 0; dirname[j] && i + 1 < cap; ++j, ++i) dst[i] = dirname[j];
+    }
+    for (j = 0; base_name[j] && i + 1 < cap; ++j, ++i) dst[i] = base_name[j];
+    dst[i] = 0;
+}
+
+static void mp_build_text_spool_paths(void)
+{
+    mp_build_text_spool_path(g_text_file_jpeg, sizeof(g_text_file_jpeg), MP_TEXT_BASE_JPEG);
+    mp_build_text_spool_path(g_text_file_pwg,  sizeof(g_text_file_pwg),  MP_TEXT_BASE_PWG);
+    mp_build_text_spool_path(g_text_file_pdf,  sizeof(g_text_file_pdf),  MP_TEXT_BASE_PDF);
+    mp_build_text_spool_path(g_text_file_ps,   sizeof(g_text_file_ps),   MP_TEXT_BASE_PS);
+    mp_build_text_spool_path(g_text_file_urf,  sizeof(g_text_file_urf),  MP_TEXT_BASE_URF);
+    mp_build_text_spool_path(g_text_file_back, sizeof(g_text_file_back), MP_TEXT_BASE_BACK);
+}
+
 static int mp_text_engine(const struct MPConfig *cfg)
 {
     if (cfg->engine[0] == 'p' && cfg->engine[1] == 'w')
@@ -294,11 +339,11 @@ static int mp_text_engine(const struct MPConfig *cfg)
 static CONST_STRPTR mp_text_filename(int engine)
 {
     switch (engine) {
-        case MP_TEXT_ENGINE_PWG: return MP_TEXT_FILE_PWG;
-        case MP_TEXT_ENGINE_PDF: return MP_TEXT_FILE_PDF;
-        case MP_TEXT_ENGINE_POSTSCRIPT: return MP_TEXT_FILE_PS;
-        case MP_TEXT_ENGINE_URF: return MP_TEXT_FILE_URF;
-        default: return MP_TEXT_FILE_JPEG;
+        case MP_TEXT_ENGINE_PWG: return (CONST_STRPTR)g_text_file_pwg;
+        case MP_TEXT_ENGINE_PDF: return (CONST_STRPTR)g_text_file_pdf;
+        case MP_TEXT_ENGINE_POSTSCRIPT: return (CONST_STRPTR)g_text_file_ps;
+        case MP_TEXT_ENGINE_URF: return (CONST_STRPTR)g_text_file_urf;
+        default: return (CONST_STRPTR)g_text_file_jpeg;
     }
 }
 
@@ -514,7 +559,7 @@ static void mp_text_pwg_close_aux(void)
         mp_spool_aux_close();
         g_text_pwg_aux_open = FALSE;
     }
-    mp_spool_job_delete(MP_TEXT_FILE_BACK);
+    mp_spool_job_delete((CONST_STRPTR)g_text_file_back);
     g_text_pwg_aux_bytes = 0;
 }
 
@@ -687,7 +732,7 @@ static BOOL mp_text_print_page_duplex(ULONG width, ULONG height, ULONG dpi,
     }
 
     if (defer_rows) {
-        g_text_pwg_aux_open = mp_spool_aux_open(MP_TEXT_FILE_BACK);
+        g_text_pwg_aux_open = mp_spool_aux_open((CONST_STRPTR)g_text_file_back);
         if (!g_text_pwg_aux_open) {
             mp_text_log("MintPRINT: PRT text backside row store open failed");
             goto done;
@@ -1162,6 +1207,7 @@ VOID PRT_STDARGS TextDriverClose(struct IORequest *ior)
 
     mp_config_defaults(&g_text_config);
     mp_spool_config_load(&g_text_config);
+    mp_build_text_spool_paths();
 
     if (g_text_capture_failed) {
         mp_text_log("MintPRINT: PRT text capture ran out of memory");

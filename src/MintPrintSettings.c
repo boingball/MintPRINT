@@ -14,9 +14,19 @@
 #include <proto/exec.h>
 #include <exec/execbase.h>
 #include <exec/libraries.h>
+#include <exec/memory.h> /* MEMF_ANY for OS-native response buffers */
 #include <ctype.h> // for tolower()
 #include <proto/dos.h>
+#include <dos/dos.h>
+#include <dos/dosextens.h> // for struct DosList/LDF_DEVICES (Spooler HDD detection)
 #include <dos/dostags.h> // for SYS_Asynch (SystemTags)
+
+/* The H (hidden) protection bit - Protect's HSPARWED flags, present since
+ * AmigaOS 2.04 (this project's own minimum) though not always defined by
+ * an older NDK's <dos/dos.h>. Guarded rather than assumed. */
+#ifndef FIBF_HIDDEN
+#define FIBF_HIDDEN 0x00000080L
+#endif
 #include <proto/intuition.h>
 #include <proto/gadtools.h>
 #include <proto/graphics.h>
@@ -101,6 +111,7 @@ extern struct ExecBase *SysBase;
 #define GAD_MODEL_DISPLAY 17
 #define GAD_RESOLUTION 18
 #define GAD_SIDES 19
+#define GAD_SPOOLER 20
 
 // Discovery selection dialog gadget IDs (separate window/gadget list)
 #define GAD_DISC_CYCLE  1
@@ -121,8 +132,10 @@ struct MPTestPrintJob {
     struct MsgPort *port;
     struct IODRPReq *request;
     struct BitMap *bitmap;
+    struct BitMap bitmap_storage;
     struct ColorMap *colormap;
     struct RastPort rastport;
+    BOOL bitmap_manual;
     BOOL device_open;
     BOOL active;
 };
@@ -291,6 +304,17 @@ static char mp_sides_value_storage[MP_MAX_SIDES_OPTIONS][MAX_ATTR_LEN];
 static STRPTR mp_sides_label_ptrs[MP_MAX_SIDES_OPTIONS + 1];
 static int mp_sides_option_count = 1;
 
+/* Spooler cycle gadget storage - same static-storage/fixed-array-address
+ * discipline as mp_sides_* above (see driver_spool_buffer's own comment,
+ * defined with the other persisted Unit0 buffers below, for why). Built
+ * once at startup by mp_build_spool_options() from this machine's DOS
+ * device list, never reallocated while the gadget is live. */
+#define MP_MAX_SPOOL_OPTIONS 9 /* RAM + up to 8 detected hard drive devices */
+static char mp_spool_label_storage[MP_MAX_SPOOL_OPTIONS][24];
+static char mp_spool_value_storage[MP_MAX_SPOOL_OPTIONS][MAX_ATTR_LEN];
+static STRPTR mp_spool_label_ptrs[MP_MAX_SPOOL_OPTIONS + 1];
+static int mp_spool_option_count = 1;
+
 static char mp_unit_label_storage[MAX_UNITS][MP_UNIT_LABEL_LEN];
 static STRPTR mp_unit_label_ptrs[MAX_UNITS + 1];
 
@@ -408,6 +432,7 @@ static int mp_dpi_active_index(int dpi) {
 /* Defined with the other persisted Unit0 buffers below. */
 extern char driver_sides_buffer[MAX_ATTR_LEN];
 extern char driver_engine_buffer[32];
+extern char driver_spool_buffer[MAX_ATTR_LEN];
 
 static BOOL mp_supported_side(const char *value) {
     int i;
@@ -448,6 +473,68 @@ static ULONG mp_sides_active_index(void) {
             return (ULONG)i;
     }
     return 0;
+}
+
+static ULONG mp_spool_active_index(void) {
+    int i;
+
+    for (i = 0; i < mp_spool_option_count; ++i) {
+        if (strcmp(driver_spool_buffer, mp_spool_value_storage[i]) == 0)
+            return (ULONG)i;
+    }
+    return 0;
+}
+
+/* Populates the Spooler cycle gadget's choices: "RAM" (index 0, always
+ * present) plus one "HDD (DHn:)" entry per DHn hard drive device this
+ * machine's DOS device list actually has mounted - the standard Amiga
+ * IDE/SCSI partition naming convention (a name-based heuristic, not a
+ * hardware check: a controller using some other naming scheme, e.g. a
+ * vendor-specific CF/SD adapter, will not show up here). Called once at
+ * startup, before the window/gadgets exist - see the static-storage
+ * comment above driver_spool_buffer. LockDosList()/UnLockDosList() take
+ * the DOS list's own internal semaphore, so no Forbid() is needed around
+ * the walk. dol_Name is a BCPL BSTR (length-prefixed, not
+ * NUL-terminated), hence BADDR() and an explicit length rather than a
+ * plain string copy. */
+static void mp_build_spool_options(void) {
+    struct DosList *dl;
+    int count = 0;
+
+    mp_spool_label_ptrs[0] = mp_spool_label_storage[0];
+    strcpy(mp_spool_label_storage[0], "RAM");
+    strcpy(mp_spool_value_storage[0], "RAM");
+    count = 1;
+
+    dl = LockDosList(LDF_DEVICES | LDF_READ);
+    while (count < MP_MAX_SPOOL_OPTIONS &&
+           (dl = NextDosEntry(dl, LDF_DEVICES)) != NULL) {
+        UBYTE *bname = (UBYTE *)BADDR(dl->dol_Name);
+        UBYTE blen;
+        char name[32];
+        UBYTE i;
+
+        if (!bname) continue;
+        blen = bname[0];
+        if (blen > sizeof(name) - 1) blen = (UBYTE)(sizeof(name) - 1);
+        for (i = 0; i < blen; ++i) name[i] = (char)bname[i + 1];
+        name[blen] = '\0';
+
+        if (blen >= 2 && (name[0] == 'D' || name[0] == 'd') &&
+            (name[1] == 'H' || name[1] == 'h')) {
+            snprintf(mp_spool_label_storage[count],
+                     sizeof(mp_spool_label_storage[0]),
+                     "HDD (%s:)", name);
+            mp_spool_label_ptrs[count] = mp_spool_label_storage[count];
+            snprintf(mp_spool_value_storage[count],
+                     sizeof(mp_spool_value_storage[0]), "%s:", name);
+            ++count;
+        }
+    }
+    UnLockDosList(LDF_DEVICES | LDF_READ);
+
+    mp_spool_label_ptrs[count] = NULL;
+    mp_spool_option_count = count;
 }
 
 // Media Size Helper
@@ -533,7 +620,7 @@ struct GfxBase *GfxBase = NULL;
 char ip_buffer[256] = "";
 char driver_path_buffer[96] = "/ipp/print";
 BOOL driver_debug = FALSE;
-static STRPTR debug_labels[] = { "Off", "On", NULL };
+static STRPTR debug_labels[] = { "Debug Off", "Debug On", NULL };
 /* Capture resolution driver.device reports to the app and renders at.
  * 600dpi quadruples raster size/RAM use for a real quality gain; 300dpi
  * (index 0) stays the default so existing users see no behaviour change. */
@@ -598,6 +685,13 @@ char driver_color_buffer[MAX_ATTR_LEN] = "";
 char driver_quality_buffer[MAX_ATTR_LEN] = "";
 char driver_scaling_buffer[MAX_ATTR_LEN] = "";
 char driver_sides_buffer[MAX_ATTR_LEN] = "";
+/* Where the driver spools job files: "RAM" (default - whatever T: is
+ * assigned to, normally RAM: on a stock system) or a real hard drive
+ * device such as "DH0:", for memory-tight systems where even T:'s usual
+ * RAM: backing is scarce. See mp_build_spool_options()'s comment (above,
+ * with the rest of the Spooler gadget's static storage) for how its
+ * choices are populated. */
+char driver_spool_buffer[MAX_ATTR_LEN] = "RAM";
 int current_unit_index = 0;
 char printer_make_model[128] = "";
 char printer_icon_uri[256] = "";
@@ -717,6 +811,34 @@ static struct Gadget *find_gadget_by_id(UWORD id) {
     return g;
 }
 
+/* V37 TEXT_KIND does not reliably erase the previous text when GTTX_Text
+ * changes. Clear only the gadget's value rectangle first; the descriptive
+ * "Printer Model:" label sits outside this box and is left untouched.
+ * This is harmless on V39+ and keeps one shared executable. */
+static void mp_update_model_display(struct Window *win) {
+    struct Gadget *g;
+    struct RastPort *rp;
+    UBYTE old_apen;
+
+    if (!win || !win->RPort)
+        return;
+    g = find_gadget_by_id(GAD_MODEL_DISPLAY);
+    if (!g)
+        return;
+
+    rp = win->RPort;
+    old_apen = rp->FgPen;
+    SetAPen(rp, 0);
+    RectFill(rp, g->LeftEdge, g->TopEdge,
+             g->LeftEdge + g->Width - 1,
+             g->TopEdge + g->Height - 1);
+    SetAPen(rp, old_apen);
+
+    GT_SetGadgetAttrs(g, win, NULL,
+                      GTTX_Text, (ULONG)printer_make_model,
+                      TAG_DONE);
+}
+
 static void trim_config_line(char *s) {
     size_t n;
     if (!s) return;
@@ -740,6 +862,42 @@ static BOOL ensure_config_dir(CONST_STRPTR name) {
     if (!lock) return FALSE;
     UnLock(lock);
     return TRUE;
+}
+
+/* Every hard-drive Spooler location keeps its job files in a dedicated
+ * MPSPOOL drawer on that device rather than loose at the volume's root -
+ * see mp_build_spool_path()/mp_build_text_spool_path() (driver_core.c/
+ * command_table.c), which spool there instead of T: once SPOOL= names a
+ * real device. Marked hidden (Protect's H bit - best-effort: an older
+ * filesystem that ignores it just leaves the drawer visible, nothing
+ * breaks) and given no .info icon, the same way the release build's own
+ * driver binaries deliberately go without one - this is a working
+ * directory, not something meant to be opened or double-clicked. Called
+ * once per Save, from save_driver_config() below; a failure here doesn't
+ * block saving the rest of Unit0 - the driver will simply fail to open
+ * its job file at print time and log why, same as any other missing
+ * destination. */
+static void mp_ensure_hidden_spool_dir(const char *device) {
+    char path[MAX_ATTR_LEN + 16];
+    BPTR lock;
+
+    if (!device || !device[0] || strcmp(device, "RAM") == 0) return;
+
+    snprintf(path, sizeof(path), "%sMPSPOOL", device);
+
+    lock = Lock((CONST_STRPTR)path, ACCESS_READ);
+    if (lock) {
+        UnLock(lock);
+    } else {
+        lock = CreateDir((CONST_STRPTR)path);
+        if (!lock) {
+            printf("Could not create spool directory %s\n", path);
+            return;
+        }
+        UnLock(lock);
+    }
+
+    SetProtection((CONST_STRPTR)path, FIBF_HIDDEN);
 }
 
 static void unit_config_path(int idx, BOOL envarc, char *out, int out_size) {
@@ -947,145 +1105,42 @@ static void warn_if_engine_unsupported(const char *engine) {
     }
 }
 
+/* GT_GetGadgetAttrsA() is V39. GadTools STRING_KIND wraps a standard
+ * Intuition StringInfo whose Buffer field is available on v37, so use that
+ * directly. Cycle values are retained from IDCMP_GADGETUP message codes in
+ * process_window_events(), which is the documented pre-V39 mechanism. */
+static char *mp_string_gadget_value(struct Gadget *g) {
+    struct StringInfo *si;
+
+    if (!g || !g->SpecialInfo)
+        return NULL;
+    si = (struct StringInfo *)g->SpecialInfo;
+    return si->Buffer;
+}
+
 static void capture_driver_settings(struct Window *win) {
     struct Gadget *g;
-    char *value = NULL;
-    ULONG active = driver_debug ? 1UL : 0UL;
+    char *value;
 
     if (!win) return;
 
     g = find_gadget_by_id(GAD_IP_STRING);
-    if (g && GT_GetGadgetAttrs(g, win, NULL,
-                               GTST_String, (ULONG)&value,
-                               TAG_DONE) && value) {
+    value = mp_string_gadget_value(g);
+    if (value) {
         strncpy(ip_buffer, value, sizeof(ip_buffer) - 1);
         ip_buffer[sizeof(ip_buffer) - 1] = '\0';
     }
 
-    value = NULL;
     g = find_gadget_by_id(GAD_IPP_PATH);
-    if (g && GT_GetGadgetAttrs(g, win, NULL,
-                               GTST_String, (ULONG)&value,
-                               TAG_DONE) && value) {
+    value = mp_string_gadget_value(g);
+    if (value) {
         strncpy(driver_path_buffer, value, sizeof(driver_path_buffer) - 1);
         driver_path_buffer[sizeof(driver_path_buffer) - 1] = '\0';
     }
 
-    g = find_gadget_by_id(GAD_DEBUG);
-    if (g) {
-        GT_GetGadgetAttrs(g, win, NULL,
-                          GTCY_Active, (ULONG)&active,
-                          TAG_DONE);
-        driver_debug = active ? TRUE : FALSE;
-    }
-
-    g = find_gadget_by_id(GAD_ENGINE);
-    if (g) {
-        ULONG engine_active = 0;
-        GT_GetGadgetAttrs(g, win, NULL,
-                          GTCY_Active, (ULONG)&engine_active,
-                          TAG_DONE);
-        if (engine_active < (ULONG)mp_engine_count &&
-            mp_engine_value_map[engine_active]) {
-            strncpy(driver_engine_buffer, mp_engine_value_map[engine_active],
-                    sizeof(driver_engine_buffer) - 1);
-            driver_engine_buffer[sizeof(driver_engine_buffer) - 1] = '\0';
-        }
-        warn_if_engine_unsupported(driver_engine_buffer);
-    }
-
-    g = find_gadget_by_id(GAD_RESOLUTION);
-    if (g) {
-        ULONG res_active = 0;
-        GT_GetGadgetAttrs(g, win, NULL,
-                          GTCY_Active, (ULONG)&res_active,
-                          TAG_DONE);
-        if (res_active < (ULONG)mp_dpi_options.count) {
-            driver_resolution = mp_dpi_options.values[res_active];
-            driver_resolution_explicit = TRUE;
-        }
-    }
-
-    /* Persist the capability-backed choices currently visible in the GUI. */
-    if (media_dropdown && num_media_tray_mappings > 0) {
-        ULONG selected = 0;
-        GT_GetGadgetAttrs(media_dropdown, win, NULL,
-                          GTCY_Active, (ULONG)&selected,
-                          TAG_DONE);
-        if (selected < (ULONG)num_media_tray_mappings) {
-            strncpy(driver_media_buffer, media_tray_map[selected].media,
-                    sizeof(driver_media_buffer) - 1);
-            driver_media_buffer[sizeof(driver_media_buffer) - 1] = '\0';
-            strncpy(driver_source_buffer, media_tray_map[selected].source,
-                    sizeof(driver_source_buffer) - 1);
-            driver_source_buffer[sizeof(driver_source_buffer) - 1] = '\0';
-        }
-    }
-
-    g = find_gadget_by_id(GAD_PRINT_MODE);
-    if (g && num_supported_print_modes > 0) {
-        ULONG selected = 0;
-        GT_GetGadgetAttrs(g, win, NULL,
-                          GTCY_Active, (ULONG)&selected,
-                          TAG_DONE);
-        if (selected < (ULONG)num_supported_print_modes) {
-            strncpy(driver_color_buffer, supported_print_modes[selected],
-                    sizeof(driver_color_buffer) - 1);
-            driver_color_buffer[sizeof(driver_color_buffer) - 1] = '\0';
-            strncpy(selected_print_mode, supported_print_modes[selected],
-                    sizeof(selected_print_mode) - 1);
-            selected_print_mode[sizeof(selected_print_mode) - 1] = '\0';
-        }
-    }
-
-    g = find_gadget_by_id(GAD_SCALING_MODE);
-    if (g && num_supported_scaling > 0) {
-        ULONG selected = 0;
-        GT_GetGadgetAttrs(g, win, NULL,
-                          GTCY_Active, (ULONG)&selected,
-                          TAG_DONE);
-        if (selected < (ULONG)num_supported_scaling) {
-            strncpy(driver_scaling_buffer, supported_scaling[selected],
-                    sizeof(driver_scaling_buffer) - 1);
-            driver_scaling_buffer[sizeof(driver_scaling_buffer) - 1] = '\0';
-            strncpy(selected_scaling, supported_scaling[selected],
-                    sizeof(selected_scaling) - 1);
-            selected_scaling[sizeof(selected_scaling) - 1] = '\0';
-        }
-    }
-
-    g = find_gadget_by_id(GAD_QUALITY_MODE);
-    if (g && num_supported_quality > 0) {
-        ULONG selected = 0;
-        GT_GetGadgetAttrs(g, win, NULL,
-                          GTCY_Active, (ULONG)&selected,
-                          TAG_DONE);
-        if (selected < (ULONG)num_supported_quality) {
-            strncpy(driver_quality_buffer, supported_quality[selected],
-                    sizeof(driver_quality_buffer) - 1);
-            driver_quality_buffer[sizeof(driver_quality_buffer) - 1] = '\0';
-            strncpy(selected_quality, supported_quality[selected],
-                    sizeof(selected_quality) - 1);
-            selected_quality[sizeof(selected_quality) - 1] = '\0';
-        }
-    }
-
-    g = find_gadget_by_id(GAD_SIDES);
-    if (g && mp_sides_option_count > 1) {
-        ULONG selected = 0;
-        GT_GetGadgetAttrs(g, win, NULL,
-                          GTCY_Active, (ULONG)&selected,
-                          TAG_DONE);
-        if (selected < (ULONG)mp_sides_option_count) {
-            strncpy(driver_sides_buffer, mp_sides_value_storage[selected],
-                    sizeof(driver_sides_buffer) - 1);
-            driver_sides_buffer[sizeof(driver_sides_buffer) - 1] = '\0';
-        }
-    } else if (mp_sides_option_count <= 1) {
-        /* Absence already means one-sided. Avoid adding a `sides` Job
-         * Template attribute to a printer that did not advertise it. */
-        driver_sides_buffer[0] = '\0';
-    }
+    /* Every cycle gadget updates its persisted backing value from the
+     * IDCMP message code as the user changes it. */
+    warn_if_engine_unsupported(driver_engine_buffer);
 }
 
 static BOOL write_driver_config_file(CONST_STRPTR filename) {
@@ -1137,6 +1192,8 @@ static BOOL write_driver_config_file(CONST_STRPTR filename) {
     FPuts(file, line);
     snprintf(line, sizeof(line), "SIDES=%s\n", driver_sides_buffer);
     FPuts(file, line);
+    snprintf(line, sizeof(line), "SPOOL=%s\n", driver_spool_buffer);
+    FPuts(file, line);
     snprintf(line, sizeof(line), "PWG_SHEET_BACK=%s\n", pwg_sheet_back_value);
     FPuts(file, line);
     snprintf(line, sizeof(line), "MODEL=%s\n", printer_make_model);
@@ -1152,6 +1209,7 @@ static BOOL save_driver_config(struct Window *win) {
     char envarc_path[64];
 
     capture_driver_settings(win);
+    mp_ensure_hidden_spool_dir(driver_spool_buffer);
 
     if (!ensure_config_dir((CONST_STRPTR)"ENV:MintPRINT")) {
         printf("Could not create/find ENV:MintPRINT\n");
@@ -1213,6 +1271,7 @@ static BOOL load_driver_config(void) {
     driver_quality_buffer[0] = '\0';
     driver_scaling_buffer[0] = '\0';
     driver_sides_buffer[0] = '\0';
+    strcpy(driver_spool_buffer, "RAM");
     strcpy(pwg_sheet_back_value, "normal");
     printer_make_model[0] = '\0';
 
@@ -1300,6 +1359,13 @@ static BOOL load_driver_config(void) {
                 strncpy(driver_sides_buffer, sides,
                         sizeof(driver_sides_buffer) - 1);
                 driver_sides_buffer[sizeof(driver_sides_buffer) - 1] = '\0';
+            }
+        } else if (strncmp(line, "SPOOL=", 6) == 0) {
+            const char *spool = line + 6;
+            if (spool[0]) {
+                strncpy(driver_spool_buffer, spool,
+                        sizeof(driver_spool_buffer) - 1);
+                driver_spool_buffer[sizeof(driver_spool_buffer) - 1] = '\0';
             }
         } else if (strncmp(line, "PWG_SHEET_BACK=", 15) == 0) {
             const char *sheet_back = line + 15;
@@ -1678,8 +1744,23 @@ static void mp_test_print_release(struct Window *win)
         test_print_job.port = NULL;
     }
     if (test_print_job.bitmap) {
-        FreeBitMap(test_print_job.bitmap);
+        if (test_print_job.bitmap_manual) {
+            int plane;
+            for (plane = 0;
+                 plane < (int)test_print_job.bitmap_storage.Depth;
+                 ++plane) {
+                if (test_print_job.bitmap_storage.Planes[plane]) {
+                    FreeRaster(test_print_job.bitmap_storage.Planes[plane],
+                               (ULONG)test_print_job.bitmap_storage.BytesPerRow * 8UL,
+                               (ULONG)test_print_job.bitmap_storage.Rows);
+                    test_print_job.bitmap_storage.Planes[plane] = NULL;
+                }
+            }
+        } else {
+            FreeBitMap(test_print_job.bitmap);
+        }
         test_print_job.bitmap = NULL;
+        test_print_job.bitmap_manual = FALSE;
     }
     if (test_print_job.colormap) {
         FreeColorMap(test_print_job.colormap);
@@ -1849,11 +1930,43 @@ static BOOL mintprint_test_page(struct Window *win) {
     SetRGB4CM(test_print_job.colormap, 6, 15, 0, 15);  /* magenta */
     SetRGB4CM(test_print_job.colormap, 7, 15, 15, 0);  /* yellow */
 
-    /* No screen "friend" - this bitmap has nothing to do with the display,
-     * only with the private ColorMap above. BMF_CLEAR zeroes every pixel to
-     * pen 0, which is already true white, so no background fill is needed. */
-    test_print_job.bitmap = AllocBitMap(MP_TESTPAGE_WIDTH, MP_TESTPAGE_HEIGHT,
-                                        MP_TESTPAGE_DEPTH, BMF_CLEAR, NULL);
+    /* AllocBitMap()/FreeBitMap() were added in graphics.library V39.
+     * On V37 build the same ordinary planar bitmap from the original
+     * InitBitMap()/AllocRaster() API. Keep AllocBitMap on V39+ so newer
+     * systems retain their normal graphics.library allocation path. */
+    test_print_job.bitmap_manual = FALSE;
+    if (GfxBase->LibNode.lib_Version >= 39) {
+        test_print_job.bitmap = AllocBitMap(MP_TESTPAGE_WIDTH,
+                                            MP_TESTPAGE_HEIGHT,
+                                            MP_TESTPAGE_DEPTH,
+                                            BMF_CLEAR, NULL);
+    } else {
+        int plane;
+
+        memset(&test_print_job.bitmap_storage, 0,
+               sizeof(test_print_job.bitmap_storage));
+        InitBitMap(&test_print_job.bitmap_storage, MP_TESTPAGE_DEPTH,
+                   MP_TESTPAGE_WIDTH, MP_TESTPAGE_HEIGHT);
+        test_print_job.bitmap = &test_print_job.bitmap_storage;
+        test_print_job.bitmap_manual = TRUE;
+
+        for (plane = 0; plane < MP_TESTPAGE_DEPTH; ++plane) {
+            PLANEPTR raster = AllocRaster(MP_TESTPAGE_WIDTH,
+                                          MP_TESTPAGE_HEIGHT);
+            if (!raster)
+                break;
+            memset(raster, 0, RASSIZE(MP_TESTPAGE_WIDTH,
+                                     MP_TESTPAGE_HEIGHT));
+            test_print_job.bitmap_storage.Planes[plane] = raster;
+        }
+        if (plane != MP_TESTPAGE_DEPTH) {
+            printf("Test Print: could not allocate V37 bitmap plane %d\n",
+                   plane);
+            mp_test_print_release(win);
+            return FALSE;
+        }
+        printf("Test Print: using V37 planar bitmap allocation\n");
+    }
     if (!test_print_job.bitmap) {
         printf("Test Print: could not allocate test bitmap\n");
         mp_test_print_release(win);
@@ -2037,11 +2150,13 @@ static void apply_driver_config_to_gadgets(struct Window *win) {
                           GTCY_Active, mp_sides_active_index(),
                           TAG_DONE);
 
-    g = find_gadget_by_id(GAD_MODEL_DISPLAY);
+    g = find_gadget_by_id(GAD_SPOOLER);
     if (g)
         GT_SetGadgetAttrs(g, win, NULL,
-                          GTTX_Text, (ULONG)printer_make_model,
+                          GTCY_Active, mp_spool_active_index(),
                           TAG_DONE);
+
+    mp_update_model_display(win);
 
     GT_RefreshWindow(win, NULL);
 }
@@ -3386,7 +3501,14 @@ static void mp_draw_marker_strips(void) {
 
         have_rgb = mp_marker_rgb(marker_colors[i], &r, &g, &b);
         pen = -1;
-        if (have_rgb) {
+        /* ObtainPen()/ObtainBestPenA()/ReleasePen() are graphics.library v39
+         * (AmigaOS 3.0) additions - this file now opens graphics.library at
+         * v37 (see main()) to try running on AmigaOS 2.04, which has no such
+         * shared-pen-allocation API at all. Skip straight to "no marker
+         * fill" there rather than calling an entry point that doesn't exist
+         * in a v37 graphics.library - mp_marker_pens[i] staying -1 already
+         * means mp_release_marker_pens() never calls ReleasePen() either. */
+        if (have_rgb && GfxBase->LibNode.lib_Version >= 39) {
             /* This is a shared PUBLIC screen (LockPubScreen(NULL) below),
              * so on a constrained low-colour Workbench (e.g. 32 colours)
              * most pens are usually already in use by Workbench or other
@@ -3637,6 +3759,39 @@ static BOOL mp_sides_hint_ensure_pens(struct MPSidesHintImage *image,
     return TRUE;
 }
 
+/* GetRGB32() is a graphics.library v39 (AmigaOS 3.0/AGA) addition and does
+ * not exist in a v37 (AmigaOS 2.04) graphics.library - calling it there
+ * jumps through a library vector that was never filled in, which is
+ * exactly the illegal-instruction crash a real AmigaOS 2.0/2.04 test of
+ * this build hit, right after mp_draw_marker_strips() (no v39-only calls
+ * on its own code path) and before mp_draw_sides_hint() had a chance to
+ * log a trace line. GetRGB4() - 4 bits per component, 0x0RGB packed into
+ * one ULONG - has existed since Kickstart 1.x, so build the same
+ * top-byte-significant 32-bit-per-component table GetRGB32() would have,
+ * one pen at a time, expanding each nibble to a full byte
+ * (0x0..0xF -> 0x00..0xFF) exactly the way driver/classic_render_shim.c
+ * already does for the OS3.1 driver's own 4-bit-gun input. Shared by
+ * mp_draw_sides_hint() and mp_draw_printer_icon() below, which both used
+ * to call GetRGB32() directly. */
+static void mp_fill_screen_palette32(struct ColorMap *cm, int pen_count,
+                                     ULONG *out_palette) {
+    if (GfxBase->LibNode.lib_Version >= 39) {
+        GetRGB32(cm, 0, (ULONG)pen_count, out_palette);
+        return;
+    }
+
+    int pen;
+    for (pen = 0; pen < pen_count; ++pen) {
+        ULONG rgb4 = GetRGB4(cm, pen);
+        UBYTE r4 = (UBYTE)((rgb4 >> 8) & 0xF);
+        UBYTE g4 = (UBYTE)((rgb4 >> 4) & 0xF);
+        UBYTE b4 = (UBYTE)(rgb4 & 0xF);
+        out_palette[pen * 3 + 0] = (ULONG)((r4 << 4) | r4) << 24;
+        out_palette[pen * 3 + 1] = (ULONG)((g4 << 4) | g4) << 24;
+        out_palette[pen * 3 + 2] = (ULONG)((b4 << 4) | b4) << 24;
+    }
+}
+
 static void mp_draw_sides_hint(void) {
     struct MPSidesHintImage *image;
     ULONG screen_palette[3 * 256];
@@ -3660,7 +3815,7 @@ static void mp_draw_sides_hint(void) {
     screen_pen_count = (int)cm->Count;
     if (screen_pen_count > 256)
         screen_pen_count = 256;
-    GetRGB32(cm, 0, (ULONG)screen_pen_count, screen_palette);
+    mp_fill_screen_palette32(cm, screen_pen_count, screen_palette);
 
     SetDrMd(rp, JAM1);
     SetAPen(rp, 0);
@@ -3892,6 +4047,8 @@ static void mp_describe_amiga_os(char *buf, size_t bufsize) {
     const char *label;
 
     switch (ver) {
+        case 36: label = "2.0/2.03"; break;
+        case 37: label = "2.04/2.1"; break;
         case 39: label = "3.0";  break;
         case 40: label = "3.1";  break;
         case 44: label = "3.5";  break;
@@ -4186,7 +4343,7 @@ static void show_about(struct Window *win) {
     char os_desc[64];
     struct MPDriverVersion installed_ver, bundled_ver;
     CONST_STRPTR src_path = MINTPRINT_DRIVER_SRC;
-    CONST_STRPTR variant_name = mp_needs_os31_driver() ? "OS3.0/3.1" : "V44+";
+    CONST_STRPTR variant_name = mp_needs_os31_driver() ? "OS2.0-3.1" : "V44+";
 
     mp_describe_amiga_os(os_desc, sizeof(os_desc));
 
@@ -4237,7 +4394,7 @@ static void check_and_offer_driver_install(struct Window *win) {
     struct MPDriverVersion src_ver, dest_ver;
     BOOL have_src_ver, have_dest_ver;
     CONST_STRPTR src_path = MINTPRINT_DRIVER_SRC;
-    CONST_STRPTR variant_name = mp_needs_os31_driver() ? "OS3.0/3.1" : "V44+";
+    CONST_STRPTR variant_name = mp_needs_os31_driver() ? "OS2.0-3.1" : "V44+";
 
     mp_describe_amiga_os(os_desc, sizeof(os_desc));
     printf("Detected %s (workbench.library v%u) - using the %s driver (%s).\n",
@@ -4692,6 +4849,7 @@ static BOOL run_discovery_selection(struct Window *parent,
     BOOL terminated = FALSE;
     UWORD topborder;
     int i;
+    ULONG selected = 0;
 
     (void)parent;
 
@@ -4812,6 +4970,7 @@ static BOOL run_discovery_selection(struct Window *parent,
         while (!terminated && imsg) {
             struct Gadget *g = (struct Gadget *)imsg->IAddress;
             ULONG cls = imsg->Class;
+            UWORD code = imsg->Code;
             GT_ReplyIMsg(imsg);
 
             if (cls == IDCMP_CLOSEWINDOW) {
@@ -4820,17 +4979,12 @@ static BOOL run_discovery_selection(struct Window *parent,
                 GT_BeginRefresh(dwin);
                 GT_EndRefresh(dwin, TRUE);
             } else if (cls == IDCMP_GADGETUP) {
-                if (g->GadgetID == GAD_DISC_CANCEL) {
+                if (g->GadgetID == GAD_DISC_CYCLE) {
+                    if ((ULONG)code < (ULONG)count)
+                        selected = (ULONG)code;
+                } else if (g->GadgetID == GAD_DISC_CANCEL) {
                     terminated = TRUE;
                 } else if (g->GadgetID == GAD_DISC_USE) {
-                    struct Gadget *cyc = dglist;
-                    ULONG selected = 0;
-                    while (cyc && cyc->GadgetID != GAD_DISC_CYCLE) cyc = cyc->NextGadget;
-                    if (cyc) {
-                        GT_GetGadgetAttrs(cyc, dwin, NULL,
-                                          GTCY_Active, (ULONG)&selected,
-                                          TAG_DONE);
-                    }
                     if (selected < (ULONG)count) {
                         strncpy(chosen_ip, results[selected].ip, chosen_ip_size - 1);
                         chosen_ip[chosen_ip_size - 1] = '\0';
@@ -5476,7 +5630,7 @@ static void mp_draw_printer_icon(void) {
     screen_pen_count = (int)cm->Count;
     if (screen_pen_count > 256)
         screen_pen_count = 256;
-    GetRGB32(cm, 0, (ULONG)screen_pen_count, screen_palette);
+    mp_fill_screen_palette32(cm, screen_pen_count, screen_palette);
 
     SetDrMd(rp, JAM1);
     SetAPen(rp, 0);
@@ -6459,12 +6613,7 @@ query_receive_pump_gui:
     }
 
     if (window) {
-        struct Gadget *model_gadget = find_gadget_by_id(GAD_MODEL_DISPLAY);
-        if (model_gadget) {
-            GT_SetGadgetAttrs(model_gadget, window, NULL,
-                              GTTX_Text, (ULONG)printer_make_model,
-                              TAG_DONE);
-        }
+        mp_update_model_display(window);
         /* Preview the freshly-queried (not yet saved) model in the Unit
          * dropdown's current entry, rather than waiting for Save. */
         refresh_unit_dropdown(window);
@@ -6489,7 +6638,8 @@ query_receive_pump_gui:
  * tries 631 first (falling back to a user-typed port or 80), and on
  * success applies the fetched capabilities to the gadgets exactly like a
  * manual Query click. */
-static void perform_query_flow(struct Window *win, const char *ip_only, int port_hint, char *response) {
+static void perform_query_flow(struct Window *win, const char *ip_only, int port_hint,
+                               char *response, int response_size) {
     /* 631 is the IANA-registered IPP port and the one real printers' full
      * capability set lives on; port 80 is only ever a bonus/compat
      * endpoint some printers also answer on, sometimes with a lesser or
@@ -6517,7 +6667,8 @@ static void perform_query_flow(struct Window *win, const char *ip_only, int port
         for (attempt = 0; attempt < 3 && !ok; attempt++) {
             int qrc;
             printf("Trying %s:%d (attempt %d/3)...\n", ip_only, ports_to_try[i], attempt + 1);
-            qrc = query_printer_attributes(ip_only, ports_to_try[i], response, MAX_BUFFER);
+            qrc = query_printer_attributes(ip_only, ports_to_try[i], response,
+                                           response_size);
             if (qrc == 0) {
                 struct Gadget *ip_gadget;
 
@@ -6583,6 +6734,50 @@ static void perform_query_flow(struct Window *win, const char *ip_only, int port
     mp_draw_marker_strips();
     mp_draw_sides_hint();
     mp_draw_printer_icon();
+}
+
+/* Allocate the Query response only while a Query is running. Classic
+ * systems may not have a contiguous 250 KiB block available even when
+ * their total free memory is healthy, so retain the full buffer where
+ * possible and fall back to still-useful 128 KiB or 64 KiB capacities.
+ * query_printer_attributes() receives the actual capacity and therefore
+ * cannot write as though a smaller fallback were still MAX_BUFFER bytes. */
+static char *mp_alloc_query_response(int *out_size) {
+    static const ULONG sizes[] = {
+        (ULONG)MAX_BUFFER, 131072UL, 65536UL
+    };
+    int i;
+
+    if (!out_size)
+        return NULL;
+    *out_size = 0;
+
+    for (i = 0; i < (int)(sizeof(sizes) / sizeof(sizes[0])); ++i) {
+        char *response = (char *)AllocVec(sizes[i], MEMF_ANY);
+        if (response) {
+            *out_size = (int)sizes[i];
+            if (sizes[i] < (ULONG)MAX_BUFFER)
+                printf("Using reduced %lu-byte Query response buffer\n",
+                       (unsigned long)sizes[i]);
+            return response;
+        }
+    }
+
+    printf("Could not allocate a Query response buffer (minimum 65536 bytes)\n");
+    return NULL;
+}
+
+static void perform_query_flow_allocated(struct Window *win,
+                                         const char *ip_only,
+                                         int port_hint) {
+    int response_size;
+    char *response = mp_alloc_query_response(&response_size);
+
+    if (!response)
+        return;
+
+    perform_query_flow(win, ip_only, port_hint, response, response_size);
+    FreeVec(response);
 }
 
 int send_pwg_print_job(const char *ip, int port, const char *media, const char *print_mode, unsigned char *pwg_data, int pwg_size) {
@@ -7302,21 +7497,23 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
         return NULL;
     }
 
-    // Enable/disable diagnostic logs and retained rendered jobs. Same
-    // width as Printer Engine above so the two stacked cycle gadgets
-    // stay visually aligned.
+    // Where job files spool: RAM (T:, as MintPRINT has always done) or a
+    // real hard drive device, for memory-tight systems - see
+    // mp_build_spool_options(). Same width/row as the old Debug slot so
+    // the stacked cycle gadgets stay visually aligned; Debug itself now
+    // lives on the button row next to Save.
     ng.ng_LeftEdge = 135;
     ng.ng_TopEdge = 95 + topborder;
     ng.ng_Width = 140;
     ng.ng_Height = 12;
-    ng.ng_GadgetText = (STRPTR)"Debug:";
-    ng.ng_GadgetID = GAD_DEBUG;
+    ng.ng_GadgetText = (STRPTR)"Spooler:";
+    ng.ng_GadgetID = GAD_SPOOLER;
     gad = CreateGadget(CYCLE_KIND, gad, &ng,
-        GTCY_Labels, (ULONG)debug_labels,
-        GTCY_Active, driver_debug ? 1 : 0,
+        GTCY_Labels, (ULONG)mp_spool_label_ptrs,
+        GTCY_Active, mp_spool_active_index(),
         TAG_DONE);
     if (!gad) {
-        printf("Failed to create debug gadget\n");
+        printf("Failed to create spooler gadget\n");
         return NULL;
     }
 
@@ -7436,6 +7633,25 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
         return NULL;
     }
 
+    // Enable/disable diagnostic logs and retained rendered jobs. Shares
+    // the button row's spare space between Test Print and Save; the
+    // cycle's own label text ("Debug On"/"Debug Off") is self-explanatory
+    // so it needs no separate GadgetText prefix, unlike the stacked
+    // Printer Engine/Spooler cycles above.
+    ng.ng_LeftEdge = 160;
+    ng.ng_TopEdge = 198 + topborder;
+    ng.ng_Width = 110;
+    ng.ng_Height = 12;
+    ng.ng_GadgetText = NULL;
+    ng.ng_GadgetID = GAD_DEBUG;
+    gad = CreateGadget(CYCLE_KIND, gad, &ng,
+        GTCY_Labels, (ULONG)debug_labels,
+        GTCY_Active, driver_debug ? 1 : 0,
+        TAG_DONE);
+    if (!gad) {
+        printf("Failed to create debug gadget\n");
+        return NULL;
+    }
 
     // Save button - same action as File -> Save Driver Settings.
     ng.ng_LeftEdge = 304;
@@ -7479,11 +7695,6 @@ void process_window_events(struct Window *win) {
     BOOL terminated = FALSE;
     char ip_only[64];
     int port = -1;
-    char *response = malloc(MAX_BUFFER); // Dynamically allocate
-    if (!response) {
-        printf("Failed to allocate memory for response buffer\n");
-        return;
-    }
 
     while (!terminated) {
         ULONG window_signal = 1L << win->UserPort->mp_SigBit;
@@ -7506,6 +7717,10 @@ void process_window_events(struct Window *win) {
             gad = (struct Gadget *)imsg->IAddress;
             imsgClass = imsg->Class;
             imsgCode = imsg->Code;
+            /* IAddress is only actually a struct Gadget* for gadget-related
+             * classes - deliberately NOT dereferencing gad->GadgetID here
+             * for other classes (e.g. IDCMP_REFRESHWINDOW), where it can be
+             * something else entirely. */
 
             GT_ReplyIMsg(imsg);
 
@@ -7514,10 +7729,7 @@ void process_window_events(struct Window *win) {
                     switch (gad->GadgetID) {
                         case GAD_UNIT_DROPDOWN:
                         {
-                            ULONG selected = 0;
-                            GT_GetGadgetAttrs(gad, win, NULL,
-                                              GTCY_Active, (ULONG)&selected,
-                                              TAG_DONE);
+                            ULONG selected = (ULONG)imsgCode;
                             if (selected < (ULONG)MAX_UNITS && (int)selected != current_unit_index) {
                                 current_unit_index = (int)selected;
                                 custom_printf("CLEAR");
@@ -7591,11 +7803,16 @@ void process_window_events(struct Window *win) {
 
                         case GAD_MEDIA_DROPDOWN:
                         {
-                            ULONG selected = ~0UL;
-                            GT_GetGadgetAttrs(media_dropdown, win, NULL,
-                                              GTCY_Active, (ULONG)&selected,
-                                              TAG_DONE);
+                            ULONG selected = (ULONG)imsgCode;
                             if (selected < (ULONG)num_media_tray_mappings) {
+                                strncpy(driver_media_buffer,
+                                        media_tray_map[selected].media,
+                                        sizeof(driver_media_buffer) - 1);
+                                driver_media_buffer[sizeof(driver_media_buffer) - 1] = '\0';
+                                strncpy(driver_source_buffer,
+                                        media_tray_map[selected].source,
+                                        sizeof(driver_source_buffer) - 1);
+                                driver_source_buffer[sizeof(driver_source_buffer) - 1] = '\0';
                                 printf("Selected index = %lu, value = %s\n",
                                        selected, media_tray_map[selected].media);
                             } else {
@@ -7606,11 +7823,9 @@ void process_window_events(struct Window *win) {
 
                         case GAD_IP_STRING:
                         {
-                            char *current_ip = NULL;
+                            char *current_ip;
                             GT_RefreshWindow(win, NULL);
-                            GT_GetGadgetAttrs(gad, window, NULL,
-                                GTST_String, (ULONG)&current_ip,
-                                TAG_DONE);
+                            current_ip = mp_string_gadget_value(gad);
                             printf("Got pointer: %p\n", current_ip);
                             if (current_ip) {
                                 printf("Raw IP string from gadget: '%s'\n", current_ip);
@@ -7622,16 +7837,58 @@ void process_window_events(struct Window *win) {
                             }
                         }
                         break;
+                        case GAD_IPP_PATH:
+                        {
+                            char *path = mp_string_gadget_value(gad);
+                            if (path) {
+                                strncpy(driver_path_buffer, path,
+                                        sizeof(driver_path_buffer) - 1);
+                                driver_path_buffer[sizeof(driver_path_buffer) - 1] = '\0';
+                            }
+                        }
+                        break;
+
+                        case GAD_DEBUG:
+                            driver_debug = imsgCode ? TRUE : FALSE;
+                            break;
+
+                        case GAD_SPOOLER:
+                        {
+                            ULONG selected = (ULONG)imsgCode;
+                            if (selected < (ULONG)mp_spool_option_count) {
+                                strncpy(driver_spool_buffer,
+                                        mp_spool_value_storage[selected],
+                                        sizeof(driver_spool_buffer) - 1);
+                                driver_spool_buffer[
+                                    sizeof(driver_spool_buffer) - 1] = '\0';
+                            }
+                        }
+                        break;
+
+                        case GAD_QUALITY_MODE:
+                        {
+                            ULONG selected = (ULONG)imsgCode;
+                            if (selected < (ULONG)num_supported_quality) {
+                                strncpy(selected_quality, supported_quality[selected],
+                                        sizeof(selected_quality) - 1);
+                                selected_quality[sizeof(selected_quality) - 1] = '\0';
+                                strncpy(driver_quality_buffer, supported_quality[selected],
+                                        sizeof(driver_quality_buffer) - 1);
+                                driver_quality_buffer[sizeof(driver_quality_buffer) - 1] = '\0';
+                            }
+                        }
+                        break;
+
                         case GAD_PRINT_MODE:
                         {
-                            ULONG selected = ~0UL;
-                            GT_GetGadgetAttrs(gad, win, NULL,
-                                              GTCY_Active, (ULONG)&selected,
-                                              TAG_DONE);
+                            ULONG selected = (ULONG)imsgCode;
                             print_mode = selected;
                             if (selected < num_supported_print_modes) {
                                 strncpy(selected_print_mode, supported_print_modes[selected], MAX_ATTR_LEN - 1);
                                 selected_print_mode[MAX_ATTR_LEN - 1] = '\0';
+                                strncpy(driver_color_buffer, supported_print_modes[selected],
+                                        sizeof(driver_color_buffer) - 1);
+                                driver_color_buffer[sizeof(driver_color_buffer) - 1] = '\0';
                                 printf("Print mode set to: %s\n", selected_print_mode);
                             }
                         }
@@ -7639,10 +7896,7 @@ void process_window_events(struct Window *win) {
 
                         case GAD_ENGINE:
                         {
-                            ULONG selected = 0;
-                            GT_GetGadgetAttrs(gad, win, NULL,
-                                              GTCY_Active, (ULONG)&selected,
-                                              TAG_DONE);
+                            ULONG selected = (ULONG)imsgCode;
                             if (selected < (ULONG)mp_engine_count) {
                                 strncpy(driver_engine_buffer,
                                         mp_engine_value_map[selected],
@@ -7659,10 +7913,7 @@ void process_window_events(struct Window *win) {
 
                         case GAD_SIDES:
                         {
-                            ULONG selected = 0;
-                            GT_GetGadgetAttrs(gad, win, NULL,
-                                              GTCY_Active, (ULONG)&selected,
-                                              TAG_DONE);
+                            ULONG selected = (ULONG)imsgCode;
                             if (selected < (ULONG)mp_sides_option_count) {
                                 strncpy(driver_sides_buffer,
                                         mp_sides_value_storage[selected],
@@ -7677,10 +7928,7 @@ void process_window_events(struct Window *win) {
 
                         case GAD_RESOLUTION:
                         {
-                            ULONG selected = 0;
-                            GT_GetGadgetAttrs(gad, win, NULL,
-                                              GTCY_Active, (ULONG)&selected,
-                                              TAG_DONE);
+                            ULONG selected = (ULONG)imsgCode;
                             if (selected < (ULONG)mp_dpi_options.count) {
                                 driver_resolution =
                                     mp_dpi_options.values[selected];
@@ -7695,13 +7943,13 @@ void process_window_events(struct Window *win) {
 
                         case GAD_SCALING_MODE:
                         {
-                            ULONG selected = ~0UL;
-                            GT_GetGadgetAttrs(gad, win, NULL,
-                                            GTCY_Active, (ULONG)&selected,
-                                            TAG_DONE);
-                            if (selected < num_supported_scaling) {
+                            ULONG selected = (ULONG)imsgCode;
+                            if (selected < (ULONG)num_supported_scaling) {
                                 strncpy(selected_scaling, supported_scaling[selected], MAX_ATTR_LEN - 1);
                                 selected_scaling[MAX_ATTR_LEN - 1] = '\0';
+                                strncpy(driver_scaling_buffer, supported_scaling[selected],
+                                        sizeof(driver_scaling_buffer) - 1);
+                                driver_scaling_buffer[sizeof(driver_scaling_buffer) - 1] = '\0';
                                 printf("Scaling mode set to: %s\n", selected_scaling);
                             }
                         }
@@ -7718,11 +7966,8 @@ void process_window_events(struct Window *win) {
                             }
                         
                             if (ip_gadget) {
-                                char *ip_string = NULL;
-                                ULONG success = GT_GetGadgetAttrs(ip_gadget, win, NULL,
-                                                                  GTST_String, (ULONG)&ip_string,
-                                                                  TAG_DONE);
-                                if (success && ip_string) {
+                                char *ip_string = mp_string_gadget_value(ip_gadget);
+                                if (ip_string) {
                                     strncpy(ip_buffer, ip_string, sizeof(ip_buffer) - 1);
                                     ip_buffer[sizeof(ip_buffer) - 1] = '\0';
                                     printf("IP buffer updated to: '%s'\n", ip_buffer);
@@ -7742,7 +7987,7 @@ void process_window_events(struct Window *win) {
                             }
                         
                             // Try default + fallback ports, apply capabilities on success
-                            perform_query_flow(win, ip_only, port, response);
+                            perform_query_flow_allocated(win, ip_only, port);
                         }
                         break;
 
@@ -7777,7 +8022,7 @@ void process_window_events(struct Window *win) {
                                                           TAG_DONE);
                                     }
 
-                                    perform_query_flow(win, chosen_ip, 0, response);
+                                    perform_query_flow_allocated(win, chosen_ip, 0);
                                 } else {
                                     printf("Discovery selection cancelled.\n");
                                 }
@@ -7875,7 +8120,6 @@ void process_window_events(struct Window *win) {
     if (test_print_job.active)
         mp_test_print_cancel(win);
 
-    free(response); // Free the dynamically allocated buffer
 }
 
 static BOOL mp_open_tcp_stack(void) {
@@ -7918,21 +8162,39 @@ static void mp_show_tcp_stack_required(void) {
 int main(void) {
     UWORD topborder;
 
-    // Open libraries with version checks
-    IntuitionBase = (struct IntuitionBase *)OpenLibrary("intuition.library", 39);
+    /* Open libraries with version checks.
+     *
+     * EXPERIMENTAL: pinned at v37 (AmigaOS 2.04, where gadtools.library was
+     * introduced) rather than the v39 (AmigaOS 3.0) this used to require.
+     * intuition.library/graphics.library/gadtools.library all existed at
+     * v37; the driver-side library opens (dos.library/graphics.library in
+     * driver/driver_core.c and driver/command_table.c) already only ever
+     * asked for v37. GT_SetGadgetAttrs, the GTCY_ tags, and GetVisualInfo()
+     * below are all v36+ gadtools.library API. The one caller-side v39-only
+     * call this file makes, ObtainBestPenA() (graphics.library v39,
+     * marker-colour ink strip), is separately guarded at its call site -
+     * see there.
+     *
+     * NOT YET PHYSICALLY CONFIRMED on real AmigaOS 2.0/2.04 hardware or
+     * emulation - unlike every other AmigaOS-version claim in this codebase,
+     * which only gets made after a real test (see README.md's changelog and
+     * docs/OS31_SUPPORT.md for that convention). This is exactly that
+     * pending test; a v37-class system may still hit some other v38+-only
+     * behaviour this audit missed. */
+    IntuitionBase = (struct IntuitionBase *)OpenLibrary("intuition.library", 37);
     if (!IntuitionBase) {
         printf("Failed to open intuition.library\n");
         return 1;
     }
 
-    GfxBase = (struct GfxBase *)OpenLibrary("graphics.library", 39);
+    GfxBase = (struct GfxBase *)OpenLibrary("graphics.library", 37);
     if (!GfxBase) {
         printf("Failed to open graphics.library\n");
         CloseLibrary((struct Library *)IntuitionBase);
         return 1;
     }
 
-    GadToolsBase = OpenLibrary("gadtools.library", 39);
+    GadToolsBase = OpenLibrary("gadtools.library", 37);
     if (!GadToolsBase) {
         printf("Requires V37 gadtools.library\n");
         CloseLibrary((struct Library *)GfxBase);
@@ -7998,6 +8260,7 @@ int main(void) {
      * seed_saved_option_labels() populated those arrays above. */
     // Load the same Unit0 profile used by DEVS:Printers/MintPRINT.
     load_driver_config();
+    mp_build_spool_options();
     seed_saved_option_labels();
 
     // Load print mode from ENV:
@@ -8112,21 +8375,14 @@ int main(void) {
     if (ip_buffer[0]) {
         char startup_ip[64];
         int startup_port = -1;
-        char *startup_response = malloc(MAX_BUFFER);
 
-        if (!startup_response) {
-            printf("Could not allocate startup Query response buffer - skipping live refresh\n");
+        if (parse_ip_and_port(ip_buffer, startup_ip,
+                              sizeof(startup_ip), &startup_port)) {
+            printf("Refreshing saved printer status on startup: %s\n", ip_buffer);
+            perform_query_flow_allocated(window, startup_ip, startup_port);
         } else {
-            if (parse_ip_and_port(ip_buffer, startup_ip,
-                                  sizeof(startup_ip), &startup_port)) {
-                printf("Refreshing saved printer status on startup: %s\n", ip_buffer);
-                perform_query_flow(window, startup_ip, startup_port,
-                                   startup_response);
-            } else {
-                printf("Saved printer address '%s' is invalid - skipping startup Query\n",
-                       ip_buffer);
-            }
-            free(startup_response);
+            printf("Saved printer address '%s' is invalid - skipping startup Query\n",
+                   ip_buffer);
         }
     }
 

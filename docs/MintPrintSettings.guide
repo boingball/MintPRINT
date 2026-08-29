@@ -1,5 +1,5 @@
 @database MintPrintSettings.guide
-@$VER: MintPrintSettings.guide 1.2.7 (28.08.2026)
+@$VER: MintPrintSettings.guide 1.2.8 (29.08.2026)
 @author "MintPRINT project (boingball)"
 @(c) "Copyright (c) 2026 Darren Banfi (boingball). MIT License."
 @width 74
@@ -32,6 +32,7 @@ Topics:
     @{" Multiple printers (Units) " LINK "Units"}
     @{" Installing the driver "  LINK "DriverInstall"}
     @{" Why two driver builds? "  LINK "TwoDrivers"}
+    @{" Spooler: RAM or hard drive "  LINK "Spooler"}
     @{" Test Print "             LINK "TestPrint"}
     @{" Troubleshooting "        LINK "Troubleshooting"}
     @{" Reporting a problem "    LINK "ReportingProblems"}
@@ -396,6 +397,43 @@ have to work out which build you need by hand.
 @{" Back to Contents " LINK "Main"}
 @endnode
 
+@node Spooler "Spooler: RAM or hard drive"
+@toc Main
+                          Spooler: RAM or hard drive
+                          --------------------------
+
+MintPRINT renders each print job to a temporary file before sending it
+to the printer over IPP. The Spooler cycle gadget picks where that file
+lives:
+
+    - RAM (the default): the file spools under T:, which is normally
+      assigned to RAM: on a stock Amiga. This has always been
+      MintPRINT's behaviour and needs no configuration.
+    - A hard drive device (shown as "HDD (DH0:)" and so on, one entry
+      per DHn: device MintPrint Settings finds mounted when it starts):
+      the file spools to that drive instead, inside a hidden MPSPOOL
+      drawer at its root.
+
+Choosing a hard drive matters on a memory-tight machine - a classic
+AmigaOS 2.04/3.0/3.1 system with 2MB or so of RAM, the target of the
+@{" OS3.1 driver build " LINK "TwoDrivers"} - where a large rendered
+document competes with everything else for the same scarce RAM that
+T: (RAM:) draws from. Moving it to a real hard drive removes that
+pressure entirely.
+
+If no DHn: device is mounted, only RAM is offered - there is nothing
+else to pick. Saving a hard drive Spooler choice creates the MPSPOOL
+drawer on that device if it does not already exist. It is marked
+hidden and given no drawer icon deliberately: it is a working
+directory MintPRINT manages for itself, not something meant to be
+opened or double-clicked. The driver log (T:MintPRINT-driver.log) and
+Debug's own T: naming in @{" Troubleshooting " LINK "Troubleshooting"}
+are unaffected either way - only the rendered job file's location
+changes.
+
+@{" Back to Contents " LINK "Main"}
+@endnode
+
 @node TestPrint "Test Print"
 @toc Main
                                 Test Print
@@ -428,9 +466,11 @@ the best first stop - it lists confirmed working settings, and known
 problems, for real hardware and applications already tested.
 
 The Debug switch turns on driver logging to T:MintPRINT-driver.log,
-plus a retained T:MintPRINT-job.* file (its extension matches whichever
-document engine was used: .jpg, .ps, .pwg or .pdf). Turn Debug on only
-while actively diagnosing a problem - leaving it on permanently is not
+plus a retained MintPRINT-job.* file (its extension matches whichever
+document engine was used: .jpg, .ps, .pwg or .pdf) under T: by
+default, or in the MPSPOOL drawer on whichever device the
+@{" Spooler " LINK "Spooler"} option names. Turn Debug on only while
+actively diagnosing a problem - leaving it on permanently is not
 necessary for normal use.
 
 Some general starting points, if a printer is new or is not printing
@@ -473,8 +513,9 @@ issue on the project's GitHub page and attach:
     2. T:MintPRINT-driver.log from the failed attempt, with Debug
        switched on beforehand - see @{" Troubleshooting " LINK "Troubleshooting"}.
 
-    3. The retained T:MintPRINT-job.* file from that same attempt, if
-       Debug was on.
+    3. The retained MintPRINT-job.* file from that same attempt, if
+       Debug was on - under T: by default, or in MPSPOOL on the
+       chosen Spooler device (see @{" Spooler " LINK "Spooler"}).
 
 Use the report template on the printer compatibility page
 (docs/PRINTER_COMPATIBILITY.md) so your result can be added with its
