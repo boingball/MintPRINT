@@ -564,14 +564,20 @@ static void mp_log_append_long(LONG value)
 }
 
 /* Overwrites the current job's status sidecar (g_job_status_path) with
- * STATE=<state> and, if result names a failure, ERROR=<error> <http>
- * <ipp status> - the same numeric triple mp_log_ipp_result() already
- * logs, kept numeric here too rather than inventing separate English
- * text for it. Reuses g_log_line/g_log_pos, the same scratch buffer
- * every mp_log_*() function above builds into - safe because nothing
- * else touches it between this function's own mp_log_reset() and its
- * own mp_spool_status_write() call. A no-op when this job isn't tracked
- * (RAM spool, or "Keep spooled jobs" off) - see mp_job_begin(). */
+ * STATE=<state>, HOST=/PORT=<the endpoint this job was rendered for>, and,
+ * if result names a failure, ERROR=<error> <http> <ipp status> - the same
+ * numeric triple mp_log_ipp_result() already logs, kept numeric here too
+ * rather than inventing separate English text for it. HOST=/PORT= are
+ * rewritten on every call (not just the first) since each call replaces
+ * the whole file - g_config.host/g_config.port are what mp_job_begin()
+ * itself is about to render against, so a Spooler window can show which
+ * destination a retained job is tied to, and Retry knows whether it is
+ * still pointed at the same printer. Reuses g_log_line/g_log_pos, the
+ * same scratch buffer every mp_log_*() function above builds into - safe
+ * because nothing else touches it between this function's own
+ * mp_log_reset() and its own mp_spool_status_write() call. A no-op when
+ * this job isn't tracked (RAM spool, or "Keep spooled jobs" off) - see
+ * mp_job_begin(). */
 static void mp_write_job_status(const char *state,
                                 const struct MPIPPResult *result)
 {
@@ -580,6 +586,12 @@ static void mp_write_job_status(const char *state,
     mp_log_reset();
     mp_log_append("STATE=");
     mp_log_append(state);
+    mp_log_append("\n");
+    mp_log_append("HOST=");
+    mp_log_append(g_config.host);
+    mp_log_append("\n");
+    mp_log_append("PORT=");
+    mp_log_append_long((LONG)g_config.port);
     mp_log_append("\n");
     if (result) {
         mp_log_append("ERROR=");

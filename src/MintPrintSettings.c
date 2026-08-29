@@ -126,6 +126,7 @@ extern struct ExecBase *SysBase;
 #define GAD_SPOOL_CLOSE     4
 #define GAD_SPOOL_RETRY     5
 #define GAD_SPOOL_COPIES    6
+#define GAD_SPOOL_UNIT      7
 
 /* Copies dialog gadget IDs (separate window/gadget list again). */
 #define GAD_SPOOL_COPIES_FIELD  1
@@ -5085,6 +5086,8 @@ struct MPSpoolJobEntry {
     char status_path[MAX_ATTR_LEN + 56];
     char state[16];
     char reason[64];
+    char host[64]; /* HOST= from the .status sidecar - who this job targets */
+    int port;      /* PORT=, -1 if the sidecar has none (pre-1.3.0 job) */
     char label[192]; /* node.ln_Name points here */
 };
 
@@ -5212,6 +5215,8 @@ static int mp_scan_spool_jobs(struct MPSpoolJobEntry *jobs, int max_jobs,
 
                 strcpy(jobs[count].state, "UNKNOWN");
                 jobs[count].reason[0] = '\0';
+                jobs[count].host[0] = '\0';
+                jobs[count].port = -1;
                 sfh = Open((CONST_STRPTR)jobs[count].status_path,
                           MODE_OLDFILE);
                 if (sfh) {
@@ -5223,6 +5228,13 @@ static int mp_scan_spool_jobs(struct MPSpoolJobEntry *jobs, int max_jobs,
                                    sizeof(jobs[count].state) - 1);
                             jobs[count].state[
                                 sizeof(jobs[count].state) - 1] = '\0';
+                        } else if (strncmp(line, "HOST=", 5) == 0) {
+                            strncpy(jobs[count].host, line + 5,
+                                   sizeof(jobs[count].host) - 1);
+                            jobs[count].host[
+                                sizeof(jobs[count].host) - 1] = '\0';
+                        } else if (strncmp(line, "PORT=", 5) == 0) {
+                            jobs[count].port = atoi(line + 5);
                         } else if (strncmp(line, "ERROR=", 6) == 0) {
                             long e = 0, h = 0;
                             int ipp = 0;
@@ -5236,13 +5248,26 @@ static int mp_scan_spool_jobs(struct MPSpoolJobEntry *jobs, int max_jobs,
                     Close(sfh);
                 }
 
-                if (jobs[count].reason[0])
-                    snprintf(jobs[count].label, sizeof(jobs[count].label),
-                             "%-30.30s %-10.10s %s", basename,
-                             jobs[count].state, jobs[count].reason);
-                else
-                    snprintf(jobs[count].label, sizeof(jobs[count].label),
-                             "%-30.30s %s", basename, jobs[count].state);
+                /* "who": the recorded destination for a tracked job, or a
+                 * dash for one spooled before HOST=/PORT= sidecars existed. */
+                {
+                    char who[80];
+                    if (jobs[count].host[0])
+                        snprintf(who, sizeof(who), "%s:%d",
+                                 jobs[count].host,
+                                 jobs[count].port > 0 ? jobs[count].port : 80);
+                    else
+                        strcpy(who, "-");
+
+                    if (jobs[count].reason[0])
+                        snprintf(jobs[count].label, sizeof(jobs[count].label),
+                                 "%-22.22s %-9.9s %-21.21s %s", basename,
+                                 jobs[count].state, who, jobs[count].reason);
+                    else
+                        snprintf(jobs[count].label, sizeof(jobs[count].label),
+                                 "%-22.22s %-9.9s %s", basename,
+                                 jobs[count].state, who);
+                }
 
                 jobs[count].node.ln_Name = jobs[count].label;
                 AddTail(list, &jobs[count].node);
@@ -5272,38 +5297,100 @@ static CONST_STRPTR mp_spool_document_format_for_ext(const char *path)
     return (CONST_STRPTR)"application/octet-stream";
 }
 
+/* Reads HOST=/PORT=/PATH= straight out of a saved Unit%d file, without
+ * touching any of the live GUI/driver-config globals (ip_buffer,
+ * driver_path_buffer, ...) that reload_current_unit() would disturb - so
+ * the Spooler window's Unit picker can target a specific saved profile
+ * regardless of which Unit the main window happens to have loaded right
+ * now. Returns TRUE only if the file existed and had a non-empty HOST=. */
+static BOOL mp_load_unit_endpoint(int idx, char *host, size_t host_cap,
+                                  int *port, char *path, size_t path_cap)
+{
+    BPTR file;
+    char env_path[64];
+    char envarc_path[64];
+    char line[192];
+    BOOL found = FALSE;
+
+    host[0] = '\0';
+    *port = 80;
+    strncpy(path, "/ipp/print", path_cap - 1);
+    path[path_cap - 1] = '\0';
+
+    unit_config_path(idx, FALSE, env_path, sizeof(env_path));
+    unit_config_path(idx, TRUE, envarc_path, sizeof(envarc_path));
+
+    file = Open((CONST_STRPTR)env_path, MODE_OLDFILE);
+    if (!file)
+        file = Open((CONST_STRPTR)envarc_path, MODE_OLDFILE);
+    if (!file)
+        return FALSE;
+
+    while (FGets(file, line, sizeof(line))) {
+        trim_config_line(line);
+        if (strncmp(line, "HOST=", 5) == 0) {
+            strncpy(host, line + 5, host_cap - 1);
+            host[host_cap - 1] = '\0';
+            found = host[0] != '\0';
+        } else if (strncmp(line, "PORT=", 5) == 0) {
+            int p = atoi(line + 5);
+            if (p >= 1 && p <= 65535) *port = p;
+        } else if (strncmp(line, "PATH=", 5) == 0 && line[5] == '/') {
+            strncpy(path, line + 5, path_cap - 1);
+            path[path_cap - 1] = '\0';
+        }
+    }
+    Close(file);
+    return found;
+}
+
 /* Resubmits an already-rendered, retained job file over IPP - used for
  * Retry (a held, failed job), Reprint (a successful one sent again), and
- * each pass of multi-copy printing. Builds a minimal MPConfig from the
- * live GUI state (host/port/path only): the retained file's own content
- * already reflects whichever job-template options (media, colour,
- * quality, ...) were live when it was first rendered, so resending it
- * with today's Unit0 attributes layered on top would be misleading -
- * empty attributes are the same "nothing extra" no-op
- * mp_ipp_print_document() already treats them as, see that function's
- * own comment in driver/ipp_client.c. Updates the job's own .status
- * sidecar with the outcome, the same STATE=/ERROR= format the driver
- * itself writes, so a following Refresh shows it. Returns TRUE on
- * success. */
-static BOOL mp_spool_retry_job(struct MPSpoolJobEntry *job)
+ * each pass of multi-copy printing. unit_index selects which saved Unit's
+ * HOST/PORT/PATH to send it to (the Spooler window's Unit picker - lets a
+ * job be reassigned to a different printer than the one it originally
+ * failed against); if that Unit has no saved HOST=, this falls back to
+ * whatever the main window currently has loaded, the previous behaviour.
+ * Either way, only the endpoint comes from today's settings - the
+ * retained file's own content already reflects whichever job-template
+ * options (media, colour, quality, ...) were live when it was first
+ * rendered, so resending it with today's attributes layered on top would
+ * be misleading; empty attributes are the same "nothing extra" no-op
+ * mp_ipp_print_document() already treats them as, see that function's own
+ * comment in driver/ipp_client.c. Updates the job's own .status sidecar
+ * with the outcome and the endpoint actually used, the same
+ * STATE=/HOST=/PORT=/ERROR= format the driver itself writes, so a
+ * following Refresh shows it. Returns TRUE on success. */
+static BOOL mp_spool_retry_job(struct MPSpoolJobEntry *job, int unit_index)
 {
     struct MPConfig cfg;
     struct MPIPPResult result;
     CONST_STRPTR document_format;
     char host[64];
-    int port = -1;
+    char path[MAX_ATTR_LEN];
+    int port = 80;
     LONG rc;
     BPTR sfh;
 
     memset(&cfg, 0, sizeof(cfg));
-    if (!parse_ip_and_port(ip_buffer, host, sizeof(host), &port) || !host[0])
-        return FALSE;
+
+    if (!mp_load_unit_endpoint(unit_index, host, sizeof(host), &port,
+                               path, sizeof(path)) || !host[0]) {
+        int fallback_port = -1;
+        if (!parse_ip_and_port(ip_buffer, host, sizeof(host),
+                               &fallback_port) || !host[0])
+            return FALSE;
+        port = (fallback_port > 0 && fallback_port <= 65535)
+                   ? fallback_port : 80;
+        strncpy(path, driver_path_buffer[0] == '/' ? driver_path_buffer
+                                                     : "/ipp/print",
+               sizeof(path) - 1);
+        path[sizeof(path) - 1] = '\0';
+    }
+
     strncpy(cfg.host, host, sizeof(cfg.host) - 1);
-    cfg.port = (port > 0 && port <= 65535) ? (UWORD)port : 80;
-    if (driver_path_buffer[0] == '/')
-        strncpy(cfg.path, driver_path_buffer, sizeof(cfg.path) - 1);
-    else
-        strncpy(cfg.path, "/ipp/print", sizeof(cfg.path) - 1);
+    cfg.port = (UWORD)port;
+    strncpy(cfg.path, path, sizeof(cfg.path) - 1);
 
     document_format = mp_spool_document_format_for_ext(job->job_path);
 
@@ -5316,9 +5403,13 @@ static BOOL mp_spool_retry_job(struct MPSpoolJobEntry *job)
 
     sfh = Open((CONST_STRPTR)job->status_path, MODE_NEWFILE);
     if (sfh) {
-        char buf[64];
+        char buf[96];
         int n = snprintf(buf, sizeof(buf), "STATE=%s\n",
                          rc == 0 ? "DONE" : "FAILED");
+        Write(sfh, buf, n);
+        n = snprintf(buf, sizeof(buf), "HOST=%s\n", cfg.host);
+        Write(sfh, buf, n);
+        n = snprintf(buf, sizeof(buf), "PORT=%d\n", (int)cfg.port);
         Write(sfh, buf, n);
         if (rc != 0) {
             n = snprintf(buf, sizeof(buf), "ERROR=%ld %ld %d\n",
@@ -5489,6 +5580,8 @@ static void run_spooler_window(struct Window *parent)
     struct List job_list;
     UWORD topborder;
     BOOL reopen;
+    WORD swin_left, swin_top;
+    int retry_unit;
 
     (void)parent;
 
@@ -5503,13 +5596,38 @@ static void run_spooler_window(struct Window *parent)
 
     topborder = sscreen->WBorTop + (sscreen->Font->ta_YSize + 1);
 
+    /* Centred on first open; every Refresh/Delete/Retry/Copies press below
+     * closes this window and reopens a fresh one (see the LISTVIEW_KIND
+     * label-list comment further down), and without an explicit position
+     * each of those reopens would have Intuition place it back at its
+     * default spot - which reads as the window jumping to the top-left
+     * corner of the screen on every single click. Carrying the window's
+     * last LeftEdge/TopEdge (updated right before each CloseWindow below)
+     * into the next OpenWindowTags keeps it planted where the user left
+     * it, drags included. */
+    swin_left = (sscreen->Width > 560) ? (sscreen->Width - 560) / 2 : 0;
+    swin_top = (sscreen->Height > 220 + topborder)
+                   ? (sscreen->Height - 220) / 2 : topborder;
+
+    /* Which saved Unit a Retry/Copies resubmission targets - defaults to
+     * whatever the main window currently has active, but the Unit cycle
+     * gadget below lets it be reassigned to any other saved printer
+     * profile, and that choice is carried across this same window's own
+     * Refresh/Delete/Retry/Copies reopens rather than resetting each time. */
+    retry_unit = current_unit_index;
+    if (retry_unit < 0) retry_unit = 0;
+    if (retry_unit >= MAX_UNITS) retry_unit = MAX_UNITS - 1;
+
     do {
         struct Gadget *sglist = NULL;
         struct Gadget *gad;
         struct Gadget *job_listview;
+        struct Gadget *retry_gadget;
+        struct Gadget *copies_gadget;
         struct NewGadget ng;
         struct Window *swin;
         BOOL terminated = FALSE;
+        BOOL selection_made = FALSE;
         ULONG selected = 0;
         BOOL have_selection;
         int count;
@@ -5580,6 +5698,7 @@ static void run_spooler_window(struct Window *parent)
             GT_Underscore, '_', GA_Disabled, (ULONG)(have_selection ? FALSE : TRUE),
             TAG_DONE);
         if (!gad) { FreeGadgets(sglist); break; }
+        retry_gadget = gad;
 
         ng.ng_LeftEdge = 340;
         ng.ng_Width = 110;
@@ -5589,12 +5708,36 @@ static void run_spooler_window(struct Window *parent)
             GT_Underscore, '_', GA_Disabled, (ULONG)(have_selection ? FALSE : TRUE),
             TAG_DONE);
         if (!gad) { FreeGadgets(sglist); break; }
+        copies_gadget = gad;
 
         ng.ng_LeftEdge = 460;
         ng.ng_Width = 90;
         ng.ng_GadgetText = (STRPTR)"_Close";
         ng.ng_GadgetID = GAD_SPOOL_CLOSE;
         gad = CreateGadget(BUTTON_KIND, gad, &ng, GT_Underscore, '_', TAG_DONE);
+        if (!gad) { FreeGadgets(sglist); break; }
+
+        /* Which printer a Retry/Copies resubmission goes to - defaults to
+         * the main window's active Unit, reassignable to any other saved
+         * Unit profile right here without having to close this window,
+         * switch it in the main window, and reopen. Purely a resubmission
+         * target: it does not change which Unit a job's "assigned to"
+         * host:port column shows - that always reflects where the job
+         * actually went (or will go, once retried against this choice). */
+        /* PLACETEXT_LEFT draws the label to the left of ng_LeftEdge, not
+         * inside it - the same off-window trap the "Keep Jobs (HDD)"
+         * checkbox above hit at LeftEdge=10 (see its own comment). Leaving
+         * room here by starting the box itself at LeftEdge=90 instead. */
+        ng.ng_TopEdge += 22;
+        ng.ng_LeftEdge = 90;
+        ng.ng_Width = 460;
+        ng.ng_GadgetText = (STRPTR)"Retry to:";
+        ng.ng_GadgetID = GAD_SPOOL_UNIT;
+        ng.ng_Flags = PLACETEXT_LEFT;
+        gad = CreateGadget(CYCLE_KIND, gad, &ng,
+            GTCY_Labels, (ULONG)unit_dropdown_labels,
+            GTCY_Active, (ULONG)retry_unit,
+            TAG_DONE);
         if (!gad) { FreeGadgets(sglist); break; }
 
         /* Gadgets are attached after OpenWindowTags via AddGList/RefreshGList,
@@ -5604,8 +5747,10 @@ static void run_spooler_window(struct Window *parent)
          * GadTools LISTVIEW_KIND actually clickable on real hardware. */
         swin = OpenWindowTags(NULL,
             WA_Title, (ULONG)"Spooler Management",
+            WA_Left, (ULONG)swin_left,
+            WA_Top, (ULONG)swin_top,
             WA_Width, 560,
-            WA_InnerHeight, 196,
+            WA_InnerHeight, 220,
             WA_DragBar, TRUE,
             WA_DepthGadget, TRUE,
             WA_Activate, TRUE,
@@ -5624,12 +5769,27 @@ static void run_spooler_window(struct Window *parent)
             struct IntuiMessage *imsg;
 
             Wait(1L << swin->UserPort->mp_SigBit);
+            /* Every message GadTools hands back must be GT_ReplyIMsg()'d
+             * before this window closes, including ones still sitting in
+             * the port from a rapid double-click on Retry/Copies/Delete
+             * that arrived while the first click's (possibly blocking,
+             * network-bound) handler was still running below - so this
+             * keeps draining and replying to the port right up to the
+             * point CloseWindow() is called, it just stops *acting* on
+             * anything once terminated is set, which is what stops a
+             * queued second Retry click from firing a second resubmission
+             * behind the first one's back. */
             imsg = GT_GetIMsg(swin->UserPort);
-            while (!terminated && imsg) {
+            while (imsg) {
                 struct Gadget *g = (struct Gadget *)imsg->IAddress;
                 ULONG cls = imsg->Class;
                 UWORD code = imsg->Code;
                 GT_ReplyIMsg(imsg);
+
+                if (terminated) {
+                    imsg = GT_GetIMsg(swin->UserPort);
+                    continue;
+                }
 
                 if (cls == IDCMP_CLOSEWINDOW) {
                     terminated = TRUE;
@@ -5640,6 +5800,7 @@ static void run_spooler_window(struct Window *parent)
                     if (g->GadgetID == GAD_SPOOL_JOB_LIST) {
                         if ((ULONG)code < (ULONG)count) {
                             selected = (ULONG)code;
+                            selection_made = TRUE;
                             /* GadTools does not persist which row a click
                              * selected on its own - a later
                              * IDCMP_REFRESHWINDOW (there are more of
@@ -5655,6 +5816,8 @@ static void run_spooler_window(struct Window *parent)
                                               GTLV_Selected, selected,
                                               TAG_DONE);
                         }
+                    } else if (g->GadgetID == GAD_SPOOL_UNIT) {
+                        retry_unit = (int)code;
                     } else if (g->GadgetID == GAD_SPOOL_CLOSE) {
                         terminated = TRUE;
                     } else if (g->GadgetID == GAD_SPOOL_REFRESH) {
@@ -5666,35 +5829,75 @@ static void run_spooler_window(struct Window *parent)
                         reopen = TRUE;
                         terminated = TRUE;
                     } else if (g->GadgetID == GAD_SPOOL_DELETE) {
-                        if (have_selection && selected < (ULONG)count) {
+                        if (selection_made && selected < (ULONG)count) {
                             DeleteFile(
                                 (CONST_STRPTR)mp_spool_jobs[selected].job_path);
                             DeleteFile(
                                 (CONST_STRPTR)mp_spool_jobs[selected].status_path);
+                            reopen = TRUE;
+                            terminated = TRUE;
+                        } else {
+                            SetWindowTitles(swin,
+                                (STRPTR)"Spooler Management - select a job first",
+                                (STRPTR)~0);
                         }
-                        reopen = TRUE;
-                        terminated = TRUE;
                     } else if (g->GadgetID == GAD_SPOOL_RETRY) {
-                        if (have_selection && selected < (ULONG)count)
-                            mp_spool_retry_job(&mp_spool_jobs[selected]);
-                        reopen = TRUE;
-                        terminated = TRUE;
+                        if (selection_made && selected < (ULONG)count) {
+                            /* Blocking (network I/O) - said so up front,
+                             * and the buttons are disabled for the same
+                             * reason a second click mid-retry queued up
+                             * behind this one is drained above without
+                             * triggering a second resubmission. */
+                            SetWindowTitles(swin,
+                                (STRPTR)"Spooler Management - Retrying...",
+                                (STRPTR)~0);
+                            GT_SetGadgetAttrs(retry_gadget, swin, NULL,
+                                              GA_Disabled, TRUE, TAG_DONE);
+                            GT_SetGadgetAttrs(copies_gadget, swin, NULL,
+                                              GA_Disabled, TRUE, TAG_DONE);
+                            mp_spool_retry_job(&mp_spool_jobs[selected],
+                                               retry_unit);
+                            reopen = TRUE;
+                            terminated = TRUE;
+                        } else {
+                            SetWindowTitles(swin,
+                                (STRPTR)"Spooler Management - select a job first",
+                                (STRPTR)~0);
+                        }
                     } else if (g->GadgetID == GAD_SPOOL_COPIES) {
                         int copies = 1;
-                        if (have_selection && selected < (ULONG)count &&
+                        if (selection_made && selected < (ULONG)count &&
                             run_copies_dialog(swin, &copies)) {
                             int i;
-                            for (i = 0; i < copies; ++i)
-                                mp_spool_retry_job(&mp_spool_jobs[selected]);
+                            GT_SetGadgetAttrs(retry_gadget, swin, NULL,
+                                              GA_Disabled, TRUE, TAG_DONE);
+                            GT_SetGadgetAttrs(copies_gadget, swin, NULL,
+                                              GA_Disabled, TRUE, TAG_DONE);
+                            for (i = 0; i < copies; ++i) {
+                                char title[64];
+                                snprintf(title, sizeof(title),
+                                        "Spooler Management - Retrying (%d/%d)...",
+                                        i + 1, copies);
+                                SetWindowTitles(swin, (STRPTR)title,
+                                                (STRPTR)~0);
+                                mp_spool_retry_job(&mp_spool_jobs[selected],
+                                                   retry_unit);
+                            }
+                            reopen = TRUE;
+                            terminated = TRUE;
+                        } else if (!selection_made) {
+                            SetWindowTitles(swin,
+                                (STRPTR)"Spooler Management - select a job first",
+                                (STRPTR)~0);
                         }
-                        reopen = TRUE;
-                        terminated = TRUE;
                     }
                 }
                 imsg = GT_GetIMsg(swin->UserPort);
             }
         }
 
+        swin_left = swin->LeftEdge;
+        swin_top = swin->TopEdge;
         CloseWindow(swin);
         FreeGadgets(sglist);
     } while (reopen);
