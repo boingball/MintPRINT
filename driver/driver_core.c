@@ -55,7 +55,7 @@
  * MP_DRIVER_REV (the version half) only bumps for something that
  * warrants a new version number outright, not on every rebuild. */
 #define MP_DRIVER_REV 41
-#define MP_DRIVER_SUBREV 5
+#define MP_DRIVER_SUBREV 6
 
 struct ExecBase *SysBase = NULL;
 struct DosLibrary *DOSBase = NULL;
@@ -557,12 +557,6 @@ static BOOL mp_job_begin(ULONG width, ULONG height)
     }
 
     g_rgb_row_bytes = width * 3UL;
-    g_rgb_row = (UBYTE *)AllocMem(g_rgb_row_bytes, MEMF_PUBLIC);
-    if (!g_rgb_row) {
-        mp_log_text("RGB row allocation failed");
-        mp_job_cleanup();
-        return FALSE;
-    }
 
     switch (g_engine) {
         case MP_ENGINE_PWG: need = mp_pwg_scratch_size(width); break;
@@ -573,6 +567,33 @@ static BOOL mp_job_begin(ULONG width, ULONG height)
     }
     if (!need) {
         mp_log_text("Encoder scratch size rejected width");
+        mp_job_cleanup();
+        return FALSE;
+    }
+
+    /* Preflight both allocations below as one combined estimate against the
+     * largest free MEMF_PUBLIC block, before touching AllocMem() at all.
+     * On a memory-tight system (AmigaOS 2.04 minimum-spec, ~2MB total) a
+     * page that is going to fail belongs failing here - with one clear log
+     * line naming what was needed and what was free - rather than after
+     * g_rgb_row's own AllocMem() already succeeded, fragmenting the free
+     * list, only for the (usually larger) encoder scratch buffer to fail
+     * right after it. MEMF_LARGEST asks for the size of the biggest
+     * contiguous free block, which is exactly what a single AllocMem() call
+     * of that size needs - a fragmented free list can show plenty of total
+     * free memory while still being unable to satisfy either request. */
+    if (AvailMem(MEMF_LARGEST | MEMF_PUBLIC) < (ULONG)(g_rgb_row_bytes + need)) {
+        mp_log_3("Job begin rejected: insufficient memory needed/free/width",
+                 (LONG)(g_rgb_row_bytes + need),
+                 (LONG)AvailMem(MEMF_LARGEST | MEMF_PUBLIC),
+                 (LONG)width);
+        mp_job_cleanup();
+        return FALSE;
+    }
+
+    g_rgb_row = (UBYTE *)AllocMem(g_rgb_row_bytes, MEMF_PUBLIC);
+    if (!g_rgb_row) {
+        mp_log_text("RGB row allocation failed");
         mp_job_cleanup();
         return FALSE;
     }

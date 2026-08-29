@@ -31,6 +31,21 @@ values.  `driver/classic_render_shim.c` expands each component from 0..15 to
 From that point onward the JPEG, PostScript, PWG Raster, PDF, spool and IPP code is shared
 with the normal driver.
 
+## Memory preflight check
+
+`mp_job_begin()` (`driver/driver_core.c`) now checks `AvailMem(MEMF_LARGEST |
+MEMF_PUBLIC)` against the combined size of the per-row RGB buffer and the
+active encoder's scratch buffer *before* calling `AllocMem()` for either one,
+and fails the page immediately (`PDERR_BUFFERMEMORY`, logged as "Job begin
+rejected: insufficient memory needed/free/width" when debug logging is on)
+if the largest free block can't satisfy both. Both buffers scale with page
+width, not width x height - MintPRINT streams rows to the spool file rather
+than buffering a whole page in memory - so the actual requirement is modest
+(low hundreds of KB at 300dpi for a portrait page) but still needs to exist
+as one contiguous free block, which matters on a fragmented, memory-tight
+system. This replaces silently attempting the allocation and failing deep
+into a print with a single clear rejection up front.
+
 ## Network requirement
 
 AmigaOS 3.1 does not itself provide the TCP/IP socket environment MintPRINT
@@ -108,11 +123,29 @@ used only for the printer-status ink/toner strip's marker-colour fill), is
 now skipped on a sub-v39 `graphics.library` - that strip just shows no fill
 on such a system rather than calling an entry point that doesn't exist.
 
-This has **not been physically tested** on real AmigaOS 2.0/2.04 hardware or
-emulation - unlike the "Test status" section below, which only makes a claim
-after a real test. Building and running MintPrint Settings itself
-successfully on a v37 system is the first thing to confirm; the driver
-binary's own behaviour there is the second, separate question.
+**First physical test on real AmigaOS 2.04 (v37)**: MintPrint Settings built
+and ran, and the OS31 driver installed and completed a Test Print - after
+several minutes, on a system with roughly 2MB of RAM (the practical minimum
+observed so far; see the memory preflight check below). The printed page was
+not centered - content was pushed toward the left edge rather than centred on
+the page, the same symptom class as the pre-fix V44 DUMPRPORT geometry quirk
+described in `mp_job_write_row()` (`driver/driver_core.c`) and in
+`mintprint_test_page()`'s own history (`src/MintPrintSettings.c`). That
+comment's fix (the `g_recenter_clamped_page` clamp, keyed off how far
+printer.device's reported page width diverges from the configured media's
+expected width) is shared, unmodified code between both driver builds, so it
+is already compiled into the OS31/2.04 build too - it just may not be
+tripping the same way on this older printer.device's own reported geometry.
+Root-causing this precisely needs the actual numbers from a debug-enabled
+run (`Debug: on` in MintPrint Settings, then `T:MintPRINT-driver.log` off the
+test machine) - in particular the "Render begin width/height", "Clamping
+oversized page width", and "Row xpos printer/used/scaled" lines - rather than
+guessing at a fix that might only patch this one case and regress the
+already-confirmed V44 behaviour.
+
+Building and running MintPrint Settings itself successfully on a v37 system
+is confirmed; the driver binary's own behaviour there is the second,
+separate question, now underway per the above.
 
 ## Test status
 
