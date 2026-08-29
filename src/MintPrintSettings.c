@@ -5084,6 +5084,8 @@ struct MPSpoolJobEntry {
     struct Node node; /* must be first - GadTools ListView owns this list */
     char job_path[MAX_ATTR_LEN + 48];
     char status_path[MAX_ATTR_LEN + 56];
+    char basename[80]; /* job_path's filename alone, for the list label */
+    struct DateStamp date; /* status sidecar's fib_Date - sort key, newest first */
     char state[16];
     char reason[64];
     char host[64]; /* HOST= from the .status sidecar - who this job targets */
@@ -5194,10 +5196,15 @@ static void mp_spool_error_reason(LONG error, LONG http_status,
  * ".status") and holds its current STATE=/ERROR= - read here so this
  * window never needs any live connection to the driver's spool process,
  * and still shows a job's outcome long after that process (and the print
- * that created it) is gone. list is NewList()'d and filled with jobs[0]
- * through jobs[count-1] via AddTail(), ready for GTLV_Labels. Returns the
- * number of jobs found; 0 if the drawer doesn't exist yet, or Spooler
- * isn't a real device. */
+ * that created it) is gone. Newest first: the timestamp embedded in each
+ * job's own filename is DDMMYYHHMMSS, which does not sort correctly as a
+ * plain string across month/year boundaries (e.g. "010823" < "150723"
+ * lexicographically despite being the later date), so this sorts by each
+ * sidecar file's real fib_Date instead - a simple insertion sort, plenty
+ * for the at-most MP_SPOOL_LIST_MAX (32) entries here. list is NewList()'d
+ * and filled with jobs[0] through jobs[count-1] via AddTail(), in that
+ * sorted order, ready for GTLV_Labels. Returns the number of jobs found;
+ * 0 if the drawer doesn't exist yet, or Spooler isn't a real device. */
 static int mp_scan_spool_jobs(struct MPSpoolJobEntry *jobs, int max_jobs,
                               struct List *list)
 {
@@ -5210,6 +5217,7 @@ static int mp_scan_spool_jobs(struct MPSpoolJobEntry *jobs, int max_jobs,
      * depend on. */
     struct FileInfoBlock fib;
     int count = 0;
+    int i;
 
     NewList(list);
     if (!mp_spool_keep_available()) return 0;
@@ -5226,19 +5234,19 @@ static int mp_scan_spool_jobs(struct MPSpoolJobEntry *jobs, int max_jobs,
             /* fib_DirEntryType < 0 -> plain file, not a drawer. */
             if (fib.fib_DirEntryType < 0 && len > 7 &&
                 strcmp(name + len - 7, ".status") == 0) {
-                char basename[80];
                 BPTR sfh;
-                size_t blen = (len - 7 < sizeof(basename) - 1)
-                    ? len - 7 : sizeof(basename) - 1;
+                size_t blen = (len - 7 < sizeof(jobs[count].basename) - 1)
+                    ? len - 7 : sizeof(jobs[count].basename) - 1;
 
-                memcpy(basename, name, blen);
-                basename[blen] = '\0';
+                memcpy(jobs[count].basename, name, blen);
+                jobs[count].basename[blen] = '\0';
+                jobs[count].date = fib.fib_Date;
 
                 snprintf(jobs[count].status_path,
                          sizeof(jobs[count].status_path),
                          "%s/%s", dir_path, name);
                 snprintf(jobs[count].job_path, sizeof(jobs[count].job_path),
-                         "%s/%s", dir_path, basename);
+                         "%s/%s", dir_path, jobs[count].basename);
 
                 strcpy(jobs[count].state, "UNKNOWN");
                 jobs[count].reason[0] = '\0';
@@ -5275,35 +5283,68 @@ static int mp_scan_spool_jobs(struct MPSpoolJobEntry *jobs, int max_jobs,
                     Close(sfh);
                 }
 
-                /* "who": the recorded destination for a tracked job, or a
-                 * dash for one spooled before HOST=/PORT= sidecars existed. */
-                {
-                    char who[80];
-                    if (jobs[count].host[0])
-                        snprintf(who, sizeof(who), "%s:%d",
-                                 jobs[count].host,
-                                 jobs[count].port > 0 ? jobs[count].port : 80);
-                    else
-                        strcpy(who, "-");
-
-                    if (jobs[count].reason[0])
-                        snprintf(jobs[count].label, sizeof(jobs[count].label),
-                                 "%-22.22s %-9.9s %-21.21s %s", basename,
-                                 jobs[count].state, who, jobs[count].reason);
-                    else
-                        snprintf(jobs[count].label, sizeof(jobs[count].label),
-                                 "%-22.22s %-9.9s %s", basename,
-                                 jobs[count].state, who);
-                }
-
-                jobs[count].node.ln_Name = jobs[count].label;
-                AddTail(list, &jobs[count].node);
                 ++count;
             }
         }
     }
 
     UnLock(lock);
+
+    /* Newest first, by fib_Date (ds_Days, then ds_Minute, then ds_Tick -
+     * each a plain increasing count, so comparing them in that order is
+     * a correct chronological compare). */
+    for (i = 1; i < count; ++i) {
+        struct MPSpoolJobEntry tmp = jobs[i];
+        int j = i - 1;
+
+        while (j >= 0 &&
+               (jobs[j].date.ds_Days < tmp.date.ds_Days ||
+                (jobs[j].date.ds_Days == tmp.date.ds_Days &&
+                 (jobs[j].date.ds_Minute < tmp.date.ds_Minute ||
+                  (jobs[j].date.ds_Minute == tmp.date.ds_Minute &&
+                   jobs[j].date.ds_Tick < tmp.date.ds_Tick))))) {
+            jobs[j + 1] = jobs[j];
+            --j;
+        }
+        jobs[j + 1] = tmp;
+    }
+
+    for (i = 0; i < count; ++i) {
+        /* "who": the recorded destination for a tracked job, or a dash
+         * for one spooled before HOST=/PORT= sidecars existed. */
+        char who[24];
+
+        if (jobs[i].host[0])
+            snprintf(who, sizeof(who), "%s:%d", jobs[i].host,
+                     jobs[i].port > 0 ? jobs[i].port : 80);
+        else
+            strcpy(who, "-");
+
+        /* Column widths are a compromise: none of this fits comfortably
+         * on an Amiga screen without truncating something, and the
+         * reason (state names why a job failed - "connection refused",
+         * "printer hardware problem", ...) matters more moment-to-moment
+         * than the exact job name or destination, both already visible
+         * elsewhere (job name in Delete/Retry's own file path; "who" is
+         * exactly what the "Retry to:" picker is about to resubmit
+         * against). Selecting a row also puts the state and full,
+         * untruncated reason in the window title - see
+         * mp_spool_win_process()'s GAD_SPOOL_JOB_LIST handling - so
+         * nothing here is ever permanently unreadable, just abbreviated
+         * for the at-a-glance list. */
+        if (jobs[i].reason[0])
+            snprintf(jobs[i].label, sizeof(jobs[i].label),
+                     "%-20.20s %-10.10s %-15.15s %s", jobs[i].basename,
+                     jobs[i].state, who, jobs[i].reason);
+        else
+            snprintf(jobs[i].label, sizeof(jobs[i].label),
+                     "%-20.20s %-10.10s %s", jobs[i].basename,
+                     jobs[i].state, who);
+
+        jobs[i].node.ln_Name = jobs[i].label;
+        AddTail(list, &jobs[i].node);
+    }
+
     return count;
 }
 
@@ -5723,8 +5764,8 @@ static void mp_spool_win_open(struct Window *parent)
     /* Centred the first time this ever opens; every later open reuses
      * wherever it was last closed (drags included) instead of recentring. */
     if (g_spool_win_left < 0) {
-        g_spool_win_left = (g_spool_screen->Width > 560)
-                                ? (g_spool_screen->Width - 560) / 2 : 0;
+        g_spool_win_left = (g_spool_screen->Width > 620)
+                                ? (g_spool_screen->Width - 620) / 2 : 0;
         g_spool_win_top = (g_spool_screen->Height > 220 + topborder)
                                ? (g_spool_screen->Height - 220) / 2
                                : topborder;
@@ -5765,7 +5806,7 @@ static void mp_spool_win_open(struct Window *parent)
     ng.ng_Flags = 0;
     ng.ng_LeftEdge = 10;
     ng.ng_TopEdge = 10 + topborder;
-    ng.ng_Width = 540;
+    ng.ng_Width = 600;
     ng.ng_Height = 150;
     ng.ng_GadgetText = NULL;
     ng.ng_GadgetID = GAD_SPOOL_JOB_LIST;
@@ -5852,7 +5893,7 @@ static void mp_spool_win_open(struct Window *parent)
      * room here by starting the box itself at LeftEdge=90 instead. */
     ng.ng_TopEdge += 22;
     ng.ng_LeftEdge = 90;
-    ng.ng_Width = 460;
+    ng.ng_Width = 520;
     ng.ng_GadgetText = (STRPTR)"Retry to:";
     ng.ng_GadgetID = GAD_SPOOL_UNIT;
     ng.ng_Flags = PLACETEXT_LEFT;
@@ -5871,7 +5912,7 @@ static void mp_spool_win_open(struct Window *parent)
         WA_Title, (ULONG)"Spooler Management",
         WA_Left, (ULONG)g_spool_win_left,
         WA_Top, (ULONG)g_spool_win_top,
-        WA_Width, 560,
+        WA_Width, 620,
         WA_InnerHeight, 220,
         WA_DragBar, TRUE,
         WA_DepthGadget, TRUE,
@@ -5954,6 +5995,32 @@ static void mp_spool_win_process(void)
                     GT_SetGadgetAttrs(g_spool_job_listview, swin, NULL,
                                       GTLV_Selected, g_spool_selected,
                                       TAG_DONE);
+                    /* The list truncates each row to fit the window - a
+                     * failure reason like "Printer rejected request
+                     * (wrong IPP path?)" does not fit in the column
+                     * budget mp_scan_spool_jobs() has to work with on any
+                     * Amiga screen this driver targets. The window title
+                     * has the room a list column doesn't, so show the
+                     * selected job's full state/reason there instead.
+                     * static, not a stack local: SetWindowTitles() keeps
+                     * only a pointer, not a copy, and this has to stay
+                     * valid for however long this title stays on screen -
+                     * across GadTools refresh events this function isn't
+                     * even running for - not just this one call. */
+                    {
+                        static char spool_title[192];
+                        struct MPSpoolJobEntry *job =
+                            &mp_spool_jobs[g_spool_selected];
+                        if (job->reason[0])
+                            snprintf(spool_title, sizeof(spool_title),
+                                    "Spooler Management - %s: %s",
+                                    job->state, job->reason);
+                        else
+                            snprintf(spool_title, sizeof(spool_title),
+                                    "Spooler Management - %s", job->state);
+                        SetWindowTitles(swin, (STRPTR)spool_title,
+                                        (STRPTR)~0);
+                    }
                 }
             } else if (g->GadgetID == GAD_SPOOL_UNIT) {
                 g_spool_retry_unit = (int)code;
@@ -6027,7 +6094,10 @@ static void mp_spool_win_process(void)
                     GT_SetGadgetAttrs(g_spool_copies_gadget, swin, NULL,
                                       GA_Disabled, TRUE, TAG_DONE);
                     for (i = 0; i < copies; ++i) {
-                        char title[64];
+                        /* static: see the row-selection title's own
+                         * comment above on why a stack local isn't safe
+                         * for a SetWindowTitles() string. */
+                        static char title[64];
                         snprintf(title, sizeof(title),
                                 "Spooler Management - Retrying (%d/%d)...",
                                 i + 1, copies);
