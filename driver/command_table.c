@@ -42,15 +42,17 @@
 #define MP_TEXT_TAB_COLUMNS 8UL
 
 /* Text-capture job file base names, combined with g_text_config.spool (see
- * driver_core.c's identical MP_JOB_BASE_*/mp_build_spool_paths() for the
- * graphics-dump path and driver/config.c's SPOOL=) into the
+ * driver_core.c's identical MP_JOB_BASE_ names and mp_build_spool_paths()
+ * for the graphics-dump path, and driver/config.c's SPOOL=) into the
  * g_text_file_* buffers below by mp_build_text_spool_paths(). */
-#define MP_TEXT_BASE_JPEG ((CONST_STRPTR)"MintPRINT-text.jpg")
-#define MP_TEXT_BASE_PWG  ((CONST_STRPTR)"MintPRINT-text.pwg")
-#define MP_TEXT_BASE_PDF  ((CONST_STRPTR)"MintPRINT-text.pdf")
-#define MP_TEXT_BASE_PS   ((CONST_STRPTR)"MintPRINT-text.ps")
-#define MP_TEXT_BASE_URF  ((CONST_STRPTR)"MintPRINT-text.urf")
-#define MP_TEXT_BASE_BACK ((CONST_STRPTR)"MintPRINT-text-back.rgb")
+/* const char *, not CONST_STRPTR - see driver_core.c's identical
+ * MP_JOB_BASE_* comment for why. */
+#define MP_TEXT_BASE_JPEG ((const char *)"MintPRINT-text.jpg")
+#define MP_TEXT_BASE_PWG  ((const char *)"MintPRINT-text.pwg")
+#define MP_TEXT_BASE_PDF  ((const char *)"MintPRINT-text.pdf")
+#define MP_TEXT_BASE_PS   ((const char *)"MintPRINT-text.ps")
+#define MP_TEXT_BASE_URF  ((const char *)"MintPRINT-text.urf")
+#define MP_TEXT_BASE_BACK ((const char *)"MintPRINT-text-back.rgb")
 
 #define MP_TEXT_SPOOL_PATH_MAX (MP_CONFIG_OPTION_MAX + 24)
 static char g_text_file_jpeg[MP_TEXT_SPOOL_PATH_MAX];

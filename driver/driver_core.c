@@ -86,12 +86,16 @@ struct TagItem DriverTags[] = {
  * mp_build_spool_paths(), once per Open() bracket right after g_config is
  * loaded. See the Spooler option in MintPrint Settings and
  * driver/config.c's SPOOL=. */
-#define MP_JOB_BASE_JPEG ((CONST_STRPTR)"MintPRINT-job.jpg")
-#define MP_JOB_BASE_PWG  ((CONST_STRPTR)"MintPRINT-job.pwg")
-#define MP_JOB_BASE_PDF  ((CONST_STRPTR)"MintPRINT-job.pdf")
-#define MP_JOB_BASE_PS   ((CONST_STRPTR)"MintPRINT-job.ps")
-#define MP_JOB_BASE_URF  ((CONST_STRPTR)"MintPRINT-job.urf")
-#define MP_JOB_BASE_BACK ((CONST_STRPTR)"MintPRINT-back.rgb")
+/* const char *, not CONST_STRPTR (const UBYTE *): these are only ever
+ * passed to mp_build_spool_path()'s plain-char base_name parameter below,
+ * never straight to a dos.library call - the CONST_STRPTR cast belongs on
+ * the finished g_job_file_* path instead (see its own call sites). */
+#define MP_JOB_BASE_JPEG ((const char *)"MintPRINT-job.jpg")
+#define MP_JOB_BASE_PWG  ((const char *)"MintPRINT-job.pwg")
+#define MP_JOB_BASE_PDF  ((const char *)"MintPRINT-job.pdf")
+#define MP_JOB_BASE_PS   ((const char *)"MintPRINT-job.ps")
+#define MP_JOB_BASE_URF  ((const char *)"MintPRINT-job.urf")
+#define MP_JOB_BASE_BACK ((const char *)"MintPRINT-back.rgb")
 
 #define MP_SPOOL_PATH_MAX (MP_CONFIG_OPTION_MAX + 24)
 static char g_job_file_jpeg[MP_SPOOL_PATH_MAX];
