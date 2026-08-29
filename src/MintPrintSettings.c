@@ -5573,6 +5573,59 @@ static BOOL run_copies_dialog(struct Window *parent, int *out_copies)
     return confirmed;
 }
 
+/* Rescans MPSPOOL and swaps the results into the already-open Spooler
+ * window's listview in place - the window itself is never closed. Follows
+ * MintAMP's RadioRefreshResults(): detach the gadget from its current
+ * label list first (GTLV_Labels/GTLV_Selected set to ~0 tells GadTools to
+ * let go of the old struct List's nodes) before touching that struct
+ * List's contents, then rebuild it and reattach. Mutating a live
+ * LISTVIEW_KIND's list while the gadget still points at it is exactly the
+ * kind of thing that produced this window's earlier "selects then
+ * deselects itself" symptom - detaching first is what makes the swap
+ * safe. *count/*selected/*selection_made are reset the same way a fresh
+ * open would: a rescan can renumber, add, or remove rows, so whatever was
+ * selected before no longer means anything. Also resyncs
+ * Delete/Retry/Copies' enabled state to whether the list has anything in
+ * it now, and clears any "select a job first"/"Retrying..." title text
+ * left over from whichever action triggered this refresh. */
+static void mp_spool_refresh_list_live(struct Window *swin,
+                                       struct Gadget *job_listview,
+                                       struct Gadget *delete_gadget,
+                                       struct Gadget *retry_gadget,
+                                       struct Gadget *copies_gadget,
+                                       struct List *job_list,
+                                       int *count, ULONG *selected,
+                                       BOOL *selection_made)
+{
+    BOOL have_selection;
+
+    GT_SetGadgetAttrs(job_listview, swin, NULL,
+                      GTLV_Labels, (ULONG)~0,
+                      GTLV_Selected, (ULONG)~0,
+                      TAG_DONE);
+
+    *count = mp_scan_spool_jobs(mp_spool_jobs, MP_SPOOL_LIST_MAX, job_list);
+    *selected = 0;
+    *selection_made = FALSE;
+    have_selection = *count > 0;
+
+    GT_SetGadgetAttrs(job_listview, swin, NULL,
+                      GTLV_Labels, (ULONG)job_list,
+                      GTLV_Selected, (ULONG)~0,
+                      GA_Disabled, (ULONG)(have_selection ? FALSE : TRUE),
+                      TAG_DONE);
+    GT_SetGadgetAttrs(delete_gadget, swin, NULL,
+                      GA_Disabled, (ULONG)(have_selection ? FALSE : TRUE),
+                      TAG_DONE);
+    GT_SetGadgetAttrs(retry_gadget, swin, NULL,
+                      GA_Disabled, (ULONG)(have_selection ? FALSE : TRUE),
+                      TAG_DONE);
+    GT_SetGadgetAttrs(copies_gadget, swin, NULL,
+                      GA_Disabled, (ULONG)(have_selection ? FALSE : TRUE),
+                      TAG_DONE);
+    SetWindowTitles(swin, (STRPTR)"Spooler Management", (STRPTR)~0);
+}
+
 static void run_spooler_window(struct Window *parent)
 {
     struct Screen *sscreen;
@@ -5622,6 +5675,7 @@ static void run_spooler_window(struct Window *parent)
         struct Gadget *sglist = NULL;
         struct Gadget *gad;
         struct Gadget *job_listview;
+        struct Gadget *delete_gadget;
         struct Gadget *retry_gadget;
         struct Gadget *copies_gadget;
         struct NewGadget ng;
@@ -5690,6 +5744,7 @@ static void run_spooler_window(struct Window *parent)
             GT_Underscore, '_', GA_Disabled, (ULONG)(have_selection ? FALSE : TRUE),
             TAG_DONE);
         if (!gad) { FreeGadgets(sglist); break; }
+        delete_gadget = gad;
 
         ng.ng_LeftEdge = 230;
         ng.ng_GadgetText = (STRPTR)"_Retry";
@@ -5821,21 +5876,23 @@ static void run_spooler_window(struct Window *parent)
                     } else if (g->GadgetID == GAD_SPOOL_CLOSE) {
                         terminated = TRUE;
                     } else if (g->GadgetID == GAD_SPOOL_REFRESH) {
-                        /* Reopens fresh below rather than swapping this
-                         * live LISTVIEW_KIND gadget's label list in place
-                         * - same OS3.1/classic-GadTools safety discipline
-                         * as the main window (see mp_sides_label_ptrs'
-                         * own comment far above). */
-                        reopen = TRUE;
-                        terminated = TRUE;
+                        /* Swaps the listview's contents in place - the
+                         * window stays open, same as MintAMP's search
+                         * results Refresh - see
+                         * mp_spool_refresh_list_live()'s own comment. */
+                        mp_spool_refresh_list_live(swin, job_listview,
+                            delete_gadget, retry_gadget, copies_gadget,
+                            &job_list, &count, &selected, &selection_made);
                     } else if (g->GadgetID == GAD_SPOOL_DELETE) {
                         if (selection_made && selected < (ULONG)count) {
                             DeleteFile(
                                 (CONST_STRPTR)mp_spool_jobs[selected].job_path);
                             DeleteFile(
                                 (CONST_STRPTR)mp_spool_jobs[selected].status_path);
-                            reopen = TRUE;
-                            terminated = TRUE;
+                            mp_spool_refresh_list_live(swin, job_listview,
+                                delete_gadget, retry_gadget, copies_gadget,
+                                &job_list, &count, &selected,
+                                &selection_made);
                         } else {
                             SetWindowTitles(swin,
                                 (STRPTR)"Spooler Management - select a job first",
@@ -5857,8 +5914,10 @@ static void run_spooler_window(struct Window *parent)
                                               GA_Disabled, TRUE, TAG_DONE);
                             mp_spool_retry_job(&mp_spool_jobs[selected],
                                                retry_unit);
-                            reopen = TRUE;
-                            terminated = TRUE;
+                            mp_spool_refresh_list_live(swin, job_listview,
+                                delete_gadget, retry_gadget, copies_gadget,
+                                &job_list, &count, &selected,
+                                &selection_made);
                         } else {
                             SetWindowTitles(swin,
                                 (STRPTR)"Spooler Management - select a job first",
@@ -5883,8 +5942,10 @@ static void run_spooler_window(struct Window *parent)
                                 mp_spool_retry_job(&mp_spool_jobs[selected],
                                                    retry_unit);
                             }
-                            reopen = TRUE;
-                            terminated = TRUE;
+                            mp_spool_refresh_list_live(swin, job_listview,
+                                delete_gadget, retry_gadget, copies_gadget,
+                                &job_list, &count, &selected,
+                                &selection_made);
                         } else if (!selection_made) {
                             SetWindowTitles(swin,
                                 (STRPTR)"Spooler Management - select a job first",
