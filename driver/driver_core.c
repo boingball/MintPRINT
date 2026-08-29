@@ -55,12 +55,20 @@
  * MP_DRIVER_REV (the version half) only bumps for something that
  * warrants a new version number outright, not on every rebuild. */
 #define MP_DRIVER_REV 41
-#define MP_DRIVER_SUBREV 9
+#define MP_DRIVER_SUBREV 10
 
 struct ExecBase *SysBase = NULL;
 struct DosLibrary *DOSBase = NULL;
 struct PrinterData *PD = NULL;
 struct PrinterExtendedData *PED = NULL;
+/* Owned here rather than by ipp_client.c itself, which only `extern`s it -
+ * see that file's own comment on why (its GUI-build link target,
+ * MintPrintSettings.c, already defines its own). ipp_client.c's own
+ * mp_ipp_socket_available()/mp_ipp_query_imageable_margins()/
+ * mp_ipp_print_document() (all called only from spool.c's dedicated
+ * Process) open and close it around each bsdsocket.library use, same as
+ * before this moved. */
+struct Library *SocketBase = NULL;
 
 extern struct PrinterExtendedData PEDData;
 

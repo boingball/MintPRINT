@@ -19,6 +19,7 @@
 #include <proto/dos.h>
 #include <dos/dos.h>
 #include <dos/dosextens.h> // for struct DosList/LDF_DEVICES (Spooler HDD detection)
+#include <exec/lists.h> // for struct List/struct Node (Spooler job LISTVIEW_KIND)
 #include <dos/dostags.h> // for SYS_Asynch (SystemTags)
 
 /* The H (hidden) protection bit - Protect's HSPARWED flags, present since
@@ -54,6 +55,8 @@ typedef long ssize_t;
 #include "http_response.h"
 #include "dpi_options.h"
 #include "media_size.h"
+#include "config.h"
+#include "ipp_client.h"
 #include "ipp_enum.h"
 #include "lodepng.h"
 
@@ -117,10 +120,17 @@ extern struct ExecBase *SysBase;
 
 /* Spooler management window gadget IDs (separate window/gadget list, like
  * the discovery selection dialog's GAD_DISC_* above). */
-#define GAD_SPOOL_JOB_CYCLE 1
+#define GAD_SPOOL_JOB_LIST 1
 #define GAD_SPOOL_REFRESH   2
 #define GAD_SPOOL_DELETE    3
 #define GAD_SPOOL_CLOSE     4
+#define GAD_SPOOL_RETRY     5
+#define GAD_SPOOL_COPIES    6
+
+/* Copies dialog gadget IDs (separate window/gadget list again). */
+#define GAD_SPOOL_COPIES_FIELD  1
+#define GAD_SPOOL_COPIES_OK     2
+#define GAD_SPOOL_COPIES_CANCEL 3
 
 // Discovery selection dialog gadget IDs (separate window/gadget list)
 #define GAD_DISC_CYCLE  1
@@ -169,7 +179,7 @@ static struct MPTestPrintJob test_print_job;
 
 // Define the USED macro for GCC
 #define USED __attribute__((used))
-#define MINTPRINT_SETTINGS_VERSION "1.2.9"
+#define MINTPRINT_SETTINGS_VERSION "1.3.0"
 #define MINTPRINT_DRIVER_DEST ((CONST_STRPTR)"DEVS:Printers/MintPRINT")
 
 /* MintPrint Settings now ships as a single drawer containing both bundled
@@ -5064,16 +5074,18 @@ static BOOL run_discovery_selection(struct Window *parent,
 
 /* Spooler management window: lists jobs the driver is currently tracking
  * (see driver_core.c's mp_job_begin()/mp_write_job_status() and the
- * MPSPOOL drawer both write into) with their live STATE, and lets the
- * user delete a held one. Retry/Reprint/multi-copy - resubmitting a
- * retained job file over IPP - are not implemented yet; this first cut
- * is read/manage only. */
+ * MPSPOOL drawer both write into) with their live STATE and, for a failed
+ * one, why - and lets the user delete a held job, retry/reprint it, or
+ * print extra copies. */
 #define MP_SPOOL_LIST_MAX 32
 
 struct MPSpoolJobEntry {
+    struct Node node; /* must be first - GadTools ListView owns this list */
     char job_path[MAX_ATTR_LEN + 48];
     char status_path[MAX_ATTR_LEN + 56];
-    char label[96];
+    char state[16];
+    char reason[64];
+    char label[192]; /* node.ln_Name points here */
 };
 
 /* Kept static (not a stack local) so run_spooler_window()'s Refresh
@@ -5083,17 +5095,81 @@ struct MPSpoolJobEntry {
  * at a time. */
 static struct MPSpoolJobEntry mp_spool_jobs[MP_SPOOL_LIST_MAX];
 
+/* Turns the numeric (error, http_status, ipp_status) triple a job's
+ * .status sidecar records (driver_core.c's mp_write_job_status(),
+ * ERROR=) into the kind of short phrase a print queue normally shows for
+ * "why did this fail". error is mp_ipp_print_document()'s
+ * (driver/ipp_client.c) own return code, naming exactly which step
+ * failed; ipp_status is only meaningful once a real IPP response came
+ * back (error -15/-16 below - see that function's own rc comments).
+ * IPP's response status alone can't distinguish "out of paper" from "out
+ * of ink" - that lives in a separate printer-state-reasons attribute
+ * this driver doesn't currently request - so 0x0504 (server-error-
+ * device-error) is reported as a hardware problem in general, not a
+ * specific cause; naming one precisely would be a guess this data
+ * doesn't support. */
+static void mp_spool_error_reason(LONG error, LONG http_status,
+                                  UWORD ipp_status, char *out, size_t out_cap)
+{
+    const char *reason;
+
+    switch (error) {
+        case 0:   reason = "OK"; break;
+        case -2:  reason = "Could not open job file"; break;
+        case -3:  reason = "Job file is empty"; break;
+        case -7:
+        case -8:  reason = "Network unavailable"; break;
+        case -9:  reason = "Invalid printer address"; break;
+        case -10: reason = "Connection refused"; break;
+        case -18: reason = "Connection timed out"; break;
+        case -11:
+        case -13: reason = "Sending job failed (connection dropped)"; break;
+        case -12: reason = "Error reading job file"; break;
+        case -14: reason = "Printer sent an invalid response"; break;
+        case -17: reason = "Printer accepted job but never responded"; break;
+        case -15:
+            if (http_status == 401 || http_status == 403)
+                reason = "Printer refused (access denied)";
+            else if (http_status == 404)
+                reason = "Printer rejected request (wrong IPP path?)";
+            else if (http_status >= 500)
+                reason = "Printer error (HTTP)";
+            else
+                reason = "Printer rejected request (HTTP)";
+            break;
+        case -16:
+            switch (ipp_status) {
+                case 0x0507: reason = "Printer busy"; break;
+                case 0x0504:
+                    reason = "Printer hardware problem (check paper/ink)";
+                    break;
+                case 0x0506: reason = "Printer not accepting jobs"; break;
+                case 0x0508: reason = "Job canceled at printer"; break;
+                default:
+                    if (ipp_status >= 0x0500) reason = "Printer error";
+                    else if (ipp_status >= 0x0400) reason = "Printer rejected job";
+                    else reason = "Printer returned an unexpected status";
+                    break;
+            }
+            break;
+        default:  reason = "Failed"; break;
+    }
+
+    strncpy(out, reason, out_cap - 1);
+    out[out_cap - 1] = '\0';
+}
+
 /* Scans <driver_spool_buffer>MPSPOOL/ for job files this driver is
  * tracking. Each *.status sidecar names a job file (the same name minus
  * ".status") and holds its current STATE=/ERROR= - read here so this
  * window never needs any live connection to the driver's spool process,
  * and still shows a job's outcome long after that process (and the print
- * that created it) is gone. label_ptrs must have room for at least
- * max_jobs + 1 entries (NULL-terminated, GTCY_Labels style). Returns the
+ * that created it) is gone. list is NewList()'d and filled with jobs[0]
+ * through jobs[count-1] via AddTail(), ready for GTLV_Labels. Returns the
  * number of jobs found; 0 if the drawer doesn't exist yet, or Spooler
  * isn't a real device. */
 static int mp_scan_spool_jobs(struct MPSpoolJobEntry *jobs, int max_jobs,
-                              STRPTR *label_ptrs)
+                              struct List *list)
 {
     char dir_path[MAX_ATTR_LEN + 16];
     BPTR lock;
@@ -5105,6 +5181,7 @@ static int mp_scan_spool_jobs(struct MPSpoolJobEntry *jobs, int max_jobs,
     struct FileInfoBlock fib;
     int count = 0;
 
+    NewList(list);
     if (!mp_spool_keep_available()) return 0;
 
     snprintf(dir_path, sizeof(dir_path), "%sMPSPOOL", driver_spool_buffer);
@@ -5119,16 +5196,22 @@ static int mp_scan_spool_jobs(struct MPSpoolJobEntry *jobs, int max_jobs,
             /* fib_DirEntryType < 0 -> plain file, not a drawer. */
             if (fib.fib_DirEntryType < 0 && len > 7 &&
                 strcmp(name + len - 7, ".status") == 0) {
-                char state[16];
+                char basename[80];
                 BPTR sfh;
+                size_t blen = (len - 7 < sizeof(basename) - 1)
+                    ? len - 7 : sizeof(basename) - 1;
+
+                memcpy(basename, name, blen);
+                basename[blen] = '\0';
 
                 snprintf(jobs[count].status_path,
                          sizeof(jobs[count].status_path),
                          "%s/%s", dir_path, name);
                 snprintf(jobs[count].job_path, sizeof(jobs[count].job_path),
-                         "%s/%.*s", dir_path, (int)(len - 7), name);
+                         "%s/%s", dir_path, basename);
 
-                strcpy(state, "UNKNOWN");
+                strcpy(jobs[count].state, "UNKNOWN");
+                jobs[count].reason[0] = '\0';
                 sfh = Open((CONST_STRPTR)jobs[count].status_path,
                           MODE_OLDFILE);
                 if (sfh) {
@@ -5136,32 +5219,274 @@ static int mp_scan_spool_jobs(struct MPSpoolJobEntry *jobs, int max_jobs,
                     while (FGets(sfh, line, sizeof(line))) {
                         trim_config_line(line);
                         if (strncmp(line, "STATE=", 6) == 0) {
-                            strncpy(state, line + 6, sizeof(state) - 1);
-                            state[sizeof(state) - 1] = '\0';
-                            break;
+                            strncpy(jobs[count].state, line + 6,
+                                   sizeof(jobs[count].state) - 1);
+                            jobs[count].state[
+                                sizeof(jobs[count].state) - 1] = '\0';
+                        } else if (strncmp(line, "ERROR=", 6) == 0) {
+                            long e = 0, h = 0;
+                            int ipp = 0;
+                            if (sscanf(line + 6, "%ld %ld %d",
+                                      &e, &h, &ipp) == 3)
+                                mp_spool_error_reason(e, h, (UWORD)ipp,
+                                    jobs[count].reason,
+                                    sizeof(jobs[count].reason));
                         }
                     }
                     Close(sfh);
                 }
 
-                snprintf(jobs[count].label, sizeof(jobs[count].label),
-                         "%.*s - %s", (int)(len - 7), name, state);
-                label_ptrs[count] = jobs[count].label;
+                if (jobs[count].reason[0])
+                    snprintf(jobs[count].label, sizeof(jobs[count].label),
+                             "%-30.30s %-10.10s %s", basename,
+                             jobs[count].state, jobs[count].reason);
+                else
+                    snprintf(jobs[count].label, sizeof(jobs[count].label),
+                             "%-30.30s %s", basename, jobs[count].state);
+
+                jobs[count].node.ln_Name = jobs[count].label;
+                AddTail(list, &jobs[count].node);
                 ++count;
             }
         }
     }
 
     UnLock(lock);
-    label_ptrs[count] = NULL;
     return count;
+}
+
+static CONST_STRPTR mp_spool_document_format_for_ext(const char *path)
+{
+    size_t len = strlen(path);
+
+    if (len > 4 && strcmp(path + len - 4, ".jpg") == 0)
+        return (CONST_STRPTR)"image/jpeg";
+    if (len > 4 && strcmp(path + len - 4, ".pwg") == 0)
+        return (CONST_STRPTR)"image/pwg-raster";
+    if (len > 4 && strcmp(path + len - 4, ".pdf") == 0)
+        return (CONST_STRPTR)"application/pdf";
+    if (len > 3 && strcmp(path + len - 3, ".ps") == 0)
+        return (CONST_STRPTR)"application/postscript";
+    if (len > 4 && strcmp(path + len - 4, ".urf") == 0)
+        return (CONST_STRPTR)"image/urf";
+    return (CONST_STRPTR)"application/octet-stream";
+}
+
+/* Resubmits an already-rendered, retained job file over IPP - used for
+ * Retry (a held, failed job), Reprint (a successful one sent again), and
+ * each pass of multi-copy printing. Builds a minimal MPConfig from the
+ * live GUI state (host/port/path only): the retained file's own content
+ * already reflects whichever job-template options (media, colour,
+ * quality, ...) were live when it was first rendered, so resending it
+ * with today's Unit0 attributes layered on top would be misleading -
+ * empty attributes are the same "nothing extra" no-op
+ * mp_ipp_print_document() already treats them as, see that function's
+ * own comment in driver/ipp_client.c. Updates the job's own .status
+ * sidecar with the outcome, the same STATE=/ERROR= format the driver
+ * itself writes, so a following Refresh shows it. Returns TRUE on
+ * success. */
+static BOOL mp_spool_retry_job(struct MPSpoolJobEntry *job)
+{
+    struct MPConfig cfg;
+    struct MPIPPResult result;
+    CONST_STRPTR document_format;
+    char host[64];
+    int port = -1;
+    LONG rc;
+    BPTR sfh;
+
+    memset(&cfg, 0, sizeof(cfg));
+    if (!parse_ip_and_port(ip_buffer, host, sizeof(host), &port) || !host[0])
+        return FALSE;
+    strncpy(cfg.host, host, sizeof(cfg.host) - 1);
+    cfg.port = (port > 0 && port <= 65535) ? (UWORD)port : 80;
+    if (driver_path_buffer[0] == '/')
+        strncpy(cfg.path, driver_path_buffer, sizeof(cfg.path) - 1);
+    else
+        strncpy(cfg.path, "/ipp/print", sizeof(cfg.path) - 1);
+
+    document_format = mp_spool_document_format_for_ext(job->job_path);
+
+    result.error = -1;
+    result.http_status = 0;
+    result.ipp_status = 0xffff;
+    result.document_bytes = 0;
+    rc = mp_ipp_print_document(&cfg, (CONST_STRPTR)job->job_path,
+                               document_format, &result);
+
+    sfh = Open((CONST_STRPTR)job->status_path, MODE_NEWFILE);
+    if (sfh) {
+        char buf[64];
+        int n = snprintf(buf, sizeof(buf), "STATE=%s\n",
+                         rc == 0 ? "DONE" : "FAILED");
+        Write(sfh, buf, n);
+        if (rc != 0) {
+            n = snprintf(buf, sizeof(buf), "ERROR=%ld %ld %d\n",
+                        (long)result.error, (long)result.http_status,
+                        (int)result.ipp_status);
+            Write(sfh, buf, n);
+        }
+        Close(sfh);
+    }
+
+    return rc == 0;
+}
+
+/* Small OK/Cancel dialog asking how many copies to print - see
+ * GAD_SPOOL_COPIES in run_spooler_window() below, which resubmits the
+ * selected job that many times (mp_spool_retry_job() per copy) rather
+ * than relying on the IPP copies Job Template attribute, since not every
+ * printer this driver targets is known to honour it - see the project's
+ * own multi-copy design discussion. Returns TRUE if OK was pressed, with
+ * *out_copies set to 1-99; FALSE (out_copies untouched past its initial
+ * 1) on Cancel or any setup failure. */
+static BOOL run_copies_dialog(struct Window *parent, int *out_copies)
+{
+    struct Screen *cscreen;
+    APTR cvi;
+    struct Gadget *cglist = NULL;
+    struct Gadget *gad;
+    struct Gadget *copies_field;
+    struct NewGadget ng;
+    struct Window *cwin;
+    static char copies_buffer[8];
+    BOOL confirmed = FALSE;
+    BOOL terminated = FALSE;
+    UWORD topborder;
+
+    (void)parent;
+    *out_copies = 1;
+    strcpy(copies_buffer, "1");
+
+    cscreen = LockPubScreen(NULL);
+    if (!cscreen) return FALSE;
+    cvi = GetVisualInfo(cscreen, TAG_DONE);
+    if (!cvi) {
+        UnlockPubScreen(NULL, cscreen);
+        return FALSE;
+    }
+
+    topborder = cscreen->WBorTop + (cscreen->Font->ta_YSize + 1);
+
+    gad = CreateContext(&cglist);
+    if (!gad) {
+        FreeVisualInfo(cvi);
+        UnlockPubScreen(NULL, cscreen);
+        return FALSE;
+    }
+
+    ng.ng_TextAttr = &Topaz80;
+    ng.ng_VisualInfo = cvi;
+    ng.ng_Flags = 0;
+    ng.ng_LeftEdge = 10;
+    ng.ng_TopEdge = 10 + topborder;
+    ng.ng_Width = 100;
+    ng.ng_Height = 14;
+    ng.ng_GadgetText = (STRPTR)"Copies:";
+    ng.ng_GadgetID = GAD_SPOOL_COPIES_FIELD;
+    gad = CreateGadget(STRING_KIND, gad, &ng,
+        GTST_String, (ULONG)copies_buffer,
+        GTST_MaxChars, sizeof(copies_buffer) - 1,
+        GA_Immediate, TRUE,
+        TAG_DONE);
+    if (!gad) {
+        FreeGadgets(cglist);
+        FreeVisualInfo(cvi);
+        UnlockPubScreen(NULL, cscreen);
+        return FALSE;
+    }
+    copies_field = gad;
+
+    ng.ng_TopEdge += 26;
+    ng.ng_LeftEdge = 10;
+    ng.ng_Width = 90;
+    ng.ng_GadgetText = (STRPTR)"_OK";
+    ng.ng_GadgetID = GAD_SPOOL_COPIES_OK;
+    gad = CreateGadget(BUTTON_KIND, gad, &ng, GT_Underscore, '_', TAG_DONE);
+    if (!gad) {
+        FreeGadgets(cglist);
+        FreeVisualInfo(cvi);
+        UnlockPubScreen(NULL, cscreen);
+        return FALSE;
+    }
+
+    ng.ng_LeftEdge = 120;
+    ng.ng_GadgetText = (STRPTR)"_Cancel";
+    ng.ng_GadgetID = GAD_SPOOL_COPIES_CANCEL;
+    gad = CreateGadget(BUTTON_KIND, gad, &ng, GT_Underscore, '_', TAG_DONE);
+    if (!gad) {
+        FreeGadgets(cglist);
+        FreeVisualInfo(cvi);
+        UnlockPubScreen(NULL, cscreen);
+        return FALSE;
+    }
+
+    cwin = OpenWindowTags(NULL,
+        WA_Title, (ULONG)"Print Copies",
+        WA_Gadgets, (ULONG)cglist,
+        WA_Width, 230,
+        WA_InnerHeight, 70,
+        WA_DragBar, TRUE,
+        WA_DepthGadget, TRUE,
+        WA_Activate, TRUE,
+        WA_CloseGadget, TRUE,
+        WA_SimpleRefresh, TRUE,
+        WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW | BUTTONIDCMP | STRINGIDCMP,
+        WA_PubScreen, (ULONG)cscreen,
+        TAG_DONE);
+    if (!cwin) {
+        FreeGadgets(cglist);
+        FreeVisualInfo(cvi);
+        UnlockPubScreen(NULL, cscreen);
+        return FALSE;
+    }
+
+    GT_RefreshWindow(cwin, NULL);
+
+    while (!terminated) {
+        struct IntuiMessage *imsg;
+
+        Wait(1L << cwin->UserPort->mp_SigBit);
+        imsg = GT_GetIMsg(cwin->UserPort);
+        while (!terminated && imsg) {
+            struct Gadget *g = (struct Gadget *)imsg->IAddress;
+            ULONG cls = imsg->Class;
+            GT_ReplyIMsg(imsg);
+
+            if (cls == IDCMP_CLOSEWINDOW) {
+                terminated = TRUE;
+            } else if (cls == IDCMP_REFRESHWINDOW) {
+                GT_BeginRefresh(cwin);
+                GT_EndRefresh(cwin, TRUE);
+            } else if (cls == IDCMP_GADGETUP) {
+                if (g->GadgetID == GAD_SPOOL_COPIES_CANCEL) {
+                    terminated = TRUE;
+                } else if (g->GadgetID == GAD_SPOOL_COPIES_OK) {
+                    char *value = mp_string_gadget_value(copies_field);
+                    int n = value ? atoi(value) : 1;
+                    if (n < 1) n = 1;
+                    if (n > 99) n = 99;
+                    *out_copies = n;
+                    confirmed = TRUE;
+                    terminated = TRUE;
+                }
+            }
+            imsg = GT_GetIMsg(cwin->UserPort);
+        }
+    }
+
+    CloseWindow(cwin);
+    FreeGadgets(cglist);
+    FreeVisualInfo(cvi);
+    UnlockPubScreen(NULL, cscreen);
+    return confirmed;
 }
 
 static void run_spooler_window(struct Window *parent)
 {
     struct Screen *sscreen;
     APTR svi;
-    STRPTR *labels;
+    struct List job_list;
     UWORD topborder;
     BOOL reopen;
 
@@ -5176,13 +5501,6 @@ static void run_spooler_window(struct Window *parent)
         return;
     }
 
-    labels = AllocVec((MP_SPOOL_LIST_MAX + 1) * sizeof(STRPTR), MEMF_CLEAR);
-    if (!labels) {
-        FreeVisualInfo(svi);
-        UnlockPubScreen(NULL, sscreen);
-        return;
-    }
-
     topborder = sscreen->WBorTop + (sscreen->Font->ta_YSize + 1);
 
     do {
@@ -5192,52 +5510,73 @@ static void run_spooler_window(struct Window *parent)
         struct Window *swin;
         BOOL terminated = FALSE;
         ULONG selected = 0;
+        BOOL have_selection;
         int count;
 
         reopen = FALSE;
-        count = mp_scan_spool_jobs(mp_spool_jobs, MP_SPOOL_LIST_MAX, labels);
-        if (count == 0) {
-            labels[0] = (STRPTR)(mp_spool_keep_available()
-                ? "(no tracked jobs)"
-                : "(Spooler is RAM, or Keep Spooled Jobs is off)");
-            labels[1] = NULL;
-        }
+        count = mp_scan_spool_jobs(mp_spool_jobs, MP_SPOOL_LIST_MAX, &job_list);
+        have_selection = count > 0;
 
         gad = CreateContext(&sglist);
         if (!gad) break;
 
+        /* A real scrolling multi-row list (GadTools LISTVIEW_KIND), not
+         * the single-entry-at-a-time CYCLE_KIND browsing gadget the
+         * discovery dialog uses - every tracked job and its status is
+         * visible at once, the way MintAMP/MintVID-style list windows
+         * show theirs. */
         ng.ng_TextAttr = &Topaz80;
         ng.ng_VisualInfo = svi;
         ng.ng_Flags = 0;
         ng.ng_LeftEdge = 10;
         ng.ng_TopEdge = 10 + topborder;
-        ng.ng_Width = 460;
-        ng.ng_Height = 14;
-        ng.ng_GadgetText = (STRPTR)"Job:";
-        ng.ng_GadgetID = GAD_SPOOL_JOB_CYCLE;
-        gad = CreateGadget(CYCLE_KIND, gad, &ng,
-            GTCY_Labels, (ULONG)labels,
-            GTCY_Active, 0,
+        ng.ng_Width = 540;
+        ng.ng_Height = 150;
+        ng.ng_GadgetText = NULL;
+        ng.ng_GadgetID = GAD_SPOOL_JOB_LIST;
+        gad = CreateGadget(LISTVIEW_KIND, gad, &ng,
+            GTLV_Labels, (ULONG)&job_list,
+            GTLV_ReadOnly, TRUE,
             GA_Disabled, (ULONG)(count > 0 ? FALSE : TRUE),
             TAG_DONE);
         if (!gad) { FreeGadgets(sglist); break; }
 
-        ng.ng_TopEdge += 26;
+        ng.ng_TopEdge += 162;
         ng.ng_LeftEdge = 10;
-        ng.ng_Width = 110;
+        ng.ng_Width = 100;
         ng.ng_Height = 14;
         ng.ng_GadgetText = (STRPTR)"_Refresh";
         ng.ng_GadgetID = GAD_SPOOL_REFRESH;
         gad = CreateGadget(BUTTON_KIND, gad, &ng, GT_Underscore, '_', TAG_DONE);
         if (!gad) { FreeGadgets(sglist); break; }
 
-        ng.ng_LeftEdge = 130;
+        ng.ng_LeftEdge = 120;
         ng.ng_GadgetText = (STRPTR)"_Delete";
         ng.ng_GadgetID = GAD_SPOOL_DELETE;
-        gad = CreateGadget(BUTTON_KIND, gad, &ng, GT_Underscore, '_', TAG_DONE);
+        gad = CreateGadget(BUTTON_KIND, gad, &ng,
+            GT_Underscore, '_', GA_Disabled, (ULONG)(have_selection ? FALSE : TRUE),
+            TAG_DONE);
         if (!gad) { FreeGadgets(sglist); break; }
 
-        ng.ng_LeftEdge = 360;
+        ng.ng_LeftEdge = 230;
+        ng.ng_GadgetText = (STRPTR)"_Retry";
+        ng.ng_GadgetID = GAD_SPOOL_RETRY;
+        gad = CreateGadget(BUTTON_KIND, gad, &ng,
+            GT_Underscore, '_', GA_Disabled, (ULONG)(have_selection ? FALSE : TRUE),
+            TAG_DONE);
+        if (!gad) { FreeGadgets(sglist); break; }
+
+        ng.ng_LeftEdge = 340;
+        ng.ng_Width = 110;
+        ng.ng_GadgetText = (STRPTR)"_Copies...";
+        ng.ng_GadgetID = GAD_SPOOL_COPIES;
+        gad = CreateGadget(BUTTON_KIND, gad, &ng,
+            GT_Underscore, '_', GA_Disabled, (ULONG)(have_selection ? FALSE : TRUE),
+            TAG_DONE);
+        if (!gad) { FreeGadgets(sglist); break; }
+
+        ng.ng_LeftEdge = 460;
+        ng.ng_Width = 90;
         ng.ng_GadgetText = (STRPTR)"_Close";
         ng.ng_GadgetID = GAD_SPOOL_CLOSE;
         gad = CreateGadget(BUTTON_KIND, gad, &ng, GT_Underscore, '_', TAG_DONE);
@@ -5246,14 +5585,14 @@ static void run_spooler_window(struct Window *parent)
         swin = OpenWindowTags(NULL,
             WA_Title, (ULONG)"Spooler Management",
             WA_Gadgets, (ULONG)sglist,
-            WA_Width, 480,
-            WA_InnerHeight, 70,
+            WA_Width, 560,
+            WA_InnerHeight, 196,
             WA_DragBar, TRUE,
             WA_DepthGadget, TRUE,
             WA_Activate, TRUE,
             WA_CloseGadget, TRUE,
             WA_SimpleRefresh, TRUE,
-            WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW | BUTTONIDCMP | CYCLEIDCMP,
+            WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW | BUTTONIDCMP | LISTVIEWIDCMP,
             WA_PubScreen, (ULONG)sscreen,
             TAG_DONE);
         if (!swin) { FreeGadgets(sglist); break; }
@@ -5277,25 +5616,40 @@ static void run_spooler_window(struct Window *parent)
                     GT_BeginRefresh(swin);
                     GT_EndRefresh(swin, TRUE);
                 } else if (cls == IDCMP_GADGETUP) {
-                    if (g->GadgetID == GAD_SPOOL_JOB_CYCLE) {
+                    if (g->GadgetID == GAD_SPOOL_JOB_LIST) {
                         if ((ULONG)code < (ULONG)count)
                             selected = (ULONG)code;
                     } else if (g->GadgetID == GAD_SPOOL_CLOSE) {
                         terminated = TRUE;
                     } else if (g->GadgetID == GAD_SPOOL_REFRESH) {
                         /* Reopens fresh below rather than swapping this
-                         * live CYCLE_KIND gadget's label array in place -
-                         * same OS3.1/classic-GadTools safety discipline
+                         * live LISTVIEW_KIND gadget's label list in place
+                         * - same OS3.1/classic-GadTools safety discipline
                          * as the main window (see mp_sides_label_ptrs'
                          * own comment far above). */
                         reopen = TRUE;
                         terminated = TRUE;
                     } else if (g->GadgetID == GAD_SPOOL_DELETE) {
-                        if (count > 0 && selected < (ULONG)count) {
+                        if (have_selection && selected < (ULONG)count) {
                             DeleteFile(
                                 (CONST_STRPTR)mp_spool_jobs[selected].job_path);
                             DeleteFile(
                                 (CONST_STRPTR)mp_spool_jobs[selected].status_path);
+                        }
+                        reopen = TRUE;
+                        terminated = TRUE;
+                    } else if (g->GadgetID == GAD_SPOOL_RETRY) {
+                        if (have_selection && selected < (ULONG)count)
+                            mp_spool_retry_job(&mp_spool_jobs[selected]);
+                        reopen = TRUE;
+                        terminated = TRUE;
+                    } else if (g->GadgetID == GAD_SPOOL_COPIES) {
+                        int copies = 1;
+                        if (have_selection && selected < (ULONG)count &&
+                            run_copies_dialog(swin, &copies)) {
+                            int i;
+                            for (i = 0; i < copies; ++i)
+                                mp_spool_retry_job(&mp_spool_jobs[selected]);
                         }
                         reopen = TRUE;
                         terminated = TRUE;
@@ -5309,7 +5663,6 @@ static void run_spooler_window(struct Window *parent)
         FreeGadgets(sglist);
     } while (reopen);
 
-    FreeVec(labels);
     FreeVisualInfo(svi);
     UnlockPubScreen(NULL, sscreen);
 }
