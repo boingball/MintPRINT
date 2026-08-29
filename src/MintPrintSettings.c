@@ -5534,9 +5534,14 @@ static void run_spooler_window(struct Window *parent)
         ng.ng_Height = 150;
         ng.ng_GadgetText = NULL;
         ng.ng_GadgetID = GAD_SPOOL_JOB_LIST;
+        /* No GTLV_ReadOnly here: that attribute, despite its name, does
+         * not mean "not editable" (a plain text listview like this one
+         * was never editable in the first place) - it means "the user
+         * cannot select an entry at all", which is exactly why rows
+         * couldn't be clicked. Selectable-but-not-editable is simply the
+         * GadTools default with no tag needed. */
         gad = CreateGadget(LISTVIEW_KIND, gad, &ng,
             GTLV_Labels, (ULONG)&job_list,
-            GTLV_ReadOnly, TRUE,
             GA_Disabled, (ULONG)(count > 0 ? FALSE : TRUE),
             TAG_DONE);
         if (!gad) { FreeGadgets(sglist); break; }
