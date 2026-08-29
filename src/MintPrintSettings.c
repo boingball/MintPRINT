@@ -5091,12 +5091,39 @@ struct MPSpoolJobEntry {
     char label[192]; /* node.ln_Name points here */
 };
 
-/* Kept static (not a stack local) so run_spooler_window()'s Refresh
- * button - which redoes this scan in place without recursing - never
- * risks stack growth across repeated presses. Only ever touched from
- * that one function, single-threaded, one instance of the window open
- * at a time. */
+/* Kept static (not a stack local) so a Refresh - which redoes this scan
+ * in place without recursing - never risks stack growth across repeated
+ * presses. Only ever touched from the mp_spool_win_*() functions below,
+ * single-threaded, one instance of the window open at a time. */
 static struct MPSpoolJobEntry mp_spool_jobs[MP_SPOOL_LIST_MAX];
+
+/* The Spooler window's entire live state, as globals rather than one
+ * function's stack locals - process_window_events()'s main loop needs to
+ * reach all of it between messages, since the window is non-modal: it
+ * Waits on this window's UserPort signal bit alongside the main window's
+ * own (see that function), so both windows keep processing input at the
+ * same time instead of one blocking the other the way a nested modal
+ * event loop would. g_spool_win doubling as "is the window open" (NULL
+ * when it isn't) is what lets that Wait() call skip this signal bit
+ * entirely while the window is closed. */
+static struct Window *g_spool_win = NULL;
+static struct Screen *g_spool_screen = NULL;
+static APTR g_spool_vi = NULL;
+static struct Gadget *g_spool_sglist = NULL;
+static struct Gadget *g_spool_job_listview = NULL;
+static struct Gadget *g_spool_delete_gadget = NULL;
+static struct Gadget *g_spool_retry_gadget = NULL;
+static struct Gadget *g_spool_copies_gadget = NULL;
+static struct List g_spool_job_list;
+static int g_spool_count = 0;
+static ULONG g_spool_selected = 0;
+static BOOL g_spool_selection_made = FALSE;
+static int g_spool_retry_unit = -1; /* -1 = not yet defaulted to current_unit_index */
+/* -1 = not yet positioned; the window is centred the first time it opens
+ * and then keeps whatever LeftEdge/TopEdge it was last closed at (drags
+ * included), rather than recentring itself every time it is reopened. */
+static WORD g_spool_win_left = -1;
+static WORD g_spool_win_top = -1;
 
 /* Turns the numeric (error, http_status, ipp_status) triple a job's
  * .status sidecar records (driver_core.c's mp_write_job_status(),
@@ -5424,7 +5451,7 @@ static BOOL mp_spool_retry_job(struct MPSpoolJobEntry *job, int unit_index)
 }
 
 /* Small OK/Cancel dialog asking how many copies to print - see
- * GAD_SPOOL_COPIES in run_spooler_window() below, which resubmits the
+ * GAD_SPOOL_COPIES in mp_spool_win_process() below, which resubmits the
  * selected job that many times (mp_spool_retry_job() per copy) rather
  * than relying on the IPP copies Job Template attribute, since not every
  * printer this driver targets is known to honour it - see the project's
@@ -5626,345 +5653,406 @@ static void mp_spool_refresh_list_live(struct Window *swin,
     SetWindowTitles(swin, (STRPTR)"Spooler Management", (STRPTR)~0);
 }
 
-static void run_spooler_window(struct Window *parent)
+/* Closes the Spooler window (if open) and releases everything opening it
+ * took - screen lock, visual info, gadget list - leaving g_spool_win NULL
+ * so process_window_events()'s Wait() stops listening on its signal bit.
+ * Records LeftEdge/TopEdge first so the next mp_spool_win_open() reopens
+ * in the same place rather than recentring. */
+static void mp_spool_win_close(void)
 {
-    struct Screen *sscreen;
-    APTR svi;
-    struct List job_list;
+    if (!g_spool_win) return;
+
+    g_spool_win_left = g_spool_win->LeftEdge;
+    g_spool_win_top = g_spool_win->TopEdge;
+    CloseWindow(g_spool_win);
+    g_spool_win = NULL;
+
+    FreeGadgets(g_spool_sglist);
+    g_spool_sglist = NULL;
+    g_spool_job_listview = NULL;
+    g_spool_delete_gadget = NULL;
+    g_spool_retry_gadget = NULL;
+    g_spool_copies_gadget = NULL;
+
+    FreeVisualInfo(g_spool_vi);
+    g_spool_vi = NULL;
+    UnlockPubScreen(NULL, g_spool_screen);
+    g_spool_screen = NULL;
+}
+
+/* Opens the Spooler window, or - if one is already open - just brings the
+ * existing one to the front instead of opening a second instance sharing
+ * the same g_spool_*() globals underneath it. Non-modal: unlike the
+ * discovery-selection and Copies dialogs, this does not run its own
+ * IDCMP loop. It returns immediately after opening, and
+ * process_window_events()'s own main-window loop below folds this
+ * window's UserPort signal bit into the same Wait() call as the main
+ * window's, calling mp_spool_win_process() whenever it fires - the same
+ * technique already used there for test_print_job's async completion.
+ * That is what lets both windows accept input at the same time instead
+ * of one blocking the other the way a nested modal loop would. */
+static void mp_spool_win_open(struct Window *parent)
+{
+    struct Gadget *sglist = NULL;
+    struct Gadget *gad;
+    struct NewGadget ng;
     UWORD topborder;
-    BOOL reopen;
-    WORD swin_left, swin_top;
-    int retry_unit;
+    BOOL have_selection;
 
     (void)parent;
 
-    sscreen = LockPubScreen(NULL);
-    if (!sscreen) return;
-
-    svi = GetVisualInfo(sscreen, TAG_DONE);
-    if (!svi) {
-        UnlockPubScreen(NULL, sscreen);
+    if (g_spool_win) {
+        WindowToFront(g_spool_win);
+        ActivateWindow(g_spool_win);
         return;
     }
 
-    topborder = sscreen->WBorTop + (sscreen->Font->ta_YSize + 1);
+    g_spool_screen = LockPubScreen(NULL);
+    if (!g_spool_screen) return;
 
-    /* Centred on first open; every Refresh/Delete/Retry/Copies press below
-     * closes this window and reopens a fresh one (see the LISTVIEW_KIND
-     * label-list comment further down), and without an explicit position
-     * each of those reopens would have Intuition place it back at its
-     * default spot - which reads as the window jumping to the top-left
-     * corner of the screen on every single click. Carrying the window's
-     * last LeftEdge/TopEdge (updated right before each CloseWindow below)
-     * into the next OpenWindowTags keeps it planted where the user left
-     * it, drags included. */
-    swin_left = (sscreen->Width > 560) ? (sscreen->Width - 560) / 2 : 0;
-    swin_top = (sscreen->Height > 220 + topborder)
-                   ? (sscreen->Height - 220) / 2 : topborder;
+    g_spool_vi = GetVisualInfo(g_spool_screen, TAG_DONE);
+    if (!g_spool_vi) {
+        UnlockPubScreen(NULL, g_spool_screen);
+        g_spool_screen = NULL;
+        return;
+    }
+
+    topborder = g_spool_screen->WBorTop +
+                (g_spool_screen->Font->ta_YSize + 1);
+
+    /* Centred the first time this ever opens; every later open reuses
+     * wherever it was last closed (drags included) instead of recentring. */
+    if (g_spool_win_left < 0) {
+        g_spool_win_left = (g_spool_screen->Width > 560)
+                                ? (g_spool_screen->Width - 560) / 2 : 0;
+        g_spool_win_top = (g_spool_screen->Height > 220 + topborder)
+                               ? (g_spool_screen->Height - 220) / 2
+                               : topborder;
+    }
 
     /* Which saved Unit a Retry/Copies resubmission targets - defaults to
-     * whatever the main window currently has active, but the Unit cycle
-     * gadget below lets it be reassigned to any other saved printer
-     * profile, and that choice is carried across this same window's own
-     * Refresh/Delete/Retry/Copies reopens rather than resetting each time. */
-    retry_unit = current_unit_index;
-    if (retry_unit < 0) retry_unit = 0;
-    if (retry_unit >= MAX_UNITS) retry_unit = MAX_UNITS - 1;
+     * whatever the main window currently has active the first time this
+     * opens, but the Unit cycle gadget below lets it be reassigned to any
+     * other saved printer profile, and that choice (like the window's
+     * position) is remembered across closing and reopening this window. */
+    if (g_spool_retry_unit < 0) {
+        g_spool_retry_unit = current_unit_index;
+        if (g_spool_retry_unit < 0) g_spool_retry_unit = 0;
+        if (g_spool_retry_unit >= MAX_UNITS)
+            g_spool_retry_unit = MAX_UNITS - 1;
+    }
 
-    do {
-        struct Gadget *sglist = NULL;
-        struct Gadget *gad;
-        struct Gadget *job_listview;
-        struct Gadget *delete_gadget;
-        struct Gadget *retry_gadget;
-        struct Gadget *copies_gadget;
-        struct NewGadget ng;
-        struct Window *swin;
-        BOOL terminated = FALSE;
-        BOOL selection_made = FALSE;
-        ULONG selected = 0;
-        BOOL have_selection;
-        int count;
+    g_spool_count = mp_scan_spool_jobs(mp_spool_jobs, MP_SPOOL_LIST_MAX,
+                                       &g_spool_job_list);
+    g_spool_selected = 0;
+    g_spool_selection_made = FALSE;
+    have_selection = g_spool_count > 0;
 
-        reopen = FALSE;
-        count = mp_scan_spool_jobs(mp_spool_jobs, MP_SPOOL_LIST_MAX, &job_list);
-        have_selection = count > 0;
+    gad = CreateContext(&sglist);
+    if (!gad) {
+        FreeVisualInfo(g_spool_vi); g_spool_vi = NULL;
+        UnlockPubScreen(NULL, g_spool_screen); g_spool_screen = NULL;
+        return;
+    }
 
-        gad = CreateContext(&sglist);
-        if (!gad) break;
+    /* A real scrolling multi-row list (GadTools LISTVIEW_KIND), not
+     * the single-entry-at-a-time CYCLE_KIND browsing gadget the
+     * discovery dialog uses - every tracked job and its status is
+     * visible at once, the way MintAMP/MintVID-style list windows
+     * show theirs. */
+    ng.ng_TextAttr = &Topaz80;
+    ng.ng_VisualInfo = g_spool_vi;
+    ng.ng_Flags = 0;
+    ng.ng_LeftEdge = 10;
+    ng.ng_TopEdge = 10 + topborder;
+    ng.ng_Width = 540;
+    ng.ng_Height = 150;
+    ng.ng_GadgetText = NULL;
+    ng.ng_GadgetID = GAD_SPOOL_JOB_LIST;
+    /* No GTLV_ReadOnly here: that attribute, despite its name, does
+     * not mean "not editable" (a plain text listview like this one
+     * was never editable in the first place) - it means "the user
+     * cannot select an entry at all", which is exactly why rows
+     * couldn't be clicked. Selectable-but-not-editable is simply the
+     * GadTools default with no tag needed. */
+    /* GTLV_Selected starts at ~0 (no row pre-highlighted), the same
+     * sentinel MintAMP's working radio-results listview uses - not 0,
+     * which pre-selects row 0 and can confuse the "did my click do
+     * anything" read on the very first paint. GTLV_ShowSelected is
+     * included too, matching that same gadget, even though this list
+     * has no companion display gadget to copy the selection into. */
+    gad = CreateGadget(LISTVIEW_KIND, gad, &ng,
+        GTLV_Labels, (ULONG)&g_spool_job_list,
+        GTLV_Selected, (ULONG)~0,
+        GTLV_ShowSelected, (ULONG)NULL,
+        GA_Disabled, (ULONG)(have_selection ? FALSE : TRUE),
+        TAG_DONE);
+    if (!gad) {
+        FreeGadgets(sglist);
+        FreeVisualInfo(g_spool_vi); g_spool_vi = NULL;
+        UnlockPubScreen(NULL, g_spool_screen); g_spool_screen = NULL;
+        return;
+    }
+    g_spool_job_listview = gad;
 
-        /* A real scrolling multi-row list (GadTools LISTVIEW_KIND), not
-         * the single-entry-at-a-time CYCLE_KIND browsing gadget the
-         * discovery dialog uses - every tracked job and its status is
-         * visible at once, the way MintAMP/MintVID-style list windows
-         * show theirs. */
-        ng.ng_TextAttr = &Topaz80;
-        ng.ng_VisualInfo = svi;
-        ng.ng_Flags = 0;
-        ng.ng_LeftEdge = 10;
-        ng.ng_TopEdge = 10 + topborder;
-        ng.ng_Width = 540;
-        ng.ng_Height = 150;
-        ng.ng_GadgetText = NULL;
-        ng.ng_GadgetID = GAD_SPOOL_JOB_LIST;
-        /* No GTLV_ReadOnly here: that attribute, despite its name, does
-         * not mean "not editable" (a plain text listview like this one
-         * was never editable in the first place) - it means "the user
-         * cannot select an entry at all", which is exactly why rows
-         * couldn't be clicked. Selectable-but-not-editable is simply the
-         * GadTools default with no tag needed. */
-        /* GTLV_Selected starts at ~0 (no row pre-highlighted), the same
-         * sentinel MintAMP's working radio-results listview uses - not 0,
-         * which pre-selects row 0 and can confuse the "did my click do
-         * anything" read on the very first paint. GTLV_ShowSelected is
-         * included too, matching that same gadget, even though this list
-         * has no companion display gadget to copy the selection into. */
-        gad = CreateGadget(LISTVIEW_KIND, gad, &ng,
-            GTLV_Labels, (ULONG)&job_list,
-            GTLV_Selected, (ULONG)~0,
-            GTLV_ShowSelected, (ULONG)NULL,
-            GA_Disabled, (ULONG)(count > 0 ? FALSE : TRUE),
-            TAG_DONE);
-        if (!gad) { FreeGadgets(sglist); break; }
-        job_listview = gad;
+    ng.ng_TopEdge += 162;
+    ng.ng_LeftEdge = 10;
+    ng.ng_Width = 100;
+    ng.ng_Height = 14;
+    ng.ng_GadgetText = (STRPTR)"_Refresh";
+    ng.ng_GadgetID = GAD_SPOOL_REFRESH;
+    gad = CreateGadget(BUTTON_KIND, gad, &ng, GT_Underscore, '_', TAG_DONE);
+    if (!gad) goto fail;
 
-        ng.ng_TopEdge += 162;
-        ng.ng_LeftEdge = 10;
-        ng.ng_Width = 100;
-        ng.ng_Height = 14;
-        ng.ng_GadgetText = (STRPTR)"_Refresh";
-        ng.ng_GadgetID = GAD_SPOOL_REFRESH;
-        gad = CreateGadget(BUTTON_KIND, gad, &ng, GT_Underscore, '_', TAG_DONE);
-        if (!gad) { FreeGadgets(sglist); break; }
+    ng.ng_LeftEdge = 120;
+    ng.ng_GadgetText = (STRPTR)"_Delete";
+    ng.ng_GadgetID = GAD_SPOOL_DELETE;
+    gad = CreateGadget(BUTTON_KIND, gad, &ng,
+        GT_Underscore, '_', GA_Disabled, (ULONG)(have_selection ? FALSE : TRUE),
+        TAG_DONE);
+    if (!gad) goto fail;
+    g_spool_delete_gadget = gad;
 
-        ng.ng_LeftEdge = 120;
-        ng.ng_GadgetText = (STRPTR)"_Delete";
-        ng.ng_GadgetID = GAD_SPOOL_DELETE;
-        gad = CreateGadget(BUTTON_KIND, gad, &ng,
-            GT_Underscore, '_', GA_Disabled, (ULONG)(have_selection ? FALSE : TRUE),
-            TAG_DONE);
-        if (!gad) { FreeGadgets(sglist); break; }
-        delete_gadget = gad;
+    ng.ng_LeftEdge = 230;
+    ng.ng_GadgetText = (STRPTR)"_Retry";
+    ng.ng_GadgetID = GAD_SPOOL_RETRY;
+    gad = CreateGadget(BUTTON_KIND, gad, &ng,
+        GT_Underscore, '_', GA_Disabled, (ULONG)(have_selection ? FALSE : TRUE),
+        TAG_DONE);
+    if (!gad) goto fail;
+    g_spool_retry_gadget = gad;
 
-        ng.ng_LeftEdge = 230;
-        ng.ng_GadgetText = (STRPTR)"_Retry";
-        ng.ng_GadgetID = GAD_SPOOL_RETRY;
-        gad = CreateGadget(BUTTON_KIND, gad, &ng,
-            GT_Underscore, '_', GA_Disabled, (ULONG)(have_selection ? FALSE : TRUE),
-            TAG_DONE);
-        if (!gad) { FreeGadgets(sglist); break; }
-        retry_gadget = gad;
+    ng.ng_LeftEdge = 340;
+    ng.ng_Width = 110;
+    ng.ng_GadgetText = (STRPTR)"_Copies...";
+    ng.ng_GadgetID = GAD_SPOOL_COPIES;
+    gad = CreateGadget(BUTTON_KIND, gad, &ng,
+        GT_Underscore, '_', GA_Disabled, (ULONG)(have_selection ? FALSE : TRUE),
+        TAG_DONE);
+    if (!gad) goto fail;
+    g_spool_copies_gadget = gad;
 
-        ng.ng_LeftEdge = 340;
-        ng.ng_Width = 110;
-        ng.ng_GadgetText = (STRPTR)"_Copies...";
-        ng.ng_GadgetID = GAD_SPOOL_COPIES;
-        gad = CreateGadget(BUTTON_KIND, gad, &ng,
-            GT_Underscore, '_', GA_Disabled, (ULONG)(have_selection ? FALSE : TRUE),
-            TAG_DONE);
-        if (!gad) { FreeGadgets(sglist); break; }
-        copies_gadget = gad;
+    ng.ng_LeftEdge = 460;
+    ng.ng_Width = 90;
+    ng.ng_GadgetText = (STRPTR)"_Close";
+    ng.ng_GadgetID = GAD_SPOOL_CLOSE;
+    gad = CreateGadget(BUTTON_KIND, gad, &ng, GT_Underscore, '_', TAG_DONE);
+    if (!gad) goto fail;
 
-        ng.ng_LeftEdge = 460;
-        ng.ng_Width = 90;
-        ng.ng_GadgetText = (STRPTR)"_Close";
-        ng.ng_GadgetID = GAD_SPOOL_CLOSE;
-        gad = CreateGadget(BUTTON_KIND, gad, &ng, GT_Underscore, '_', TAG_DONE);
-        if (!gad) { FreeGadgets(sglist); break; }
+    /* Which printer a Retry/Copies resubmission goes to - defaults to
+     * the main window's active Unit, reassignable to any other saved
+     * Unit profile right here without having to close this window,
+     * switch it in the main window, and reopen. Purely a resubmission
+     * target: it does not change which Unit a job's "assigned to"
+     * host:port column shows - that always reflects where the job
+     * actually went (or will go, once retried against this choice). */
+    /* PLACETEXT_LEFT draws the label to the left of ng_LeftEdge, not
+     * inside it - the same off-window trap the "Keep Jobs (HDD)"
+     * checkbox above hit at LeftEdge=10 (see its own comment). Leaving
+     * room here by starting the box itself at LeftEdge=90 instead. */
+    ng.ng_TopEdge += 22;
+    ng.ng_LeftEdge = 90;
+    ng.ng_Width = 460;
+    ng.ng_GadgetText = (STRPTR)"Retry to:";
+    ng.ng_GadgetID = GAD_SPOOL_UNIT;
+    ng.ng_Flags = PLACETEXT_LEFT;
+    gad = CreateGadget(CYCLE_KIND, gad, &ng,
+        GTCY_Labels, (ULONG)unit_dropdown_labels,
+        GTCY_Active, (ULONG)g_spool_retry_unit,
+        TAG_DONE);
+    if (!gad) goto fail;
 
-        /* Which printer a Retry/Copies resubmission goes to - defaults to
-         * the main window's active Unit, reassignable to any other saved
-         * Unit profile right here without having to close this window,
-         * switch it in the main window, and reopen. Purely a resubmission
-         * target: it does not change which Unit a job's "assigned to"
-         * host:port column shows - that always reflects where the job
-         * actually went (or will go, once retried against this choice). */
-        /* PLACETEXT_LEFT draws the label to the left of ng_LeftEdge, not
-         * inside it - the same off-window trap the "Keep Jobs (HDD)"
-         * checkbox above hit at LeftEdge=10 (see its own comment). Leaving
-         * room here by starting the box itself at LeftEdge=90 instead. */
-        ng.ng_TopEdge += 22;
-        ng.ng_LeftEdge = 90;
-        ng.ng_Width = 460;
-        ng.ng_GadgetText = (STRPTR)"Retry to:";
-        ng.ng_GadgetID = GAD_SPOOL_UNIT;
-        ng.ng_Flags = PLACETEXT_LEFT;
-        gad = CreateGadget(CYCLE_KIND, gad, &ng,
-            GTCY_Labels, (ULONG)unit_dropdown_labels,
-            GTCY_Active, (ULONG)retry_unit,
-            TAG_DONE);
-        if (!gad) { FreeGadgets(sglist); break; }
+    /* Gadgets are attached after OpenWindowTags via AddGList/RefreshGList,
+     * not the WA_Gadgets tag - the same sequence MintAMP's working
+     * listview windows use. WA_Gadgets attaches the list at open time
+     * too in principle, but this is the pattern proven to leave a
+     * GadTools LISTVIEW_KIND actually clickable on real hardware. */
+    g_spool_win = OpenWindowTags(NULL,
+        WA_Title, (ULONG)"Spooler Management",
+        WA_Left, (ULONG)g_spool_win_left,
+        WA_Top, (ULONG)g_spool_win_top,
+        WA_Width, 560,
+        WA_InnerHeight, 220,
+        WA_DragBar, TRUE,
+        WA_DepthGadget, TRUE,
+        WA_Activate, TRUE,
+        WA_CloseGadget, TRUE,
+        WA_SimpleRefresh, TRUE,
+        WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW | BUTTONIDCMP | LISTVIEWIDCMP,
+        WA_PubScreen, (ULONG)g_spool_screen,
+        TAG_DONE);
+    if (!g_spool_win) goto fail;
 
-        /* Gadgets are attached after OpenWindowTags via AddGList/RefreshGList,
-         * not the WA_Gadgets tag - the same sequence MintAMP's working
-         * listview windows use. WA_Gadgets attaches the list at open time
-         * too in principle, but this is the pattern proven to leave a
-         * GadTools LISTVIEW_KIND actually clickable on real hardware. */
-        swin = OpenWindowTags(NULL,
-            WA_Title, (ULONG)"Spooler Management",
-            WA_Left, (ULONG)swin_left,
-            WA_Top, (ULONG)swin_top,
-            WA_Width, 560,
-            WA_InnerHeight, 220,
-            WA_DragBar, TRUE,
-            WA_DepthGadget, TRUE,
-            WA_Activate, TRUE,
-            WA_CloseGadget, TRUE,
-            WA_SimpleRefresh, TRUE,
-            WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW | BUTTONIDCMP | LISTVIEWIDCMP,
-            WA_PubScreen, (ULONG)sscreen,
-            TAG_DONE);
-        if (!swin) { FreeGadgets(sglist); break; }
+    g_spool_sglist = sglist;
+    AddGList(g_spool_win, sglist, (UWORD)-1, -1, NULL);
+    RefreshGList(sglist, g_spool_win, NULL, -1);
+    GT_RefreshWindow(g_spool_win, NULL);
+    return;
 
-        AddGList(swin, sglist, (UWORD)-1, -1, NULL);
-        RefreshGList(sglist, swin, NULL, -1);
-        GT_RefreshWindow(swin, NULL);
+fail:
+    FreeGadgets(sglist);
+    FreeVisualInfo(g_spool_vi); g_spool_vi = NULL;
+    UnlockPubScreen(NULL, g_spool_screen); g_spool_screen = NULL;
+    g_spool_job_listview = NULL;
+    g_spool_delete_gadget = NULL;
+    g_spool_retry_gadget = NULL;
+    g_spool_copies_gadget = NULL;
+}
 
-        while (!terminated) {
-            struct IntuiMessage *imsg;
+/* Drains and dispatches every IntuiMessage currently queued on the
+ * Spooler window's port - called from process_window_events()'s main
+ * loop whenever that window's signal bit comes back from Wait(), the
+ * same way test_print_job's completion port is handled there. swin is
+ * captured up front and used for the whole drain even if a Close request
+ * is seen partway through: every message GadTools hands back must be
+ * GT_ReplyIMsg()'d before mp_spool_win_close() calls CloseWindow(),
+ * including ones still queued from a rapid double-click on Retry/
+ * Copies/Delete that arrived while the first click's (possibly blocking,
+ * network-bound) handler was still running - so this keeps draining and
+ * replying right up to the end, it just stops acting on anything once a
+ * close was requested, which is what stops a queued second Retry click
+ * from firing a second resubmission behind the first one's back. */
+static void mp_spool_win_process(void)
+{
+    struct Window *swin = g_spool_win;
+    struct IntuiMessage *imsg;
+    BOOL want_close = FALSE;
 
-            Wait(1L << swin->UserPort->mp_SigBit);
-            /* Every message GadTools hands back must be GT_ReplyIMsg()'d
-             * before this window closes, including ones still sitting in
-             * the port from a rapid double-click on Retry/Copies/Delete
-             * that arrived while the first click's (possibly blocking,
-             * network-bound) handler was still running below - so this
-             * keeps draining and replying to the port right up to the
-             * point CloseWindow() is called, it just stops *acting* on
-             * anything once terminated is set, which is what stops a
-             * queued second Retry click from firing a second resubmission
-             * behind the first one's back. */
+    if (!swin) return;
+
+    imsg = GT_GetIMsg(swin->UserPort);
+    while (imsg) {
+        struct Gadget *g = (struct Gadget *)imsg->IAddress;
+        ULONG cls = imsg->Class;
+        UWORD code = imsg->Code;
+        GT_ReplyIMsg(imsg);
+
+        if (want_close) {
             imsg = GT_GetIMsg(swin->UserPort);
-            while (imsg) {
-                struct Gadget *g = (struct Gadget *)imsg->IAddress;
-                ULONG cls = imsg->Class;
-                UWORD code = imsg->Code;
-                GT_ReplyIMsg(imsg);
-
-                if (terminated) {
-                    imsg = GT_GetIMsg(swin->UserPort);
-                    continue;
-                }
-
-                if (cls == IDCMP_CLOSEWINDOW) {
-                    terminated = TRUE;
-                } else if (cls == IDCMP_REFRESHWINDOW) {
-                    GT_BeginRefresh(swin);
-                    GT_EndRefresh(swin, TRUE);
-                } else if (cls == IDCMP_GADGETUP) {
-                    if (g->GadgetID == GAD_SPOOL_JOB_LIST) {
-                        if ((ULONG)code < (ULONG)count) {
-                            selected = (ULONG)code;
-                            selection_made = TRUE;
-                            /* GadTools does not persist which row a click
-                             * selected on its own - a later
-                             * IDCMP_REFRESHWINDOW (there are more of
-                             * those than you'd expect: window
-                             * activation, another window uncovering
-                             * this one, ...) repaints the listview from
-                             * its own stored GTLV_Selected, which
-                             * otherwise still says "none", making the
-                             * highlight vanish right after the click.
-                             * Mirroring the selection back here is what
-                             * makes it stick. */
-                            GT_SetGadgetAttrs(job_listview, swin, NULL,
-                                              GTLV_Selected, selected,
-                                              TAG_DONE);
-                        }
-                    } else if (g->GadgetID == GAD_SPOOL_UNIT) {
-                        retry_unit = (int)code;
-                    } else if (g->GadgetID == GAD_SPOOL_CLOSE) {
-                        terminated = TRUE;
-                    } else if (g->GadgetID == GAD_SPOOL_REFRESH) {
-                        /* Swaps the listview's contents in place - the
-                         * window stays open, same as MintAMP's search
-                         * results Refresh - see
-                         * mp_spool_refresh_list_live()'s own comment. */
-                        mp_spool_refresh_list_live(swin, job_listview,
-                            delete_gadget, retry_gadget, copies_gadget,
-                            &job_list, &count, &selected, &selection_made);
-                    } else if (g->GadgetID == GAD_SPOOL_DELETE) {
-                        if (selection_made && selected < (ULONG)count) {
-                            DeleteFile(
-                                (CONST_STRPTR)mp_spool_jobs[selected].job_path);
-                            DeleteFile(
-                                (CONST_STRPTR)mp_spool_jobs[selected].status_path);
-                            mp_spool_refresh_list_live(swin, job_listview,
-                                delete_gadget, retry_gadget, copies_gadget,
-                                &job_list, &count, &selected,
-                                &selection_made);
-                        } else {
-                            SetWindowTitles(swin,
-                                (STRPTR)"Spooler Management - select a job first",
-                                (STRPTR)~0);
-                        }
-                    } else if (g->GadgetID == GAD_SPOOL_RETRY) {
-                        if (selection_made && selected < (ULONG)count) {
-                            /* Blocking (network I/O) - said so up front,
-                             * and the buttons are disabled for the same
-                             * reason a second click mid-retry queued up
-                             * behind this one is drained above without
-                             * triggering a second resubmission. */
-                            SetWindowTitles(swin,
-                                (STRPTR)"Spooler Management - Retrying...",
-                                (STRPTR)~0);
-                            GT_SetGadgetAttrs(retry_gadget, swin, NULL,
-                                              GA_Disabled, TRUE, TAG_DONE);
-                            GT_SetGadgetAttrs(copies_gadget, swin, NULL,
-                                              GA_Disabled, TRUE, TAG_DONE);
-                            mp_spool_retry_job(&mp_spool_jobs[selected],
-                                               retry_unit);
-                            mp_spool_refresh_list_live(swin, job_listview,
-                                delete_gadget, retry_gadget, copies_gadget,
-                                &job_list, &count, &selected,
-                                &selection_made);
-                        } else {
-                            SetWindowTitles(swin,
-                                (STRPTR)"Spooler Management - select a job first",
-                                (STRPTR)~0);
-                        }
-                    } else if (g->GadgetID == GAD_SPOOL_COPIES) {
-                        int copies = 1;
-                        if (selection_made && selected < (ULONG)count &&
-                            run_copies_dialog(swin, &copies)) {
-                            int i;
-                            GT_SetGadgetAttrs(retry_gadget, swin, NULL,
-                                              GA_Disabled, TRUE, TAG_DONE);
-                            GT_SetGadgetAttrs(copies_gadget, swin, NULL,
-                                              GA_Disabled, TRUE, TAG_DONE);
-                            for (i = 0; i < copies; ++i) {
-                                char title[64];
-                                snprintf(title, sizeof(title),
-                                        "Spooler Management - Retrying (%d/%d)...",
-                                        i + 1, copies);
-                                SetWindowTitles(swin, (STRPTR)title,
-                                                (STRPTR)~0);
-                                mp_spool_retry_job(&mp_spool_jobs[selected],
-                                                   retry_unit);
-                            }
-                            mp_spool_refresh_list_live(swin, job_listview,
-                                delete_gadget, retry_gadget, copies_gadget,
-                                &job_list, &count, &selected,
-                                &selection_made);
-                        } else if (!selection_made) {
-                            SetWindowTitles(swin,
-                                (STRPTR)"Spooler Management - select a job first",
-                                (STRPTR)~0);
-                        }
-                    }
-                }
-                imsg = GT_GetIMsg(swin->UserPort);
-            }
+            continue;
         }
 
-        swin_left = swin->LeftEdge;
-        swin_top = swin->TopEdge;
-        CloseWindow(swin);
-        FreeGadgets(sglist);
-    } while (reopen);
+        if (cls == IDCMP_CLOSEWINDOW) {
+            want_close = TRUE;
+        } else if (cls == IDCMP_REFRESHWINDOW) {
+            GT_BeginRefresh(swin);
+            GT_EndRefresh(swin, TRUE);
+        } else if (cls == IDCMP_GADGETUP) {
+            if (g->GadgetID == GAD_SPOOL_JOB_LIST) {
+                if ((ULONG)code < (ULONG)g_spool_count) {
+                    g_spool_selected = (ULONG)code;
+                    g_spool_selection_made = TRUE;
+                    /* GadTools does not persist which row a click
+                     * selected on its own - a later IDCMP_REFRESHWINDOW
+                     * (there are more of those than you'd expect: window
+                     * activation, another window uncovering this one,
+                     * ...) repaints the listview from its own stored
+                     * GTLV_Selected, which otherwise still says "none",
+                     * making the highlight vanish right after the click.
+                     * Mirroring the selection back here is what makes it
+                     * stick. */
+                    GT_SetGadgetAttrs(g_spool_job_listview, swin, NULL,
+                                      GTLV_Selected, g_spool_selected,
+                                      TAG_DONE);
+                }
+            } else if (g->GadgetID == GAD_SPOOL_UNIT) {
+                g_spool_retry_unit = (int)code;
+            } else if (g->GadgetID == GAD_SPOOL_CLOSE) {
+                want_close = TRUE;
+            } else if (g->GadgetID == GAD_SPOOL_REFRESH) {
+                /* Swaps the listview's contents in place - the window
+                 * stays open, same as MintAMP's search results Refresh -
+                 * see mp_spool_refresh_list_live()'s own comment. */
+                mp_spool_refresh_list_live(swin, g_spool_job_listview,
+                    g_spool_delete_gadget, g_spool_retry_gadget,
+                    g_spool_copies_gadget, &g_spool_job_list,
+                    &g_spool_count, &g_spool_selected,
+                    &g_spool_selection_made);
+            } else if (g->GadgetID == GAD_SPOOL_DELETE) {
+                if (g_spool_selection_made &&
+                    g_spool_selected < (ULONG)g_spool_count) {
+                    DeleteFile((CONST_STRPTR)
+                        mp_spool_jobs[g_spool_selected].job_path);
+                    DeleteFile((CONST_STRPTR)
+                        mp_spool_jobs[g_spool_selected].status_path);
+                    mp_spool_refresh_list_live(swin, g_spool_job_listview,
+                        g_spool_delete_gadget, g_spool_retry_gadget,
+                        g_spool_copies_gadget, &g_spool_job_list,
+                        &g_spool_count, &g_spool_selected,
+                        &g_spool_selection_made);
+                } else {
+                    SetWindowTitles(swin,
+                        (STRPTR)"Spooler Management - select a job first",
+                        (STRPTR)~0);
+                }
+            } else if (g->GadgetID == GAD_SPOOL_RETRY) {
+                if (g_spool_selection_made &&
+                    g_spool_selected < (ULONG)g_spool_count) {
+                    /* Blocking (network I/O) - said so up front, and the
+                     * buttons are disabled for the same reason a second
+                     * click mid-retry queued up behind this one is
+                     * drained above without triggering a second
+                     * resubmission. The main window stays responsive
+                     * throughout, since this whole dispatch only runs
+                     * when the Spooler window's own signal bit fires -
+                     * but this call itself still blocks until the
+                     * network round-trip finishes. */
+                    SetWindowTitles(swin,
+                        (STRPTR)"Spooler Management - Retrying...",
+                        (STRPTR)~0);
+                    GT_SetGadgetAttrs(g_spool_retry_gadget, swin, NULL,
+                                      GA_Disabled, TRUE, TAG_DONE);
+                    GT_SetGadgetAttrs(g_spool_copies_gadget, swin, NULL,
+                                      GA_Disabled, TRUE, TAG_DONE);
+                    mp_spool_retry_job(&mp_spool_jobs[g_spool_selected],
+                                       g_spool_retry_unit);
+                    mp_spool_refresh_list_live(swin, g_spool_job_listview,
+                        g_spool_delete_gadget, g_spool_retry_gadget,
+                        g_spool_copies_gadget, &g_spool_job_list,
+                        &g_spool_count, &g_spool_selected,
+                        &g_spool_selection_made);
+                } else {
+                    SetWindowTitles(swin,
+                        (STRPTR)"Spooler Management - select a job first",
+                        (STRPTR)~0);
+                }
+            } else if (g->GadgetID == GAD_SPOOL_COPIES) {
+                int copies = 1;
+                if (g_spool_selection_made &&
+                    g_spool_selected < (ULONG)g_spool_count &&
+                    run_copies_dialog(swin, &copies)) {
+                    int i;
+                    GT_SetGadgetAttrs(g_spool_retry_gadget, swin, NULL,
+                                      GA_Disabled, TRUE, TAG_DONE);
+                    GT_SetGadgetAttrs(g_spool_copies_gadget, swin, NULL,
+                                      GA_Disabled, TRUE, TAG_DONE);
+                    for (i = 0; i < copies; ++i) {
+                        char title[64];
+                        snprintf(title, sizeof(title),
+                                "Spooler Management - Retrying (%d/%d)...",
+                                i + 1, copies);
+                        SetWindowTitles(swin, (STRPTR)title, (STRPTR)~0);
+                        mp_spool_retry_job(
+                            &mp_spool_jobs[g_spool_selected],
+                            g_spool_retry_unit);
+                    }
+                    mp_spool_refresh_list_live(swin, g_spool_job_listview,
+                        g_spool_delete_gadget, g_spool_retry_gadget,
+                        g_spool_copies_gadget, &g_spool_job_list,
+                        &g_spool_count, &g_spool_selected,
+                        &g_spool_selection_made);
+                } else if (!g_spool_selection_made) {
+                    SetWindowTitles(swin,
+                        (STRPTR)"Spooler Management - select a job first",
+                        (STRPTR)~0);
+                }
+            }
+        }
+        imsg = GT_GetIMsg(swin->UserPort);
+    }
 
-    FreeVisualInfo(svi);
-    UnlockPubScreen(NULL, sscreen);
+    if (want_close)
+        mp_spool_win_close();
 }
 
 /* Bounded, GUI-responsive connect(): socket -> IoctlSocket(FIONBIO on) ->
@@ -8672,7 +8760,9 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     }
 
     // Opens the Spooler management window listing tracked jobs - see
-    // run_spooler_window(), mirroring run_discovery_selection()'s pattern.
+    // mp_spool_win_open(). Unlike run_discovery_selection(), it is
+    // non-modal: it returns immediately and process_window_events()'s
+    // main loop drives it from then on, so both windows stay usable.
     ng.ng_LeftEdge = 200;
     ng.ng_TopEdge = 216 + topborder;
     ng.ng_Width = 140;
@@ -8708,11 +8798,22 @@ void process_window_events(struct Window *win) {
 
         if (test_print_job.active && test_print_job.port)
             wait_mask |= 1L << test_print_job.port->mp_SigBit;
+        /* Spooler window folded into the same Wait() as the main window's
+         * own port, not a separate nested event loop - see
+         * mp_spool_win_process()'s own comment for why: that is what
+         * keeps this window and the Spooler window both live for input
+         * at once instead of one blocking the other. */
+        if (g_spool_win)
+            wait_mask |= 1L << g_spool_win->UserPort->mp_SigBit;
 
         received_signals = Wait(wait_mask);
         if (test_print_job.active && test_print_job.port &&
             (received_signals & (1L << test_print_job.port->mp_SigBit))) {
             mp_test_print_complete(win);
+        }
+        if (g_spool_win &&
+            (received_signals & (1L << g_spool_win->UserPort->mp_SigBit))) {
+            mp_spool_win_process();
         }
         if (!(received_signals & window_signal))
             continue;
@@ -8876,7 +8977,7 @@ void process_window_events(struct Window *win) {
                             break;
 
                         case GAD_VIEW_SPOOL:
-                            run_spooler_window(win);
+                            mp_spool_win_open(win);
                             break;
 
                         case GAD_QUALITY_MODE:
@@ -9134,6 +9235,12 @@ void process_window_events(struct Window *win) {
     if (test_print_job.active)
         mp_test_print_cancel(win);
 
+    /* The main window is closing (or the app is quitting) - an orphaned
+     * Spooler window left open would keep its UserPort registered with
+     * Intuition after this Task exits, which is not safe. Close it the
+     * same way its own Close button would. */
+    if (g_spool_win)
+        mp_spool_win_close();
 }
 
 static BOOL mp_open_tcp_stack(void) {
