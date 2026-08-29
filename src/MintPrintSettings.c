@@ -7531,7 +7531,6 @@ void process_window_events(struct Window *win) {
     char ip_only[64];
     int port = -1;
 
-    printf("Event loop: entering while(!terminated)\n");
     while (!terminated) {
         ULONG window_signal = 1L << win->UserPort->mp_SigBit;
         ULONG wait_mask = window_signal;
@@ -7540,10 +7539,7 @@ void process_window_events(struct Window *win) {
         if (test_print_job.active && test_print_job.port)
             wait_mask |= 1L << test_print_job.port->mp_SigBit;
 
-        printf("Event loop: calling Wait()\n");
         received_signals = Wait(wait_mask);
-        printf("Event loop: Wait() returned 0x%08lx\n",
-               (unsigned long)received_signals);
         if (test_print_job.active && test_print_job.port &&
             (received_signals & (1L << test_print_job.port->mp_SigBit))) {
             mp_test_print_complete(win);
@@ -7552,7 +7548,6 @@ void process_window_events(struct Window *win) {
             continue;
 
         imsg = GT_GetIMsg(win->UserPort);
-        printf("Event: GT_GetIMsg returned %s\n", imsg ? "a message" : "NULL");
         while (!terminated && imsg) {
             gad = (struct Gadget *)imsg->IAddress;
             imsgClass = imsg->Class;
@@ -7561,8 +7556,6 @@ void process_window_events(struct Window *win) {
              * classes - deliberately NOT dereferencing gad->GadgetID here
              * for other classes (e.g. IDCMP_REFRESHWINDOW), where it can be
              * something else entirely. */
-            printf("Event: dispatching class=0x%08lx code=%u\n",
-                   (unsigned long)imsgClass, (unsigned)imsgCode);
 
             GT_ReplyIMsg(imsg);
 
@@ -7884,23 +7877,17 @@ void process_window_events(struct Window *win) {
                     break;
 
                 case IDCMP_REFRESHWINDOW:
-                    printf("Refresh: begin\n");
                     GT_BeginRefresh(win);
                     GT_EndRefresh(win, TRUE);
-                    printf("Refresh: GT_BeginRefresh/EndRefresh done\n");
                     /* GT_BeginRefresh/EndRefresh only repaints GadTools
                      * gadgets - the status box is hand-drawn and needs its
                      * own replay here, or it looks emptied out any time
                      * something forces a refresh (e.g. Printer Prefs
                      * opening on top of this window and closing again). */
                     redraw_output_box();
-                    printf("Refresh: output box redrawn\n");
                     mp_draw_marker_strips();
-                    printf("Refresh: marker strips drawn\n");
                     mp_draw_sides_hint();
-                    printf("Refresh: sides hint drawn\n");
                     mp_draw_printer_icon();
-                    printf("Refresh: printer icon drawn\n");
                     break;
 
                     case IDCMP_MENUPICK:
@@ -8154,23 +8141,10 @@ int main(void) {
     }
 
     /* Draw the status box's empty border immediately, rather than leaving
-     * it invisible until the first status line happens to draw it.
-     *
-     * TEMPORARY: the printf() trace calls through this block (each one
-     * routes through custom_printf(), which appends to T:MintPRINT-gui.log
-     * whenever Debug is on - see custom_printf()'s own comment) exist only
-     * to bisect a real AmigaOS 2.0/2.04 startup crash (illegal instruction,
-     * #80000004) that leaves T:MintPRINT-gui.log completely empty, meaning
-     * it happens somewhere in this span - custom_printf("CLEAR") itself
-     * returns before ever reaching the log-write code, and nothing else
-     * here logs anything on its own success path. Remove once the crash is
-     * isolated to one call. */
+     * it invisible until the first status line happens to draw it. */
     custom_printf("CLEAR");
-    printf("Startup: status box cleared\n");
     mp_draw_marker_strips();
-    printf("Startup: marker strips drawn\n");
     mp_draw_sides_hint();
-    printf("Startup: sides hint drawn\n");
 
     // Set the initial state of the print mode radio buttons
     struct Gadget *print_mode_gadget = glist;
@@ -8182,30 +8156,24 @@ int main(void) {
                           GTCY_Active, print_mode,
                           TAG_DONE);
     }
-    printf("Startup: print mode gadget set\n");
 
     menu = CreateMenus(menu_template, TAG_DONE);
-    printf("Startup: CreateMenus done\n");
     if (menu) {
         LayoutMenus(menu, vi,
             GTMN_NewLookMenus, TRUE,           // Enable standard white/grey look
             GTMN_FrontPen, 1,                  // Text pen (usually black)
             GTNM_BackPen, 0,                   // Background pen (usually white)
             TAG_DONE);
-        printf("Startup: LayoutMenus done\n");
         SetMenuStrip(window, menu);
-        printf("Startup: SetMenuStrip done\n");
     } else {
         printf("Failed to create menus\n");
     }
 
     // Refresh window
     GT_RefreshWindow(window, NULL);
-    printf("Startup: window refreshed\n");
 
     // Offer to install DEVS:Printers/MintPRINT if it is missing.
     check_and_offer_driver_install(window);
-    printf("Startup: driver install check done\n");
 
     if (load_capability_cache_for_current_endpoint()) {
         apply_cached_capabilities(window);
@@ -8252,11 +8220,9 @@ int main(void) {
     redraw_output_box();
     mp_draw_marker_strips();
     mp_draw_sides_hint();
-    printf("Startup: final pre-loop redraw done - entering event loop\n");
 
     // Process events
     process_window_events(window);
-    printf("Event loop: process_window_events() returned\n");
 
     // Save print mode before exiting
     save_print_mode();
