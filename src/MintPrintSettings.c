@@ -112,6 +112,15 @@ extern struct ExecBase *SysBase;
 #define GAD_RESOLUTION 18
 #define GAD_SIDES 19
 #define GAD_SPOOLER 20
+#define GAD_SPOOL_KEEP 21
+#define GAD_VIEW_SPOOL 22
+
+/* Spooler management window gadget IDs (separate window/gadget list, like
+ * the discovery selection dialog's GAD_DISC_* above). */
+#define GAD_SPOOL_JOB_CYCLE 1
+#define GAD_SPOOL_REFRESH   2
+#define GAD_SPOOL_DELETE    3
+#define GAD_SPOOL_CLOSE     4
 
 // Discovery selection dialog gadget IDs (separate window/gadget list)
 #define GAD_DISC_CYCLE  1
@@ -147,19 +156,20 @@ static struct MPTestPrintJob test_print_job;
 // switchable GUI-side profiles (e.g. for a second/third network printer).
 #define MAX_UNITS 8
 
-/* A few pixels below the Test Print/Save/Exit row (198+12 tall) for even
- * spacing - see WA_InnerHeight in main() for why raising this also raises
- * that: the box's bottom border sits at OUTPUT_TOP + 81 (MAX_OUTPUT_LINES
- * lines at 10px, see below, plus the 2px border), and WA_InnerHeight is
- * kept equal to that so the box's border sits flush with the window's own
- * bottom edge instead of leaving dead space below it. */
-#define OUTPUT_TOP     232 // Below Test Print / Save / Exit row
+/* A few pixels below the Keep Spooled Jobs/View Spool row (216+12 tall,
+ * itself 18px below Test Print/Save/Exit at 198) for even spacing - see
+ * WA_InnerHeight in main() for why raising this also raises that: the
+ * box's bottom border sits at OUTPUT_TOP + 81 (MAX_OUTPUT_LINES lines at
+ * 10px, see below, plus the 2px border), and WA_InnerHeight is kept equal
+ * to that so the box's border sits flush with the window's own bottom
+ * edge instead of leaving dead space below it. */
+#define OUTPUT_TOP     250 // Below Keep Spooled Jobs / View Spool row
 #define OUTPUT_LEFT    10
 #define OUTPUT_RIGHT   (window->Width - 20)
 
 // Define the USED macro for GCC
 #define USED __attribute__((used))
-#define MINTPRINT_SETTINGS_VERSION "1.2.7"
+#define MINTPRINT_SETTINGS_VERSION "1.2.9"
 #define MINTPRINT_DRIVER_DEST ((CONST_STRPTR)"DEVS:Printers/MintPRINT")
 
 /* MintPrint Settings now ships as a single drawer containing both bundled
@@ -185,7 +195,7 @@ static BOOL mp_read_driver_version(CONST_STRPTR path, struct MPDriverVersion *ou
 
 /* Visible both to AmigaOS's Version command and in the About requester. */
 static const char USED mintprint_version[] =
-    "$VER: MintPrintSettings " MINTPRINT_SETTINGS_VERSION " (27.08.2026)";
+    "$VER: MintPrintSettings " MINTPRINT_SETTINGS_VERSION " (29.08.2026)";
 
 // Simple extension check
 BOOL has_extension(const char *filename, const char *ext) {
@@ -433,6 +443,7 @@ static int mp_dpi_active_index(int dpi) {
 extern char driver_sides_buffer[MAX_ATTR_LEN];
 extern char driver_engine_buffer[32];
 extern char driver_spool_buffer[MAX_ATTR_LEN];
+extern BOOL driver_spool_keep;
 
 static BOOL mp_supported_side(const char *value) {
     int i;
@@ -483,6 +494,15 @@ static ULONG mp_spool_active_index(void) {
             return (ULONG)i;
     }
     return 0;
+}
+
+/* "Keep spooled jobs" only means anything once job files actually spool
+ * to a real drive - RAM keeps MintPRINT's original flat, always-
+ * overwritten behaviour regardless (see driver_core.c's mp_job_begin()),
+ * so the tickbox is disabled and forced off whenever driver_spool_buffer
+ * is empty or "RAM". */
+static BOOL mp_spool_keep_available(void) {
+    return driver_spool_buffer[0] && strcmp(driver_spool_buffer, "RAM") != 0;
 }
 
 /* Populates the Spooler cycle gadget's choices: "RAM" (index 0, always
@@ -692,6 +712,12 @@ char driver_sides_buffer[MAX_ATTR_LEN] = "";
  * with the rest of the Spooler gadget's static storage) for how its
  * choices are populated. */
 char driver_spool_buffer[MAX_ATTR_LEN] = "RAM";
+/* Keeps every hard-drive-spooled job under a unique retained name (see
+ * driver_core.c's mp_job_begin()) for the Spooler management window to
+ * list. Only meaningful - and only enabled in the GUI - when
+ * driver_spool_buffer names a real device; see mp_spool_keep_available()
+ * and its GAD_SPOOL_KEEP gating below. */
+BOOL driver_spool_keep = FALSE;
 int current_unit_index = 0;
 char printer_make_model[128] = "";
 char printer_icon_uri[256] = "";
@@ -1194,6 +1220,9 @@ static BOOL write_driver_config_file(CONST_STRPTR filename) {
     FPuts(file, line);
     snprintf(line, sizeof(line), "SPOOL=%s\n", driver_spool_buffer);
     FPuts(file, line);
+    snprintf(line, sizeof(line), "SPOOL_KEEP=%d\n",
+             mp_spool_keep_available() && driver_spool_keep ? 1 : 0);
+    FPuts(file, line);
     snprintf(line, sizeof(line), "PWG_SHEET_BACK=%s\n", pwg_sheet_back_value);
     FPuts(file, line);
     snprintf(line, sizeof(line), "MODEL=%s\n", printer_make_model);
@@ -1272,6 +1301,7 @@ static BOOL load_driver_config(void) {
     driver_scaling_buffer[0] = '\0';
     driver_sides_buffer[0] = '\0';
     strcpy(driver_spool_buffer, "RAM");
+    driver_spool_keep = FALSE;
     strcpy(pwg_sheet_back_value, "normal");
     printer_make_model[0] = '\0';
 
@@ -1367,6 +1397,8 @@ static BOOL load_driver_config(void) {
                         sizeof(driver_spool_buffer) - 1);
                 driver_spool_buffer[sizeof(driver_spool_buffer) - 1] = '\0';
             }
+        } else if (strncmp(line, "SPOOL_KEEP=", 11) == 0) {
+            driver_spool_keep = (line[11] == '0') ? FALSE : TRUE;
         } else if (strncmp(line, "PWG_SHEET_BACK=", 15) == 0) {
             const char *sheet_back = line + 15;
             if (strcmp(sheet_back, "normal") == 0 ||
@@ -1725,6 +1757,28 @@ static void mp_set_test_print_enabled(struct Window *win, BOOL enabled)
     if (g && win) {
         GT_SetGadgetAttrs(g, win, NULL,
                           GA_Disabled, enabled ? FALSE : TRUE,
+                          TAG_DONE);
+    }
+}
+
+/* Keeps the Keep Spooled Jobs checkbox's enabled/ticked state in step
+ * with the Spooler cycle - called right after driver_spool_buffer
+ * changes (GAD_SPOOLER's handler below) and once at startup
+ * (apply_driver_config_to_gadgets()). Forces driver_spool_keep off the
+ * moment Spooler no longer names a real device, rather than leaving a
+ * stale tick nobody can see or clear on a disabled gadget - see
+ * mp_spool_keep_available(). */
+static void mp_update_spool_keep_gadget(struct Window *win)
+{
+    struct Gadget *g = find_gadget_by_id(GAD_SPOOL_KEEP);
+    BOOL available = mp_spool_keep_available();
+
+    if (!available) driver_spool_keep = FALSE;
+
+    if (g && win) {
+        GT_SetGadgetAttrs(g, win, NULL,
+                          GA_Disabled, (ULONG)(available ? FALSE : TRUE),
+                          GTCB_Checked, (ULONG)(available && driver_spool_keep),
                           TAG_DONE);
     }
 }
@@ -2155,6 +2209,8 @@ static void apply_driver_config_to_gadgets(struct Window *win) {
         GT_SetGadgetAttrs(g, win, NULL,
                           GTCY_Active, mp_spool_active_index(),
                           TAG_DONE);
+
+    mp_update_spool_keep_gadget(win);
 
     mp_update_model_display(win);
 
@@ -5006,6 +5062,258 @@ static BOOL run_discovery_selection(struct Window *parent,
     return picked;
 }
 
+/* Spooler management window: lists jobs the driver is currently tracking
+ * (see driver_core.c's mp_job_begin()/mp_write_job_status() and the
+ * MPSPOOL drawer both write into) with their live STATE, and lets the
+ * user delete a held one. Retry/Reprint/multi-copy - resubmitting a
+ * retained job file over IPP - are not implemented yet; this first cut
+ * is read/manage only. */
+#define MP_SPOOL_LIST_MAX 32
+
+struct MPSpoolJobEntry {
+    char job_path[MAX_ATTR_LEN + 48];
+    char status_path[MAX_ATTR_LEN + 56];
+    char label[96];
+};
+
+/* Kept static (not a stack local) so run_spooler_window()'s Refresh
+ * button - which redoes this scan in place without recursing - never
+ * risks stack growth across repeated presses. Only ever touched from
+ * that one function, single-threaded, one instance of the window open
+ * at a time. */
+static struct MPSpoolJobEntry mp_spool_jobs[MP_SPOOL_LIST_MAX];
+
+/* Scans <driver_spool_buffer>MPSPOOL/ for job files this driver is
+ * tracking. Each *.status sidecar names a job file (the same name minus
+ * ".status") and holds its current STATE=/ERROR= - read here so this
+ * window never needs any live connection to the driver's spool process,
+ * and still shows a job's outcome long after that process (and the print
+ * that created it) is gone. label_ptrs must have room for at least
+ * max_jobs + 1 entries (NULL-terminated, GTCY_Labels style). Returns the
+ * number of jobs found; 0 if the drawer doesn't exist yet, or Spooler
+ * isn't a real device. */
+static int mp_scan_spool_jobs(struct MPSpoolJobEntry *jobs, int max_jobs,
+                              STRPTR *label_ptrs)
+{
+    char dir_path[MAX_ATTR_LEN + 16];
+    BPTR lock;
+    /* A plain stack struct, not AllocDosObject(DOS_FIB, ...): Examine()/
+     * ExNext() have taken a caller-supplied struct FileInfoBlock * since
+     * Kickstart 1.x, and a normal C local already satisfies its longword
+     * alignment - one fewer NDK symbol (DOS_FIB, a V36+ addition) to
+     * depend on. */
+    struct FileInfoBlock fib;
+    int count = 0;
+
+    if (!mp_spool_keep_available()) return 0;
+
+    snprintf(dir_path, sizeof(dir_path), "%sMPSPOOL", driver_spool_buffer);
+    lock = Lock((CONST_STRPTR)dir_path, ACCESS_READ);
+    if (!lock) return 0;
+
+    if (Examine(lock, &fib)) {
+        while (count < max_jobs && ExNext(lock, &fib)) {
+            char *name = (char *)fib.fib_FileName;
+            size_t len = strlen(name);
+
+            /* fib_DirEntryType < 0 -> plain file, not a drawer. */
+            if (fib.fib_DirEntryType < 0 && len > 7 &&
+                strcmp(name + len - 7, ".status") == 0) {
+                char state[16];
+                BPTR sfh;
+
+                snprintf(jobs[count].status_path,
+                         sizeof(jobs[count].status_path),
+                         "%s/%s", dir_path, name);
+                snprintf(jobs[count].job_path, sizeof(jobs[count].job_path),
+                         "%s/%.*s", dir_path, (int)(len - 7), name);
+
+                strcpy(state, "UNKNOWN");
+                sfh = Open((CONST_STRPTR)jobs[count].status_path,
+                          MODE_OLDFILE);
+                if (sfh) {
+                    char line[192];
+                    while (FGets(sfh, line, sizeof(line))) {
+                        trim_config_line(line);
+                        if (strncmp(line, "STATE=", 6) == 0) {
+                            strncpy(state, line + 6, sizeof(state) - 1);
+                            state[sizeof(state) - 1] = '\0';
+                            break;
+                        }
+                    }
+                    Close(sfh);
+                }
+
+                snprintf(jobs[count].label, sizeof(jobs[count].label),
+                         "%.*s - %s", (int)(len - 7), name, state);
+                label_ptrs[count] = jobs[count].label;
+                ++count;
+            }
+        }
+    }
+
+    UnLock(lock);
+    label_ptrs[count] = NULL;
+    return count;
+}
+
+static void run_spooler_window(struct Window *parent)
+{
+    struct Screen *sscreen;
+    APTR svi;
+    STRPTR *labels;
+    UWORD topborder;
+    BOOL reopen;
+
+    (void)parent;
+
+    sscreen = LockPubScreen(NULL);
+    if (!sscreen) return;
+
+    svi = GetVisualInfo(sscreen, TAG_DONE);
+    if (!svi) {
+        UnlockPubScreen(NULL, sscreen);
+        return;
+    }
+
+    labels = AllocVec((MP_SPOOL_LIST_MAX + 1) * sizeof(STRPTR), MEMF_CLEAR);
+    if (!labels) {
+        FreeVisualInfo(svi);
+        UnlockPubScreen(NULL, sscreen);
+        return;
+    }
+
+    topborder = sscreen->WBorTop + (sscreen->Font->ta_YSize + 1);
+
+    do {
+        struct Gadget *sglist = NULL;
+        struct Gadget *gad;
+        struct NewGadget ng;
+        struct Window *swin;
+        BOOL terminated = FALSE;
+        ULONG selected = 0;
+        int count;
+
+        reopen = FALSE;
+        count = mp_scan_spool_jobs(mp_spool_jobs, MP_SPOOL_LIST_MAX, labels);
+        if (count == 0) {
+            labels[0] = (STRPTR)(mp_spool_keep_available()
+                ? "(no tracked jobs)"
+                : "(Spooler is RAM, or Keep Spooled Jobs is off)");
+            labels[1] = NULL;
+        }
+
+        gad = CreateContext(&sglist);
+        if (!gad) break;
+
+        ng.ng_TextAttr = &Topaz80;
+        ng.ng_VisualInfo = svi;
+        ng.ng_Flags = 0;
+        ng.ng_LeftEdge = 10;
+        ng.ng_TopEdge = 10 + topborder;
+        ng.ng_Width = 460;
+        ng.ng_Height = 14;
+        ng.ng_GadgetText = (STRPTR)"Job:";
+        ng.ng_GadgetID = GAD_SPOOL_JOB_CYCLE;
+        gad = CreateGadget(CYCLE_KIND, gad, &ng,
+            GTCY_Labels, (ULONG)labels,
+            GTCY_Active, 0,
+            GA_Disabled, (ULONG)(count > 0 ? FALSE : TRUE),
+            TAG_DONE);
+        if (!gad) { FreeGadgets(sglist); break; }
+
+        ng.ng_TopEdge += 26;
+        ng.ng_LeftEdge = 10;
+        ng.ng_Width = 110;
+        ng.ng_Height = 14;
+        ng.ng_GadgetText = (STRPTR)"_Refresh";
+        ng.ng_GadgetID = GAD_SPOOL_REFRESH;
+        gad = CreateGadget(BUTTON_KIND, gad, &ng, GT_Underscore, '_', TAG_DONE);
+        if (!gad) { FreeGadgets(sglist); break; }
+
+        ng.ng_LeftEdge = 130;
+        ng.ng_GadgetText = (STRPTR)"_Delete";
+        ng.ng_GadgetID = GAD_SPOOL_DELETE;
+        gad = CreateGadget(BUTTON_KIND, gad, &ng, GT_Underscore, '_', TAG_DONE);
+        if (!gad) { FreeGadgets(sglist); break; }
+
+        ng.ng_LeftEdge = 360;
+        ng.ng_GadgetText = (STRPTR)"_Close";
+        ng.ng_GadgetID = GAD_SPOOL_CLOSE;
+        gad = CreateGadget(BUTTON_KIND, gad, &ng, GT_Underscore, '_', TAG_DONE);
+        if (!gad) { FreeGadgets(sglist); break; }
+
+        swin = OpenWindowTags(NULL,
+            WA_Title, (ULONG)"Spooler Management",
+            WA_Gadgets, (ULONG)sglist,
+            WA_Width, 480,
+            WA_InnerHeight, 70,
+            WA_DragBar, TRUE,
+            WA_DepthGadget, TRUE,
+            WA_Activate, TRUE,
+            WA_CloseGadget, TRUE,
+            WA_SimpleRefresh, TRUE,
+            WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW | BUTTONIDCMP | CYCLEIDCMP,
+            WA_PubScreen, (ULONG)sscreen,
+            TAG_DONE);
+        if (!swin) { FreeGadgets(sglist); break; }
+
+        GT_RefreshWindow(swin, NULL);
+
+        while (!terminated) {
+            struct IntuiMessage *imsg;
+
+            Wait(1L << swin->UserPort->mp_SigBit);
+            imsg = GT_GetIMsg(swin->UserPort);
+            while (!terminated && imsg) {
+                struct Gadget *g = (struct Gadget *)imsg->IAddress;
+                ULONG cls = imsg->Class;
+                UWORD code = imsg->Code;
+                GT_ReplyIMsg(imsg);
+
+                if (cls == IDCMP_CLOSEWINDOW) {
+                    terminated = TRUE;
+                } else if (cls == IDCMP_REFRESHWINDOW) {
+                    GT_BeginRefresh(swin);
+                    GT_EndRefresh(swin, TRUE);
+                } else if (cls == IDCMP_GADGETUP) {
+                    if (g->GadgetID == GAD_SPOOL_JOB_CYCLE) {
+                        if ((ULONG)code < (ULONG)count)
+                            selected = (ULONG)code;
+                    } else if (g->GadgetID == GAD_SPOOL_CLOSE) {
+                        terminated = TRUE;
+                    } else if (g->GadgetID == GAD_SPOOL_REFRESH) {
+                        /* Reopens fresh below rather than swapping this
+                         * live CYCLE_KIND gadget's label array in place -
+                         * same OS3.1/classic-GadTools safety discipline
+                         * as the main window (see mp_sides_label_ptrs'
+                         * own comment far above). */
+                        reopen = TRUE;
+                        terminated = TRUE;
+                    } else if (g->GadgetID == GAD_SPOOL_DELETE) {
+                        if (count > 0 && selected < (ULONG)count) {
+                            DeleteFile(
+                                (CONST_STRPTR)mp_spool_jobs[selected].job_path);
+                            DeleteFile(
+                                (CONST_STRPTR)mp_spool_jobs[selected].status_path);
+                        }
+                        reopen = TRUE;
+                        terminated = TRUE;
+                    }
+                }
+                imsg = GT_GetIMsg(swin->UserPort);
+            }
+        }
+
+        CloseWindow(swin);
+        FreeGadgets(sglist);
+    } while (reopen);
+
+    FreeVec(labels);
+    FreeVisualInfo(svi);
+    UnlockPubScreen(NULL, sscreen);
+}
+
 /* Bounded, GUI-responsive connect(): socket -> IoctlSocket(FIONBIO on) ->
  * connect() -> if EINPROGRESS, WaitSelect() on the write+exception sets in
  * short chunks (pumping GUI events between them) until connected, refused,
@@ -7683,6 +7991,41 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
         return NULL;
     }
 
+    // Keep spooled jobs - only meaningful, and only enabled, once Spooler
+    // names a real hard drive (see mp_spool_keep_available()); the
+    // GAD_SPOOLER handler below disables and unticks this live the moment
+    // Spooler is switched back to RAM.
+    ng.ng_LeftEdge = 10;
+    ng.ng_TopEdge = 216 + topborder;
+    ng.ng_Width = 160;
+    ng.ng_Height = 12;
+    ng.ng_GadgetText = (STRPTR)"Keep Spooled Jobs";
+    ng.ng_GadgetID = GAD_SPOOL_KEEP;
+    gad = CreateGadget(CHECKBOX_KIND, gad, &ng,
+        GTCB_Checked, (ULONG)(mp_spool_keep_available() && driver_spool_keep),
+        GA_Disabled, (ULONG)(mp_spool_keep_available() ? FALSE : TRUE),
+        TAG_DONE);
+    if (!gad) {
+        printf("Failed to create keep-spooled-jobs checkbox\n");
+        return NULL;
+    }
+
+    // Opens the Spooler management window listing tracked jobs - see
+    // run_spooler_window(), mirroring run_discovery_selection()'s pattern.
+    ng.ng_LeftEdge = 200;
+    ng.ng_TopEdge = 216 + topborder;
+    ng.ng_Width = 140;
+    ng.ng_Height = 12;
+    ng.ng_GadgetText = (STRPTR)"_View Spool...";
+    ng.ng_GadgetID = GAD_VIEW_SPOOL;
+    gad = CreateGadget(BUTTON_KIND, gad, &ng,
+        GT_Underscore, '_',
+        TAG_DONE);
+    if (!gad) {
+        printf("Failed to create view spool button\n");
+        return NULL;
+    }
+
     return gad;
 }
 
@@ -7862,8 +8205,17 @@ void process_window_events(struct Window *win) {
                                 driver_spool_buffer[
                                     sizeof(driver_spool_buffer) - 1] = '\0';
                             }
+                            mp_update_spool_keep_gadget(win);
                         }
                         break;
+
+                        case GAD_SPOOL_KEEP:
+                            driver_spool_keep = imsgCode ? TRUE : FALSE;
+                            break;
+
+                        case GAD_VIEW_SPOOL:
+                            run_spooler_window(win);
+                            break;
 
                         case GAD_QUALITY_MODE:
                         {
@@ -8293,8 +8645,8 @@ int main(void) {
          * (OUTPUT_TOP + 81 - see the comment on OUTPUT_TOP), leaving no
          * dead space below it - keep this in sync with OUTPUT_TOP if that
          * ever changes again. */
-        WA_InnerHeight, 314,
-        WA_MinHeight, 314,
+        WA_InnerHeight, 332,
+        WA_MinHeight, 332,
         WA_DragBar, TRUE,
         WA_DepthGadget, TRUE,
         WA_Activate, TRUE,
