@@ -20,6 +20,7 @@
 #include <exec/memory.h>
 #include <dos/dos.h>
 #include <dos/dosextens.h>
+#include <dos/datetime.h> /* struct ClockData/Amiga2Date() - job timestamp naming */
 #include <utility/tagitem.h>
 #include <devices/printer.h>
 #include <devices/prtbase.h>
@@ -55,7 +56,7 @@
  * MP_DRIVER_REV (the version half) only bumps for something that
  * warrants a new version number outright, not on every rebuild. */
 #define MP_DRIVER_REV 41
-#define MP_DRIVER_SUBREV 8
+#define MP_DRIVER_SUBREV 9
 
 struct ExecBase *SysBase = NULL;
 struct DosLibrary *DOSBase = NULL;
@@ -104,6 +105,15 @@ static char g_job_file_pdf[MP_SPOOL_PATH_MAX];
 static char g_job_file_ps[MP_SPOOL_PATH_MAX];
 static char g_job_file_urf[MP_SPOOL_PATH_MAX];
 static char g_job_file_back[MP_SPOOL_PATH_MAX];
+
+/* Non-empty only while the current job is a tracked (Spooler HDD +
+ * "Keep spooled jobs") one - the status sidecar mp_write_job_status()
+ * writes to as the job progresses. Empty means "not tracked": no sidecar,
+ * and the job file's original Debug-only retention behaviour applies
+ * unchanged. Reset at the top of every mp_job_begin() (see there) so a
+ * job that turns out untracked never inherits a stale path from the
+ * previous one. */
+static char g_job_status_path[MP_SPOOL_PATH_MAX + 8]; /* + ".status" */
 
 /* Multiple Render(status=0 begin -> rows -> status=4 end) cycles inside one
  * Open()/Close() bracket is legitimate - that's how a real multi-page
@@ -370,6 +380,103 @@ static void mp_build_spool_paths(void)
     mp_build_spool_path(g_job_file_back, sizeof(g_job_file_back), MP_JOB_BASE_BACK);
 }
 
+/* Builds "DDMMYYHHMMSS" (the Spooler management window's job-naming
+ * convention) from the current AmigaDOS clock into out, which must be at
+ * least 13 bytes. A machine with no battery-backed RTC - or one whose
+ * clock was simply never set - boots at (or very near) the Amiga epoch
+ * (1 Jan 1978), so every job built that day gets the same candidate
+ * name; mp_spool_job_open_unique()'s "-1", "-2", ... collision suffix
+ * (spool.c) is what actually disambiguates those, so nothing special is
+ * needed here beyond building whatever the clock currently reads. */
+static void mp_build_job_timestamp(char *out)
+{
+    struct DateStamp ds;
+    struct ClockData cd;
+    ULONG total_seconds;
+    UWORD yy;
+
+    DateStamp(&ds);
+    total_seconds = (ULONG)ds.ds_Days * 86400UL +
+                    (ULONG)ds.ds_Minute * 60UL +
+                    (ULONG)ds.ds_Tick / 50UL;
+    Amiga2Date(total_seconds, &cd);
+
+    yy = (UWORD)(cd.year % 100U);
+
+    out[0]  = (char)('0' + (cd.mday  / 10) % 10);
+    out[1]  = (char)('0' +  cd.mday        % 10);
+    out[2]  = (char)('0' + (cd.month / 10) % 10);
+    out[3]  = (char)('0' +  cd.month       % 10);
+    out[4]  = (char)('0' + (yy       / 10) % 10);
+    out[5]  = (char)('0' +  yy             % 10);
+    out[6]  = (char)('0' + (cd.hour  / 10) % 10);
+    out[7]  = (char)('0' +  cd.hour        % 10);
+    out[8]  = (char)('0' + (cd.min   / 10) % 10);
+    out[9]  = (char)('0' +  cd.min         % 10);
+    out[10] = (char)('0' + (cd.sec   / 10) % 10);
+    out[11] = (char)('0' +  cd.sec         % 10);
+    out[12] = 0;
+}
+
+/* Inserts "-<suffix>" immediately before the last '.' in src (or at src's
+ * own end, if it has none) into dst (bounded by cap). Turns this job's
+ * fixed base filename (e.g. "DH0:MPSPOOL/MintPRINT-job.jpg") into a
+ * per-job candidate (e.g. "...MintPRINT-job-290826172011.jpg") before
+ * handing it to mp_spool_job_open_unique() for collision resolution. */
+static void mp_insert_name_suffix(const char *src, const char *suffix,
+                                  char *dst, ULONG cap)
+{
+    ULONG len = mp_strlen(src);
+    ULONG dot = len;
+    ULONG i, j;
+
+    for (i = len; i > 0; --i) {
+        if (src[i - 1] == '.') { dot = i - 1; break; }
+    }
+
+    i = 0;
+    for (j = 0; j < dot && i + 1 < cap; ++j, ++i) dst[i] = src[j];
+    if (i + 1 < cap) dst[i++] = '-';
+    for (j = 0; suffix[j] && i + 1 < cap; ++j, ++i) dst[i] = suffix[j];
+    for (j = dot; j < len && i + 1 < cap; ++j, ++i) dst[i] = src[j];
+    dst[i] = 0;
+}
+
+/* Appends suffix to the end of a NUL-terminated dst (bounded by cap) -
+ * used to turn a resolved job filename into its ".status" sidecar path. */
+static void mp_append_bounded(char *dst, ULONG cap, const char *suffix)
+{
+    ULONG i = mp_strlen(dst);
+    ULONG j;
+    for (j = 0; suffix[j] && i + 1 < cap; ++j, ++i) dst[i] = suffix[j];
+    dst[i] = 0;
+}
+
+static void mp_copy_bounded(char *dst, ULONG cap, const char *src)
+{
+    ULONG i = 0;
+    while (src[i] && i + 1 < cap) { dst[i] = src[i]; ++i; }
+    dst[i] = 0;
+}
+
+/* The mutable counterpart of mp_job_filename() - a pointer to the same
+ * g_job_file_* buffer that function reads, so mp_job_begin() can rewrite
+ * it in place with a per-job unique name (tracked jobs only - see
+ * there). Every later mp_job_filename() call this job's lifecycle makes
+ * (mp_page_submit_and_track(), DriverClose()'s duplex submit, the
+ * Debug-retention delete) then naturally sees the resolved name instead
+ * of the fixed per-engine one. */
+static char *mp_current_job_file_buf(void)
+{
+    switch (g_engine) {
+        case MP_ENGINE_PWG: return g_job_file_pwg;
+        case MP_ENGINE_PDF: return g_job_file_pdf;
+        case MP_ENGINE_POSTSCRIPT: return g_job_file_ps;
+        case MP_ENGINE_URF: return g_job_file_urf;
+        default:            return g_job_file_jpeg;
+    }
+}
+
 /* Every log call below builds one line into this buffer, then hands it to
  * the spool process (spool.c) with a single mp_spool_log() call - never a
  * direct dos.library call from here. See spool.h for why. */
@@ -417,6 +524,37 @@ static void mp_log_append_long(LONG value)
         v /= 10;
     }
     mp_log_append(&buf[pos]);
+}
+
+/* Overwrites the current job's status sidecar (g_job_status_path) with
+ * STATE=<state> and, if result names a failure, ERROR=<error> <http>
+ * <ipp status> - the same numeric triple mp_log_ipp_result() already
+ * logs, kept numeric here too rather than inventing separate English
+ * text for it. Reuses g_log_line/g_log_pos, the same scratch buffer
+ * every mp_log_*() function above builds into - safe because nothing
+ * else touches it between this function's own mp_log_reset() and its
+ * own mp_spool_status_write() call. A no-op when this job isn't tracked
+ * (RAM spool, or "Keep spooled jobs" off) - see mp_job_begin(). */
+static void mp_write_job_status(const char *state,
+                                const struct MPIPPResult *result)
+{
+    if (!g_job_status_path[0]) return;
+
+    mp_log_reset();
+    mp_log_append("STATE=");
+    mp_log_append(state);
+    mp_log_append("\n");
+    if (result) {
+        mp_log_append("ERROR=");
+        mp_log_append_long(result->error);
+        mp_log_append(" ");
+        mp_log_append_long(result->http_status);
+        mp_log_append(" ");
+        mp_log_append_long((LONG)result->ipp_status);
+        mp_log_append("\n");
+    }
+    mp_spool_status_write((CONST_STRPTR)g_job_status_path, g_log_line,
+                          g_log_pos);
 }
 
 static void mp_log_text(const char *event)
@@ -708,13 +846,45 @@ static BOOL mp_job_begin(ULONG width, ULONG height)
     }
 
     if (!g_job_open) {
-        g_job_open = mp_spool_job_open(mp_job_filename());
+        /* Only a hard drive Spooler location with "Keep spooled jobs" on
+         * gets a unique per-job name and a tracked status sidecar - RAM
+         * (or Keep off) reuses the fixed per-engine name exactly as
+         * before, unconditionally overwritten by mp_job_open()'s
+         * MODE_NEWFILE every time, same as MintPRINT has always done. */
+        BOOL track = g_config.spool_keep && g_config.spool[0] &&
+                    !mp_streq(g_config.spool, "RAM");
+
+        g_job_status_path[0] = 0;
+
+        if (track) {
+            char timestamp[13];
+            char candidate[MP_SPOOL_PATH_MAX];
+            char resolved[MP_SPOOL_PATH_MAX];
+
+            mp_build_job_timestamp(timestamp);
+            mp_insert_name_suffix(mp_job_filename(), timestamp, candidate,
+                                  sizeof(candidate));
+            g_job_open = mp_spool_job_open_unique((CONST_STRPTR)candidate,
+                                                  resolved, sizeof(resolved));
+            if (g_job_open) {
+                mp_copy_bounded(mp_current_job_file_buf(), MP_SPOOL_PATH_MAX,
+                                resolved);
+                mp_copy_bounded(g_job_status_path, sizeof(g_job_status_path),
+                                resolved);
+                mp_append_bounded(g_job_status_path,
+                                  sizeof(g_job_status_path), ".status");
+            }
+        } else {
+            g_job_open = mp_spool_job_open(mp_job_filename());
+        }
+
         if (!g_job_open) {
             mp_log_text("Job open failed for output file");
             mp_job_cleanup();
             return FALSE;
         }
         g_job_file_bytes = 0;
+        mp_write_job_status("RENDERING", NULL);
     }
 
     switch (g_engine) {
@@ -1287,7 +1457,10 @@ static LONG mp_page_submit_and_track(ULONG rows_for_streak)
                  (LONG)g_duplex_page_count, (LONG)rows_for_streak,
                  (LONG)g_job_file_bytes);
     } else {
+        mp_write_job_status("SUBMITTING", NULL);
         ipp_rc = mp_spool_ipp_submit(&g_config, fname, fmt, &result);
+        mp_write_job_status(ipp_rc == 0 ? "DONE" : "FAILED",
+                            ipp_rc == 0 ? NULL : &result);
     }
     mp_log_ipp_result("IPP result error/http/status", &result);
 
@@ -1304,7 +1477,11 @@ static LONG mp_page_submit_and_track(ULONG rows_for_streak)
             g_tiny_page_streak = 0;
         }
     }
-    if (!g_config.debug && !mp_duplex_requested())
+    /* A tracked (spool_keep) job's file is never auto-deleted, success or
+     * failure alike - that retention is the entire point of the Spooler
+     * management window. Untracked jobs keep the original Debug-only
+     * retention behaviour. */
+    if (!g_config.debug && !mp_duplex_requested() && !g_job_status_path[0])
         mp_spool_job_delete(fname);
     return ipp_rc;
 }
@@ -1652,15 +1829,20 @@ VOID PRT_STDARGS DriverClose(struct IORequest *ior)
             g_job_open = FALSE;
         }
         if (!g_duplex_job_failed) {
+            mp_write_job_status("SUBMITTING", NULL);
             ipp_rc = mp_spool_ipp_submit(&g_config, mp_job_filename(),
                                           mp_document_format(), &result);
             mp_log_ipp_result("IPP duplex Print-Job error/http/status",
                               &result);
             if (ipp_rc != 0) g_duplex_job_failed = TRUE;
+            mp_write_job_status(ipp_rc == 0 ? "DONE" : "FAILED",
+                                ipp_rc == 0 ? NULL : &result);
         } else {
             mp_log_text("Duplex job discarded after page failure");
+            mp_write_job_status("FAILED", NULL);
         }
-        if (!g_config.debug) mp_spool_job_delete(mp_job_filename());
+        if (!g_config.debug && !g_job_status_path[0])
+            mp_spool_job_delete(mp_job_filename());
     }
     mp_job_cleanup();
     mp_log_text("Close");

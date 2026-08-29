@@ -39,6 +39,14 @@ struct MPConfig {
      * "DH0:" for memory-tight systems where even T:'s usual RAM: backing
      * is scarce. See SPOOL= below and driver_core.c's mp_build_spool_paths(). */
     char spool[MP_CONFIG_OPTION_MAX];
+    /* Keep every hard-drive-spooled job under a unique timestamped name
+     * (rather than the fixed one job file reused/overwritten by every
+     * page) for the Spooler management window to list, inspect, retry or
+     * reprint later. Only meaningful when spool[] names a real device -
+     * RAM keeps its original single-fixed-name behaviour regardless of
+     * this flag (see driver_core.c's mp_job_begin()). See SPOOL_KEEP=
+     * below. */
+    BOOL spool_keep;
     /* IPP media-*-margin values, in hundredths of a millimetre. */
     ULONG margin_left_100mm;
     ULONG margin_right_100mm;
