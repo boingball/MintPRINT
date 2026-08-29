@@ -7995,12 +7995,20 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // names a real hard drive (see mp_spool_keep_available()); the
     // GAD_SPOOLER handler below disables and unticks this live the moment
     // Spooler is switched back to RAM.
+    //
+    // PLACETEXT_RIGHT is required here: CHECKBOX_KIND's own default
+    // placement is PLACETEXT_LEFT (label to the LEFT of the box, unlike
+    // BUTTON_KIND/CYCLE_KIND above), which at this gadget's LeftEdge=10
+    // - flush against the window's own left edge - draws the label
+    // entirely off-window, leaving what looks like an unlabelled
+    // checkbox.
     ng.ng_LeftEdge = 10;
     ng.ng_TopEdge = 216 + topborder;
     ng.ng_Width = 160;
     ng.ng_Height = 12;
-    ng.ng_GadgetText = (STRPTR)"Keep Spooled Jobs";
+    ng.ng_GadgetText = (STRPTR)"Keep Jobs (HDD)";
     ng.ng_GadgetID = GAD_SPOOL_KEEP;
+    ng.ng_Flags = PLACETEXT_RIGHT;
     gad = CreateGadget(CHECKBOX_KIND, gad, &ng,
         GTCB_Checked, (ULONG)(mp_spool_keep_available() && driver_spool_keep),
         GA_Disabled, (ULONG)(mp_spool_keep_available() ? FALSE : TRUE),
@@ -8016,6 +8024,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     ng.ng_TopEdge = 216 + topborder;
     ng.ng_Width = 140;
     ng.ng_Height = 12;
+    ng.ng_Flags = 0;
     ng.ng_GadgetText = (STRPTR)"_View Spool...";
     ng.ng_GadgetID = GAD_VIEW_SPOOL;
     gad = CreateGadget(BUTTON_KIND, gad, &ng,
