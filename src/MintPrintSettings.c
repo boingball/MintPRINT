@@ -8690,7 +8690,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // prettified labels ("A4 (Bypass Tray)") need far less room than the
     // raw IPP keywords ("iso_a4_210x297mm (by-pass-tray)") did.
     ng.ng_LeftEdge = 135;
-    ng.ng_TopEdge = 117 + topborder;
+    ng.ng_TopEdge = 108 + topborder;
     ng.ng_Width = 180;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"Media (Tray):";
@@ -8709,7 +8709,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
     // Scaling dropdown
     ng.ng_LeftEdge = 135;
-    ng.ng_TopEdge = 135 + topborder;
+    ng.ng_TopEdge = 126 + topborder;
     ng.ng_Width = 150;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"Scaling:";
@@ -8722,7 +8722,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
     // Quality dropdown
     ng.ng_LeftEdge = 135;
-    ng.ng_TopEdge = 153 + topborder;
+    ng.ng_TopEdge = 144 + topborder;
     ng.ng_Width = 150;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"Quality:";
@@ -8738,7 +8738,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     ng.ng_LeftEdge = 348;
     ng.ng_Width = 100;
     ng.ng_Height = 12;
-    ng.ng_TopEdge = 171 + topborder;
+    ng.ng_TopEdge = 162 + topborder;
     ng.ng_GadgetText = (STRPTR)"DPI:";
     ng.ng_GadgetID = GAD_RESOLUTION;
     gad = CreateGadget(CYCLE_KIND, gad, &ng,
@@ -8753,7 +8753,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
     // Print Mode radio buttons
     ng.ng_LeftEdge = 135;
-    ng.ng_TopEdge = 171 + topborder;
+    ng.ng_TopEdge = 162 + topborder;
     ng.ng_Width = 150;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"Print Mode:";
@@ -8774,7 +8774,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     ng.ng_LeftEdge = 350;
     ng.ng_Width = 150;
     ng.ng_Height = 12;
-    ng.ng_TopEdge = 153 + topborder;
+    ng.ng_TopEdge = 144 + topborder;
     ng.ng_GadgetText = (STRPTR)"Sides:";
     ng.ng_GadgetID = GAD_SIDES;
     gad = CreateGadget(CYCLE_KIND, gad, &ng,
@@ -8789,7 +8789,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
     // Test Print button
     ng.ng_LeftEdge = 10;
-    ng.ng_TopEdge = 198 + topborder;
+    ng.ng_TopEdge = 189 + topborder;
     ng.ng_Width = 110;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"_Test Print";
@@ -8808,7 +8808,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // so it needs no separate GadgetText prefix, unlike the stacked
     // Printer Engine/Spooler cycles above.
     ng.ng_LeftEdge = 160;
-    ng.ng_TopEdge = 198 + topborder;
+    ng.ng_TopEdge = 189 + topborder;
     ng.ng_Width = 110;
     ng.ng_Height = 12;
     ng.ng_GadgetText = NULL;
@@ -8825,7 +8825,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // Save button - same action as File -> Save Driver Settings.
     ng.ng_LeftEdge = 304;
     ng.ng_Width = 90;
-    ng.ng_TopEdge = 198 + topborder;
+    ng.ng_TopEdge = 189 + topborder;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"_Save";
     ng.ng_GadgetID = GAD_SAVE_BUTTON;
@@ -8840,7 +8840,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // Exit button
     ng.ng_LeftEdge = 408;
     ng.ng_Width = 90;
-    ng.ng_TopEdge = 198 + topborder;
+    ng.ng_TopEdge = 189 + topborder;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"_Exit";
     ng.ng_GadgetID = GAD_EXIT_BUTTON;
@@ -8864,7 +8864,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // entirely off-window, leaving what looks like an unlabelled
     // checkbox.
     ng.ng_LeftEdge = 10;
-    ng.ng_TopEdge = 180 + topborder;
+    ng.ng_TopEdge = 171 + topborder;
     ng.ng_Width = 160;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"Keep Jobs (HDD)";
@@ -8883,9 +8883,9 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // mp_spool_win_open(). Unlike run_discovery_selection(), it is
     // non-modal: it returns immediately and process_window_events()'s
     // main loop drives it from then on, so both windows stay usable.
-    ng.ng_LeftEdge = 200;
-    ng.ng_TopEdge = 180 + topborder;
-    ng.ng_Width = 140;
+    ng.ng_LeftEdge = 220;
+    ng.ng_TopEdge = 171 + topborder;
+    ng.ng_Width = 120;
     ng.ng_Height = 12;
     ng.ng_Flags = 0;
     ng.ng_GadgetText = (STRPTR)"_View Spooler";
