@@ -3932,6 +3932,110 @@ static UBYTE mp_low_colour_gray_pen(const ULONG *palette, int pen_count,
     return best;
 }
 
+/* mp_low_colour_gray_pen() above always picks one flat pen - the single
+ * closest match. On a 16-colour Workbench theme that has no pen truly
+ * close to a given source luminance (a "loud" colour scheme, not
+ * predominantly neutral tones), that one flat pen can still look
+ * noticeably off, and OS2.0/2.1 predates graphics.library V39's
+ * ObtainBestPenA(), so there is no way to allocate a custom pen with the
+ * exact grey this driver wants - only whichever pens the running
+ * Workbench screen already has. Ordered dithering between the two
+ * existing pens whose luminance brackets the source pixel - alternating
+ * them in a fixed screen-position pattern - reads as a smoother, better-
+ * matched intermediate tone at normal viewing distance than either pen
+ * alone, the classic Amiga technique for photographic content on a
+ * constrained palette. */
+#define MP_NEUTRAL_RAMP_MAX 32
+/* Looser than MP_NEUTRAL_SAT_THRESHOLD (which gates a single best-match
+ * pick) - a dither ramp needs several usable rungs, not just the one
+ * closest pen, so this admits mildly-tinted pens too rather than only
+ * true greys. */
+#define MP_NEUTRAL_RAMP_SAT_THRESHOLD 48
+
+/* Scans the palette once (pen_count is at most 256 - cheap, done once per
+ * redraw, not per pixel) for its own near-neutral pens and returns them
+ * insertion-sorted by luminance into ramp_pens/ramp_luma, ready for
+ * mp_dither_neutral_pen(). Returns the count found (0 if this palette
+ * has no near-neutral pen at all - some Workbench colour themes
+ * genuinely don't; callers fall back to mp_low_colour_gray_pen() there). */
+static int mp_build_neutral_pen_ramp(const ULONG *palette, int pen_count,
+                                     UBYTE *ramp_pens, UBYTE *ramp_luma) {
+    int count = 0;
+    int i;
+
+    for (i = 0; i < pen_count && count < MP_NEUTRAL_RAMP_MAX; ++i) {
+        LONG pr = (LONG)((palette[i * 3 + 0] >> 24) & 0xffUL);
+        LONG pg = (LONG)((palette[i * 3 + 1] >> 24) & 0xffUL);
+        LONG pb = (LONG)((palette[i * 3 + 2] >> 24) & 0xffUL);
+        LONG p_max = (pr > pg) ? pr : pg;
+        LONG p_min = (pr < pg) ? pr : pg;
+        UBYTE luma;
+        int j;
+
+        if (pb > p_max) p_max = pb;
+        if (pb < p_min) p_min = pb;
+        if (p_max - p_min > MP_NEUTRAL_RAMP_SAT_THRESHOLD)
+            continue;
+
+        luma = (UBYTE)((299UL * (ULONG)pr + 587UL * (ULONG)pg +
+                        114UL * (ULONG)pb) / 1000UL);
+
+        j = count;
+        while (j > 0 && ramp_luma[j - 1] > luma) {
+            ramp_luma[j] = ramp_luma[j - 1];
+            ramp_pens[j] = ramp_pens[j - 1];
+            --j;
+        }
+        ramp_luma[j] = luma;
+        ramp_pens[j] = (UBYTE)i;
+        ++count;
+    }
+    return count;
+}
+
+/* Classic 4x4 Bayer ordered-dither matrix (values 0-15). */
+static const UBYTE mp_bayer4x4[4][4] = {
+    {  0,  8,  2, 10 },
+    { 12,  4, 14,  6 },
+    {  3, 11,  1,  9 },
+    { 15,  7, 13,  5 }
+};
+
+/* Picks a pen for (r,g,b) from a ramp built by mp_build_neutral_pen_ramp()
+ * (ramp_pens/ramp_luma, ramp_count entries, ascending luminance),
+ * dithering between the two ramp entries bracketing this pixel's own
+ * luminance using screen position (x,y) - not image-local coordinates,
+ * so the pattern stays consistent if two dithered patches ever sit
+ * side by side - rather than snapping to whichever single one is
+ * closest. Falls back to the nearest single ramp entry when the source
+ * luminance is at or past either end of the ramp, where there is nothing
+ * to dither between anyway. */
+static UBYTE mp_dither_neutral_pen(const UBYTE *ramp_pens,
+                                   const UBYTE *ramp_luma, int ramp_count,
+                                   UBYTE r, UBYTE g, UBYTE b, int x, int y) {
+    ULONG luma = (299UL * r + 587UL * g + 114UL * b) / 1000UL;
+    int lo, hi;
+    UBYTE lo_luma, hi_luma, threshold;
+    UWORD frac;
+
+    if (luma <= ramp_luma[0]) return ramp_pens[0];
+    if (luma >= ramp_luma[ramp_count - 1]) return ramp_pens[ramp_count - 1];
+
+    for (hi = 1; hi < ramp_count; ++hi) {
+        if (ramp_luma[hi] >= luma) break;
+    }
+    lo = hi - 1;
+
+    lo_luma = ramp_luma[lo];
+    hi_luma = ramp_luma[hi];
+    if (hi_luma == lo_luma) return ramp_pens[lo];
+
+    threshold = mp_bayer4x4[y & 3][x & 3];
+    frac = (UWORD)(((ULONG)(luma - lo_luma) * 15UL) /
+                   (ULONG)(hi_luma - lo_luma));
+    return (frac > threshold) ? ramp_pens[hi] : ramp_pens[lo];
+}
+
 static void mp_draw_sides_hint(void) {
     struct MPSidesHintImage *image;
     ULONG screen_palette[3 * 256];
@@ -3939,6 +4043,9 @@ static void mp_draw_sides_hint(void) {
     struct RastPort *rp;
     int index;
     int screen_pen_count;
+    UBYTE ramp_pens[MP_NEUTRAL_RAMP_MAX];
+    UBYTE ramp_luma[MP_NEUTRAL_RAMP_MAX];
+    int ramp_count;
     int draw_w, draw_h;
     int x, y;
     int left = MP_SIDES_HINT_LEFT;
@@ -3954,6 +4061,8 @@ static void mp_draw_sides_hint(void) {
 
     screen_pen_count = mp_screen_pen_count(screen, cm);
     mp_fill_screen_palette32(cm, screen_pen_count, screen_palette);
+    ramp_count = mp_build_neutral_pen_ramp(screen_palette, screen_pen_count,
+                                           ramp_pens, ramp_luma);
     SetDrMd(rp, JAM1);
     SetAPen(rp, 0);
     RectFill(rp, left - 1, top - 1,
@@ -4000,13 +4109,20 @@ static void mp_draw_sides_hint(void) {
              * for whether it actually offers a smooth grey ramp (see
              * mp_screen_pen_count()'s comment on why Count itself can be
              * unreliable) - so this only asks whether THIS pixel looks
-             * like it was meant to be grey, and if so, prefers a screen
-             * pen that is too, on any screen. A source pixel that is
+             * like it was meant to be grey, and if so, prefers screen
+             * pens that are too, on any screen. A source pixel that is
              * already a real colour still gets the plain nearest-colour
-             * match above unchanged. */
-            if ((int)smax - (int)smin <= MP_NEUTRAL_SAT_THRESHOLD)
-                pen = mp_low_colour_gray_pen(screen_palette, screen_pen_count,
+             * match above unchanged. Dithers between the ramp's two
+             * bracketing pens when there are enough of them to dither
+             * with; a palette with 0 or 1 near-neutral pens falls back
+             * to mp_low_colour_gray_pen()'s single best pick. */
+            if ((int)smax - (int)smin <= MP_NEUTRAL_SAT_THRESHOLD) {
+                pen = (ramp_count >= 2)
+                    ? mp_dither_neutral_pen(ramp_pens, ramp_luma, ramp_count,
+                                            sr, sg, sb, left + x, top + y)
+                    : mp_low_colour_gray_pen(screen_palette, screen_pen_count,
                                              sr, sg, sb);
+            }
 
             if ((LONG)pen != last_pen) {
                 SetAPen(rp, pen);
@@ -6874,6 +6990,9 @@ static void mp_draw_printer_icon(void) {
     struct ColorMap *cm;
     struct RastPort *rp;
     int screen_pen_count;
+    UBYTE ramp_pens[MP_NEUTRAL_RAMP_MAX];
+    UBYTE ramp_luma[MP_NEUTRAL_RAMP_MAX];
+    int ramp_count;
     int left = MP_PRINTER_ICON_LEFT;
     int top = g_topborder + MP_PRINTER_ICON_TOP;
     int i;
@@ -6890,6 +7009,8 @@ static void mp_draw_printer_icon(void) {
 
     screen_pen_count = mp_screen_pen_count(screen, cm);
     mp_fill_screen_palette32(cm, screen_pen_count, screen_palette);
+    ramp_count = mp_build_neutral_pen_ramp(screen_palette, screen_pen_count,
+                                           ramp_pens, ramp_luma);
     SetDrMd(rp, JAM1);
     SetAPen(rp, 0);
     RectFill(rp, left - 1, top - 1,
@@ -6953,10 +7074,15 @@ static void mp_draw_printer_icon(void) {
          * unreliable) - so this only asks whether the actual on-screen
          * colour this pixel composites to (background-blended, same as
          * the cached base pen above - not the raw un-composited RGBA)
-         * looks like it was meant to be grey, and if so, prefers a
-         * screen pen that is too, on any screen depth. A pixel that
+         * looks like it was meant to be grey, and if so, prefers screen
+         * pens that are too, on any screen depth. A pixel that
          * composites to a real colour still gets the plain nearest-colour
-         * cached pen unchanged. */
+         * cached pen unchanged. Dithers between the ramp's two bracketing
+         * pens when there are enough of them to dither with; a palette
+         * with 0 or 1 near-neutral pens falls back to
+         * mp_low_colour_gray_pen()'s single best pick. */
+        x = i % MP_PRINTER_ICON_SIZE;
+        y = i / MP_PRINTER_ICON_SIZE;
         p = mp_printer_icon_rgba + i * 4;
         a = p[3];
         r = (UBYTE)(((ULONG)p[0] * a + (ULONG)bg_r * (255UL - a) + 127UL) / 255UL);
@@ -6966,16 +7092,18 @@ static void mp_draw_printer_icon(void) {
         smin = (r < g) ? r : g;
         if (b > smax) smax = b;
         if (b < smin) smin = b;
-        if ((int)smax - (int)smin <= MP_NEUTRAL_SAT_THRESHOLD)
-            pen = mp_low_colour_gray_pen(screen_palette, screen_pen_count,
+        if ((int)smax - (int)smin <= MP_NEUTRAL_SAT_THRESHOLD) {
+            pen = (ramp_count >= 2)
+                ? mp_dither_neutral_pen(ramp_pens, ramp_luma, ramp_count,
+                                        r, g, b, left + x, top + y)
+                : mp_low_colour_gray_pen(screen_palette, screen_pen_count,
                                          r, g, b);
+        }
 
         if ((LONG)pen != last_pen) {
             SetAPen(rp, pen);
             last_pen = (LONG)pen;
         }
-        x = i % MP_PRINTER_ICON_SIZE;
-        y = i / MP_PRINTER_ICON_SIZE;
         WritePixel(rp, left + x, top + y);
     }
 }
