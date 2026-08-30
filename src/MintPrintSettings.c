@@ -3886,7 +3886,6 @@ static UBYTE mp_low_colour_gray_pen(const ULONG *palette, int pen_count,
         level_delta = (LONG)palette_luminance - (LONG)luminance;
         if (level_delta < 0)
             level_delta = -level_delta;
-
         /* Chroma is weighted heavily so neutral pens win over similarly
          * bright saturated pens in the old 16-colour Workbench palette. */
         score = (ULONG)level_delta + (ULONG)(maximum - minimum) * 8UL;
@@ -3905,6 +3904,7 @@ static void mp_draw_sides_hint(void) {
     struct RastPort *rp;
     int index;
     int screen_pen_count;
+    int low_colour_mode;
     int draw_w, draw_h;
     int x, y;
     int left = MP_SIDES_HINT_LEFT;
@@ -3922,6 +3922,9 @@ static void mp_draw_sides_hint(void) {
     if (screen_pen_count > 256)
         screen_pen_count = 256;
     mp_fill_screen_palette32(cm, screen_pen_count, screen_palette);
+    low_colour_mode = screen_pen_count <= 16;
+    if (screen->RastPort.BitMap && screen->RastPort.BitMap->Depth <= 4)
+        low_colour_mode = TRUE;
     SetDrMd(rp, JAM1);
     SetAPen(rp, 0);
     RectFill(rp, left - 1, top - 1,
@@ -3955,7 +3958,7 @@ static void mp_draw_sides_hint(void) {
             int pixel = y * image->width + x;
             UBYTE pen = image->pens[pixel];
 
-            if (screen_pen_count <= 16)
+            if (low_colour_mode)
                 pen = mp_low_colour_gray_pen(screen_palette, screen_pen_count,
                                              image->rgb[pixel * 3 + 0],
                                              image->rgb[pixel * 3 + 1],
@@ -6827,6 +6830,7 @@ static void mp_draw_printer_icon(void) {
     struct ColorMap *cm;
     struct RastPort *rp;
     int screen_pen_count;
+    int low_colour_mode;
     int left = MP_PRINTER_ICON_LEFT;
     int top = g_topborder + MP_PRINTER_ICON_TOP;
     int i;
@@ -6844,6 +6848,9 @@ static void mp_draw_printer_icon(void) {
     if (screen_pen_count > 256)
         screen_pen_count = 256;
     mp_fill_screen_palette32(cm, screen_pen_count, screen_palette);
+    low_colour_mode = screen_pen_count <= 16;
+    if (screen->RastPort.BitMap && screen->RastPort.BitMap->Depth <= 4)
+        low_colour_mode = TRUE;
     SetDrMd(rp, JAM1);
     SetAPen(rp, 0);
     RectFill(rp, left - 1, top - 1,
@@ -6891,7 +6898,7 @@ static void mp_draw_printer_icon(void) {
         if (!mp_printer_icon_mask[i])
             continue;
         pen = mp_printer_icon_pens[i];
-        if (screen_pen_count <= 16) {
+        if (low_colour_mode) {
             const UBYTE *rgba = mp_printer_icon_rgba + i * 4;
             pen = mp_low_colour_gray_pen(screen_palette, screen_pen_count,
                                          rgba[0], rgba[1], rgba[2]);
