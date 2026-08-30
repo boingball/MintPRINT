@@ -8789,7 +8789,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
     // Test Print button
     ng.ng_LeftEdge = 10;
-    ng.ng_TopEdge = 189 + topborder;
+    ng.ng_TopEdge = 198 + topborder;
     ng.ng_Width = 110;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"_Test Print";
@@ -8808,7 +8808,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // so it needs no separate GadgetText prefix, unlike the stacked
     // Printer Engine/Spooler cycles above.
     ng.ng_LeftEdge = 160;
-    ng.ng_TopEdge = 189 + topborder;
+    ng.ng_TopEdge = 198 + topborder;
     ng.ng_Width = 110;
     ng.ng_Height = 12;
     ng.ng_GadgetText = NULL;
@@ -8825,7 +8825,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // Save button - same action as File -> Save Driver Settings.
     ng.ng_LeftEdge = 304;
     ng.ng_Width = 90;
-    ng.ng_TopEdge = 189 + topborder;
+    ng.ng_TopEdge = 198 + topborder;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"_Save";
     ng.ng_GadgetID = GAD_SAVE_BUTTON;
@@ -8840,7 +8840,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // Exit button
     ng.ng_LeftEdge = 408;
     ng.ng_Width = 90;
-    ng.ng_TopEdge = 189 + topborder;
+    ng.ng_TopEdge = 198 + topborder;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"_Exit";
     ng.ng_GadgetID = GAD_EXIT_BUTTON;
@@ -8864,7 +8864,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // entirely off-window, leaving what looks like an unlabelled
     // checkbox.
     ng.ng_LeftEdge = 10;
-    ng.ng_TopEdge = 171 + topborder;
+    ng.ng_TopEdge = 180 + topborder;
     ng.ng_Width = 160;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"Keep Jobs (HDD)";
@@ -8884,7 +8884,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // non-modal: it returns immediately and process_window_events()'s
     // main loop drives it from then on, so both windows stay usable.
     ng.ng_LeftEdge = 220;
-    ng.ng_TopEdge = 171 + topborder;
+    ng.ng_TopEdge = 180 + topborder;
     ng.ng_Width = 120;
     ng.ng_Height = 12;
     ng.ng_Flags = 0;
