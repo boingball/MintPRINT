@@ -8730,7 +8730,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
     // Capture DPI - shares the Quality row and is populated by Query from
     // printer-resolution-supported/PWG raster resolution capabilities.
-    ng.ng_LeftEdge = 348;
+    ng.ng_LeftEdge = 350;
     ng.ng_Width = 100;
     ng.ng_Height = 12;
     ng.ng_TopEdge = 180 + topborder;
@@ -8880,7 +8880,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // main loop drives it from then on, so both windows stay usable.
     ng.ng_LeftEdge = 175;
     ng.ng_TopEdge = 180 + topborder;
-    ng.ng_Width = 135;
+    ng.ng_Width = 130;
     ng.ng_Height = 12;
     ng.ng_Flags = 0;
     ng.ng_GadgetText = (STRPTR)"_View Spooler";
