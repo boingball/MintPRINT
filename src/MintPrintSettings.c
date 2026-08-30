@@ -8878,9 +8878,9 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // mp_spool_win_open(). Unlike run_discovery_selection(), it is
     // non-modal: it returns immediately and process_window_events()'s
     // main loop drives it from then on, so both windows stay usable.
-    ng.ng_LeftEdge = 200;
+    ng.ng_LeftEdge = 175;
     ng.ng_TopEdge = 180 + topborder;
-    ng.ng_Width = 140;
+    ng.ng_Width = 135;
     ng.ng_Height = 12;
     ng.ng_Flags = 0;
     ng.ng_GadgetText = (STRPTR)"_View Spooler";
