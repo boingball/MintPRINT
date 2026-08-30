@@ -3881,6 +3881,17 @@ static int mp_screen_pen_count(struct Screen *scr, struct ColorMap *cm) {
     return count;
 }
 
+/* Ordered neutral dithering is only useful on palette/indexed screens.
+ * On RTG true-colour/high-depth screens the source PNG/IFF can already be
+ * represented smoothly; applying the 4x4 Bayer pattern there visibly adds
+ * texture that was not present in the printer artwork. BitMap->Depth is the
+ * same old, reliable depth signal used by mp_screen_pen_count() above, so
+ * keep the classic fallback through 8-bit (<=256-colour) screens and leave
+ * higher-depth screens on the normal nearest-colour path. */
+static BOOL mp_should_dither_neutral(struct Screen *scr) {
+    return scr && scr->RastPort.BitMap && scr->RastPort.BitMap->Depth <= 8;
+}
+
 /* A pixel counts as "near-neutral" (grey-ish rather than a real hue) when
  * its RGB channels are all within this many levels (0-255 scale) of each
  * other - loose enough for a slightly warm/cool grey, tight enough to
@@ -4116,7 +4127,8 @@ static void mp_draw_sides_hint(void) {
              * bracketing pens when there are enough of them to dither
              * with; a palette with 0 or 1 near-neutral pens falls back
              * to mp_low_colour_gray_pen()'s single best pick. */
-            if ((int)smax - (int)smin <= MP_NEUTRAL_SAT_THRESHOLD) {
+            if (mp_should_dither_neutral(screen) &&
+                (int)smax - (int)smin <= MP_NEUTRAL_SAT_THRESHOLD) {
                 pen = (ramp_count >= 2)
                     ? mp_dither_neutral_pen(ramp_pens, ramp_luma, ramp_count,
                                             sr, sg, sb, left + x, top + y)
@@ -4474,12 +4486,37 @@ static BOOL mp_copy_file(CONST_STRPTR src, CONST_STRPTR dst) {
  * *before* building the command line - while still running as this
  * process, where the assign is valid - sidesteps that entirely. */
 static void mp_launch_help_guide(void) {
-    BPTR in = Open((CONST_STRPTR)"NIL:", MODE_OLDFILE);
-    BPTR out = Open((CONST_STRPTR)"NIL:", MODE_NEWFILE);
+    BPTR in;
+    BPTR out;
     BPTR lock;
     char dir[192];
-    char cmd[256];
+    char guide[224];
+    char cmd[320];
+    CONST_STRPTR viewer = NULL;
     BOOL resolved = FALSE;
+
+    /* MultiView is the normal Release 3+ viewer. Stock AmigaOS 2.04 does
+     * not provide it; Commodore's separately-distributed AmigaGuide V34
+     * viewer/library supports older systems, so accept that when present.
+     * Check explicit paths rather than relying on the caller's command
+     * search path, which may differ for the asynchronous child process. */
+    if (mp_file_exists((CONST_STRPTR)"SYS:Utilities/MultiView"))
+        viewer = (CONST_STRPTR)"SYS:Utilities/MultiView";
+    else if (mp_file_exists((CONST_STRPTR)"C:MultiView"))
+        viewer = (CONST_STRPTR)"C:MultiView";
+    else if (mp_file_exists((CONST_STRPTR)"SYS:Utilities/AmigaGuide"))
+        viewer = (CONST_STRPTR)"SYS:Utilities/AmigaGuide";
+    else if (mp_file_exists((CONST_STRPTR)"C:AmigaGuide"))
+        viewer = (CONST_STRPTR)"C:AmigaGuide";
+
+    if (!viewer) {
+        printf("No AmigaGuide help viewer is installed.\n");
+        if (GfxBase && GfxBase->LibNode.lib_Version < 39)
+            printf("AmigaOS 2.x can use Commodore AmigaGuide V34.\n");
+        else
+            printf("MultiView should normally be in SYS:Utilities.\n");
+        return;
+    }
 
     lock = Lock((CONST_STRPTR)"PROGDIR:", ACCESS_READ);
     if (lock) {
@@ -4487,24 +4524,35 @@ static void mp_launch_help_guide(void) {
         UnLock(lock);
     }
 
-    if (resolved) {
+    if (!resolved) {
+        printf("Could not resolve the MintPrint Settings drawer.\n");
+        printf("Open MintPrintSettings.guide manually.\n");
+        return;
+    }
+
+    {
         size_t len = strlen(dir);
         const char *sep = (len && dir[len - 1] == ':') ? "" : "/";
-        snprintf(cmd, sizeof(cmd), "Multiview \"%s%sMintPrintSettings.guide\"",
-                 dir, sep);
-    } else {
-        /* Could not resolve PROGDIR: at all (should not happen for a
-         * normally-launched program) - fall back to the old string and
-         * let the failure path below report it, rather than not trying. */
-        strcpy(cmd, "Multiview PROGDIR:MintPrintSettings.guide");
+        snprintf(guide, sizeof(guide), "%s%sMintPrintSettings.guide", dir, sep);
     }
+
+    if (!mp_file_exists((CONST_STRPTR)guide)) {
+        printf("MintPrintSettings.guide is missing from the program drawer.\n");
+        return;
+    }
+
+    snprintf(cmd, sizeof(cmd), "%s \"%s\"", (const char *)viewer, guide);
+
+    /* Give the asynchronous viewer private handles so it cannot inherit
+     * and later close this program's (or its launching Shell's) console. */
+    in = Open((CONST_STRPTR)"NIL:", MODE_OLDFILE);
+    out = Open((CONST_STRPTR)"NIL:", MODE_NEWFILE);
 
     if (SystemTags((CONST_STRPTR)cmd,
                    SYS_Asynch, TRUE,
                    SYS_Input, (ULONG)in, SYS_Output, (ULONG)out,
                    TAG_DONE) != 0) {
-        printf("Could not open MintPrintSettings.guide automatically\n");
-        printf("It should be in the same drawer as MintPrintSettings.\n");
+        printf("Could not open MintPrintSettings.guide automatically.\n");
         if (in) Close(in);
         if (out) Close(out);
     }
@@ -7092,7 +7140,8 @@ static void mp_draw_printer_icon(void) {
         smin = (r < g) ? r : g;
         if (b > smax) smax = b;
         if (b < smin) smin = b;
-        if ((int)smax - (int)smin <= MP_NEUTRAL_SAT_THRESHOLD) {
+        if (mp_should_dither_neutral(screen) &&
+                (int)smax - (int)smin <= MP_NEUTRAL_SAT_THRESHOLD) {
             pen = (ramp_count >= 2)
                 ? mp_dither_neutral_pen(ramp_pens, ramp_luma, ramp_count,
                                         r, g, b, left + x, top + y)
