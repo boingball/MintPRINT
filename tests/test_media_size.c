@@ -108,6 +108,44 @@ int main(void)
     assert(!mp_is_tiny_leading_auxiliary_band(0UL));
     assert(!mp_is_tiny_leading_auxiliary_band(9UL));
 
+    /* Final Writer 97's real two-page trace does not keep one raster width:
+     * page one establishes a 2176-pixel canvas but subsequent 128-row bands
+     * shrink as far as 1811 and later 623 pixels, with one harmless 2179
+     * rounding overshoot. Page two starts at 2164. All are still ordinary
+     * SPECIAL_NOFORMFEED bands on the same physical-width document. Keep the
+     * canvas stable while leaving tiny 1-pixel control dumps and a genuine
+     * landscape-width jump outside the continuation classifier. */
+    assert(mp_strip_band_can_continue(2176UL, 2176UL));
+    assert(mp_strip_band_can_continue(2176UL, 1811UL));
+    assert(mp_strip_band_can_continue(2176UL, 623UL));
+    assert(mp_strip_band_can_continue(2176UL, 2179UL));
+    assert(!mp_strip_band_can_continue(2176UL, 1UL));
+    assert(!mp_strip_band_can_continue(2176UL, 3508UL));
+    assert(mp_strip_canvas_width(0UL, 2176UL) == 2176UL);
+    assert(mp_strip_canvas_width(2176UL, 2164UL) == 2176UL);
+    assert(mp_strip_canvas_width(2176UL, 623UL) == 2176UL);
+    assert(mp_strip_canvas_width(2176UL, 2179UL) == 2176UL);
+    assert(mp_strip_canvas_width(2176UL, 3508UL) == 3508UL);
+    assert(mp_media_target_height(
+               "iso_a4_210x297mm",
+               mp_strip_canvas_width(2176UL, 2164UL), 300UL) == 3077UL);
+
+    /* The captured Final Writer page has two 128-row leading control bands
+     * plus 22 real 128-row bands: 3072 raster rows on a 3077-row canvas.
+     * Its trailer is 1x128 followed by a shorter 1x100 band. The compatibility
+     * shim deliberately holds the first full-height tiny tail out of the
+     * media-boundary count so the 100-row short remainder becomes the strong
+     * page delimiter already used by the Wordworth fix. */
+    assert(!mp_media_page_complete(3072UL, 0UL, 3077UL));
+    assert(mp_media_page_complete(3072UL, 128UL, 3077UL));
+    assert(mp_short_strip_completes_logical_page(3072UL, 100UL, 3077UL,
+                                                  128UL, 100UL));
+
+    /* Wordworth remains the fixed-width control case: the new classifier
+     * accepts its identical-width continuation without changing its canvas. */
+    assert(mp_strip_band_can_continue(2478UL, 2478UL));
+    assert(mp_strip_canvas_width(2478UL, 2478UL) == 2478UL);
+
     /* Rev15 merged these real multi-page sequences into one over-tall PWG
      * page. A complete full-height raster is a page even when the app leaves
      * NOFORMFEED set; the customer's two strips plus its narrow blank tail
