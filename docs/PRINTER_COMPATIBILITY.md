@@ -5,7 +5,7 @@ version, TCP/IP stack, document engine and the settings needed to reproduce a
 working print. It deliberately distinguishes physical output from an IPP job
 that merely reports success.
 
-Last reviewed: **27 August 2026**
+Last reviewed: **30 August 2026**
 
 ## Status key
 
@@ -426,7 +426,8 @@ graphics dumps to assemble one physical page.
 
 | Application | Status | Confirmed environment | Result | Required application setup |
 |---|---|---|---|---|
-| **Wordworth 7** | ✅ Working | AmigaOS 3.2.3, Roadshow, Brother MFC-J6930DW, PWG Raster, driver revision 16 | Portrait and three-page documents print with the correct orientation and page boundaries; the former trailing blank sheet is gone | Select `MintPRINT`, `Normal`, `Sheet Feeder`, Density `7`; borders Left `0.00 in`, Right `0.00 in`, Top `0.50 in`, Bottom `1.00 in` |
+| **Wordworth 7** | ✅ Working | AmigaOS 3.2.3, Brother MFC-J6930DW, PWG Raster; physical confirmation at driver rev 40, regression-tested at rev 41.12 | Physical output is confirmed with correct orientation, page boundaries and margins. Rev 41.12 revalidated the fixed-width 2478px strip path, 150-row top-margin reconstruction, 62-row terminal band and narrow auxiliary-band page boundary without changing the Wordworth behaviour | Select `MintPRINT`, `Normal`, `Sheet Feeder`, Density `7`; borders Left `0.00 in`, Right `0.00 in`, Top `0.50 in`, Bottom `1.00 in` |
+| **FinalWriter 97** | 🧪 Testing (render path fixed) | AmigaOS 3.2.3, PWG Raster, driver rev 41.12; retained-job test with printer IP intentionally unreachable | A two-page document now remains exactly two logical pages even though FinalWriter varies every 128-row band's width. The stable page canvas remains 2176px while raw bands range from 623px to 2179px; both pages finish at 3077 rows with `failed=0`. Physical output is not claimed because the printer endpoint was deliberately disabled to avoid wasting ink | No FinalWriter-specific override identified; tested as A4/300dpi. Rev 41.12 or newer is required for the variable-width `SPECIAL_NOFORMFEED` compatibility path |
 | **ArtEffect 2** | ✅ Working | Same revision-16 PWG Raster environment | Confirmed still printing after the Wordworth and multi-page boundary fixes | Density `4`; Brightness, Contrast and Gamma `0`; working image size `188x176 mm`; both dimensions must remain smaller than the selected paper |
 | **DPaint V** | ❌ Not working | Same revision-15 test machine | Printing crashes DPaint with Software Failure `#8000000A` | No working setup confirmed; capture `T:MintPRINT-driver.log` from the failed attempt |
 | **MultiView** | ✅ Working | AmigaOS 3.2.3, same revision-15 test environment; OS Printer Preferences left at defaults apart from selecting MintPRINT | Prints successfully using the active MintPRINT preferences | Select **Print**; MultiView provides no application-specific print settings |
@@ -435,15 +436,84 @@ graphics dumps to assemble one physical page.
 | **AmigaWriter** | ✅ Working | AmigaOS 3.2.3, Roadshow, Brother HL-L2350DW, 1.1.0 | Multi-page documents print correctly with the page-boundary fix confirmed via a beta build in issue #8 and shipped fully in 1.1.0 | Tested with the defaults after adding the printer (`Scaling=auto`) |
 | **MintPrint Settings Test Print** | 🟡 Partial | Brother HL-L2350DW report | The centre of the test image remains enlarged and cropped with `Scaling=auto` | No working override confirmed yet |
 
+### Why old Amiga applications send such different printer streams
+
+This is normal for the Amiga printing model, even when the resulting driver
+trace looks bizarre. `printer.device` is not a modern page-description or PDF
+spool interface where every application hands the driver one complete page.
+Applications can drive several layers of the API directly and historically
+made different trade-offs for memory, speed and the printer drivers of their
+era.
+
+In practice MintPRINT has now seen all of these patterns:
+
+- a complete graphics dump that already represents one page;
+- fixed-width strip printing, where one physical page is assembled from many
+  `SPECIAL_NOFORMFEED` raster bands;
+- variable-width strip printing, where each band is cropped to the rightmost
+  pixel the application actually used;
+- tiny narrow dumps used as blank vertical advance or page-boundary helpers;
+- short final bands used as the logical end of a printable page; and
+- applications such as Directory Opus that use the old text/`CMD_WRITE` path
+  instead of a graphics dump at all.
+
+The odd-looking data is therefore usually an application-specific use of
+`printer.device`, not corrupt raster data. On machines with only a few
+megabytes of RAM it was sensible to render a page in small strips instead of
+constructing a full bitmap, and applications were free to clip those strips or
+combine graphics calls with legacy text-layout commands. Classic printer
+drivers often consumed that stream incrementally, so the application never had
+to describe a modern, explicit page object.
+
+The two word processors tested here illustrate the difference especially well:
+
+- **Wordworth 7** uses a stable 2478-pixel-wide raster, normally in 100-row
+  bands. It separately communicates a 70-line form/VMI setup, ends a logical
+  page with a short 62-row band, and can use 4-pixel-wide auxiliary dumps whose
+  vertical extent belongs to the page even though their pixels are blank.
+- **FinalWriter 97** uses 128-row bands but crops the width of each band to the
+  content it needs. In the captured two-page job the raw widths vary from
+  623 to 2179 pixels, with 1-pixel blank bands around page boundaries. The
+  first real band establishes a 2176-pixel page canvas; later narrower bands
+  must be white-padded rather than treated as new pages.
+
+MintPRINT therefore has to translate these old streaming conventions into the
+explicit fixed-size pages expected by PWG Raster, Apple Raster, PDF and
+PostScript. Compatibility fixes are deliberately signature-based and narrow:
+the FinalWriter variable-width path only activates after real width variation
+is observed, while Wordworth's fixed-width path continues through the existing
+renderer unchanged.
+
+### FinalWriter 97
+
+Driver revision **41.12** adds compatibility for FinalWriter 97's variable-width
+`SPECIAL_NOFORMFEED` strip output. The retained two-page regression trace shows:
+
+- two leading blank `1x128` bands per page;
+- a stable 2176-pixel logical page canvas;
+- real 128-row source bands whose widths vary from 623 to 2179 pixels;
+- the second page's first real band arriving as 2164 pixels but correctly
+  reusing the established 2176-pixel canvas; and
+- a short `1x100` tail acting as the page delimiter after 3072 rendered rows,
+  followed by five rows of physical A4 padding to the 3077-row target.
+
+Both pages close with `PWG end rows/expected/failed 3077 3077 0`. The test was
+intentionally aimed at an unreachable printer IP so the generated PWG could be
+validated without using paper or ink; physical FinalWriter output is therefore
+not yet claimed in the table above. The retained PWG itself decodes cleanly.
+
 ### Wordworth 7 Print Setup
 
 Use driver revision **40** or newer for the current diagnostic strip-printing
-path.
+path. Driver revision **41.12** has also been regression-tested against the same
+Wordworth multi-page stream after adding FinalWriter 97 variable-width strip
+support; the fixed-width Wordworth path, margins and both of its known logical
+page delimiters remain unchanged.
 Revision 16 first preserved Wordworth's strip printing as one media-sized PWG
 page and prevented trailing narrow graphics dumps from becoming a second IPP
 job. Revision 36 additionally separates logical pages before physical media
 padding; revision 39 restores pre-dump vertical movement when supplied and
-otherwise retains revision 38's documented Wordsworth form-length fallback.
+otherwise retains revision 38's documented Wordworth form-length fallback.
 
 Set Wordworth 7's **Print Setup** window to:
 
