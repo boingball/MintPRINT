@@ -146,7 +146,7 @@ LONG mp_config_load(struct MPConfig *cfg)
 
     if (!fh) return source;
 
-    while (FGets(fh, g_config_line, sizeof(g_config_line))) {
+    while (FGets(fh, (STRPTR)g_config_line, sizeof(g_config_line))) {
         const char *value;
         BOOL ok;
         ULONG n;

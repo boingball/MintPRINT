@@ -396,6 +396,15 @@ static void mp_copy_bounded(char *dst, ULONG cap, const char *src)
     dst[i] = 0;
 }
 
+static void mp_append_bounded(char *dst, ULONG cap, const char *suffix)
+{
+    ULONG i = mp_strlen(dst);
+    ULONG j;
+    for (j = 0; suffix[j] && i + 1 < cap; ++j, ++i)
+        dst[i] = suffix[j];
+    dst[i] = 0;
+}
+
 /* The mutable counterpart of mp_job_filename() - a pointer to the same
  * g_job_file_* buffer that function reads, so mp_job_begin() can rewrite
  * it in place with a per-job unique name (tracked jobs only - see
