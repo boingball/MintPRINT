@@ -37,7 +37,7 @@ printer.device driver plus a GUI setup tool.
 
 MintPRINT 1.3.0 is the spooler and compatibility milestone. The GUI now runs
 on AmigaOS 2.04-era systems as well as later releases, and retained jobs can
-be managed from the new Spooler window. The driver revision is **41.11**.
+be managed from the new Spooler window. The driver revision is **41.12**.
 
 - **Disk-backed spooler management.** Choose RAM/T: for the traditional
   behaviour, or a mounted hard drive for a hidden `MPSPOOL` directory. Enable

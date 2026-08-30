@@ -8,15 +8,56 @@
 
 #include <exec/types.h>
 #include <dos/dos.h>
+#include <devices/printer.h>
+#include <devices/prtbase.h>
+#include <devices/prtgfx.h>
 #include <proto/dos.h>
 
 #include "config.h"
 #include "ipp_client.h"
+#include "media_size.h"
 #include "postscript_writer.h"
 
 extern struct DosLibrary *DOSBase;
+extern LONG PRT_STDARGS Render(LONG ct, LONG x, LONG y, LONG status, ...);
 
 static char g_config_line[192];
+
+/*
+ * Compatibility state for variable-width SPECIAL_NOFORMFEED producers.
+ *
+ * Wordworth's proven path is deliberately untouched: it repeats one raster
+ * width, so every callback reaches Render() with exactly the same arguments
+ * it did before this shim existed. Final Writer 97 behaves differently: the
+ * real trace establishes a 2176-pixel page but trims successive 128-row bands
+ * to widths such as 1811, 1853, 623 and 993. driver_core.c quite reasonably
+ * used width equality as its continuation test, which turned each trimmed
+ * band into a new page.
+ *
+ * The PED Render hook now points at MintPRINTCompatRender() below. It keeps a
+ * stable horizontal canvas only after a variable-width stream is actually
+ * observed, and forwards that stable width to the existing renderer. The
+ * renderer still owns all row conversion, Wordworth short-band boundaries,
+ * top-margin restoration, encoder handling and page finalisation.
+ */
+static ULONG g_render_compat_special = 0;
+static ULONG g_render_compat_canvas_width = 0;
+static ULONG g_render_compat_nominal_rows = 0;
+static ULONG g_render_compat_raster_rows = 0;
+static ULONG g_render_compat_aux_rows = 0;
+static ULONG g_render_compat_leading_rows = 0;
+static ULONG g_render_compat_target_rows = 0;
+static ULONG g_render_compat_real_bands = 0;
+static ULONG g_render_compat_resolution = 300;
+static BOOL g_render_compat_page_active = FALSE;
+static BOOL g_render_compat_variable_page = FALSE;
+static BOOL g_render_compat_variable_job = FALSE;
+static BOOL g_render_compat_current_tiny = FALSE;
+static ULONG g_render_compat_current_rows = 0;
+static BOOL g_render_compat_swallow_band = FALSE;
+static BOOL g_render_compat_hold_tiny = FALSE;
+static ULONG g_render_compat_hold_rows = 0;
+static char g_render_compat_media[MP_CONFIG_OPTION_MAX];
 
 static ULONG mp_cfg_len(const char *s)
 {
@@ -48,6 +89,59 @@ static BOOL mp_cfg_copy(char *dst, ULONG cap, const char *src)
     }
     dst[mp_cfg_len(src)] = 0;
     return TRUE;
+}
+
+static void mp_render_compat_finish_page(void)
+{
+    g_render_compat_page_active = FALSE;
+    g_render_compat_variable_page = FALSE;
+    g_render_compat_nominal_rows = 0;
+    g_render_compat_raster_rows = 0;
+    g_render_compat_aux_rows = 0;
+    g_render_compat_target_rows = 0;
+    g_render_compat_real_bands = 0;
+    g_render_compat_current_tiny = FALSE;
+    g_render_compat_current_rows = 0;
+    g_render_compat_swallow_band = FALSE;
+    g_render_compat_hold_tiny = FALSE;
+    g_render_compat_hold_rows = 0;
+
+    /* Fixed-width streams do not need cross-page width memory at all.
+     * Keeping it only after real width variation was observed is what makes
+     * this shim invisible to Wordworth and other established producers. */
+    if (!g_render_compat_variable_job)
+        g_render_compat_canvas_width = 0;
+}
+
+static void mp_render_compat_reset(void)
+{
+    g_render_compat_special = 0;
+    g_render_compat_canvas_width = 0;
+    g_render_compat_leading_rows = 0;
+    g_render_compat_variable_job = FALSE;
+    mp_render_compat_finish_page();
+}
+
+static void mp_render_compat_capture_config(const struct MPConfig *cfg)
+{
+    g_render_compat_media[0] = 0;
+    g_render_compat_resolution = 300;
+    if (!cfg) return;
+
+    if (cfg->media[0])
+        mp_cfg_copy(g_render_compat_media,
+                    sizeof(g_render_compat_media), cfg->media);
+    if (cfg->resolution)
+        g_render_compat_resolution = cfg->resolution;
+}
+
+static void mp_render_compat_add_rows(ULONG *value, ULONG rows)
+{
+    if (!value) return;
+    if (*value > 0xffffffffUL - rows)
+        *value = 0xffffffffUL;
+    else
+        *value += rows;
 }
 
 static void mp_cfg_trim_eol(char *s)
@@ -124,6 +218,13 @@ LONG mp_config_load(struct MPConfig *cfg)
 
     if (!cfg) return MP_CONFIG_SOURCE_DEFAULTS;
     mp_config_defaults(cfg);
+
+    /* Config loading occurs synchronously before a new print starts. Reset
+     * the Render compatibility state here rather than adding another public
+     * Open hook solely for the shim. Init can load once too; DriverOpen's
+     * subsequent load simply resets it again before the first raster band. */
+    mp_render_compat_reset();
+    mp_render_compat_capture_config(cfg);
 
     /* Keep the PostScript writer in step with the configuration actually
      * used by this job. Empty/default scaling intentionally maps to its
@@ -323,5 +424,236 @@ LONG mp_config_load(struct MPConfig *cfg)
                               cfg->margin_right_100mm,
                               cfg->margin_top_100mm,
                               cfg->margin_bottom_100mm);
+    mp_render_compat_capture_config(cfg);
     return source;
+}
+
+/*
+ * Render compatibility front-end used by both printer-driver ABIs.
+ *
+ * The V44 PED points directly here and this calls driver_core.c's Render().
+ * The classic PED also points here; in that build the public Render symbol is
+ * classic_render_shim.c, which in turn calls MintPRINT_RenderCore with the
+ * classic-gun conversion enabled. One implementation therefore covers OS2.x,
+ * OS3.1 and V44+ without duplicating any raster logic.
+ */
+LONG PRT_STDARGS MintPRINTCompatRender(LONG ct, LONG x, LONG y,
+                                       LONG status, ...)
+{
+    LONG rc;
+    ULONG raw_width = x > 0 ? (ULONG)x : 0UL;
+    ULONG raw_rows = y > 0 ? (ULONG)y : 0UL;
+    BOOL noformfeed;
+
+    if (status == 5) {
+        g_render_compat_special = (ULONG)x;
+        return Render(ct, x, y, status);
+    }
+
+    noformfeed = (g_render_compat_special & SPECIAL_NOFORMFEED) ?
+                 TRUE : FALSE;
+
+    if (status == 0) {
+        ULONG send_width = raw_width;
+
+        g_render_compat_current_tiny = FALSE;
+        g_render_compat_current_rows = raw_rows;
+        g_render_compat_swallow_band = FALSE;
+
+        /* A candidate full-height tiny tail was held back because accepting
+         * it immediately would make the existing media-height fallback close
+         * the page before Final Writer's following short 1x100 terminator.
+         * If the next band is not that shorter tiny terminator, replay the
+         * held blank control band's HEIGHT now through the existing tiny-aux
+         * path before processing the new band. Tiny bands never contribute
+         * pixels to the page canvas, so no raster data needs buffering. */
+        if (g_render_compat_hold_tiny) {
+            BOOL this_tiny = noformfeed && raw_width > 0 && raw_width <= 8UL;
+            BOOL this_short = this_tiny && g_render_compat_nominal_rows &&
+                              raw_rows > 0 &&
+                              raw_rows < g_render_compat_nominal_rows;
+
+            if (this_short || !noformfeed) {
+                /* Final Writer pattern: 1x128 then 1x100. The full-height
+                 * control band is redundant blank extent because the normal
+                 * page finalizer pads to the physical target; let the short
+                 * band be the strong logical delimiter instead. If the app
+                 * clears NOFORMFEED here, also drop the held blank tail and
+                 * let the normal final-band path close the page unchanged. */
+                g_render_compat_hold_tiny = FALSE;
+                g_render_compat_hold_rows = 0;
+            } else {
+                LONG replay_rc;
+                ULONG held = g_render_compat_hold_rows;
+
+                g_render_compat_hold_tiny = FALSE;
+                g_render_compat_hold_rows = 0;
+                replay_rc = Render(0, 1, (LONG)held, 0);
+                if (replay_rc != PDERR_NOERR)
+                    return replay_rc;
+                replay_rc = Render(0, (LONG)g_render_compat_special, 0, 4);
+                if (replay_rc != PDERR_NOERR)
+                    return replay_rc;
+
+                mp_render_compat_finish_page();
+                g_render_compat_leading_rows = 0;
+            }
+        }
+
+        /* Normal/single-shot output is not part of this compatibility path.
+         * Do not touch its dimensions or state. A standard strip producer
+         * that finally clears NOFORMFEED also reaches Render unchanged. */
+        if (!noformfeed) {
+            return Render(ct, x, y, status);
+        }
+
+        if (raw_width > 0 && raw_width <= 8UL) {
+            g_render_compat_current_tiny = TRUE;
+
+            if (!g_render_compat_page_active) {
+                mp_render_compat_add_rows(&g_render_compat_leading_rows,
+                                          raw_rows);
+                return Render(ct, x, y, status);
+            }
+
+            /* Only variable-width streams get this one-band lookahead, and
+             * only when THIS full-height tiny band would itself trip the
+             * media-height page-complete test. Wordworth never enters the
+             * variable-width mode, so its 4px auxiliary/62-row terminator
+             * sequence reaches driver_core.c exactly as before. */
+            if (g_render_compat_variable_job &&
+                !g_render_compat_hold_tiny &&
+                g_render_compat_nominal_rows &&
+                raw_rows == g_render_compat_nominal_rows &&
+                g_render_compat_real_bands >= 2UL &&
+                mp_media_page_complete(g_render_compat_raster_rows,
+                                       raw_rows,
+                                       g_render_compat_target_rows)) {
+                g_render_compat_hold_tiny = TRUE;
+                g_render_compat_hold_rows = raw_rows;
+                g_render_compat_swallow_band = TRUE;
+                return PDERR_NOERR;
+            }
+
+            mp_render_compat_add_rows(&g_render_compat_aux_rows, raw_rows);
+            return Render(ct, x, y, status);
+        }
+
+        if (!g_render_compat_page_active) {
+            if (!g_render_compat_canvas_width ||
+                !g_render_compat_variable_job) {
+                g_render_compat_canvas_width = raw_width;
+            } else {
+                g_render_compat_canvas_width = mp_strip_canvas_width(
+                    g_render_compat_canvas_width, raw_width);
+            }
+
+            send_width = g_render_compat_canvas_width;
+            g_render_compat_page_active = TRUE;
+            g_render_compat_variable_page =
+                raw_width != send_width ? TRUE : FALSE;
+            if (g_render_compat_variable_page)
+                g_render_compat_variable_job = TRUE;
+            g_render_compat_nominal_rows = raw_rows;
+            g_render_compat_raster_rows = g_render_compat_leading_rows;
+            mp_render_compat_add_rows(&g_render_compat_raster_rows, raw_rows);
+            g_render_compat_leading_rows = 0;
+            g_render_compat_aux_rows = 0;
+            g_render_compat_real_bands = 1;
+            g_render_compat_target_rows = mp_media_target_height(
+                g_render_compat_media, send_width,
+                g_render_compat_resolution);
+        } else if (mp_strip_band_can_continue(
+                       g_render_compat_canvas_width, raw_width)) {
+            send_width = g_render_compat_canvas_width;
+            if (raw_width != send_width) {
+                g_render_compat_variable_page = TRUE;
+                g_render_compat_variable_job = TRUE;
+            }
+            ++g_render_compat_real_bands;
+            mp_render_compat_add_rows(&g_render_compat_raster_rows, raw_rows);
+            if (raw_rows > g_render_compat_nominal_rows)
+                g_render_compat_nominal_rows = raw_rows;
+        } else {
+            /* A substantial width increase is not a trimmed continuation.
+             * Preserve driver_core.c's established behaviour: the differing
+             * width closes the pending page and starts a new one. Mirror that
+             * transition here so subsequent compatibility decisions describe
+             * the same page the renderer is actually holding. */
+            mp_render_compat_finish_page();
+            g_render_compat_canvas_width = raw_width;
+            g_render_compat_page_active = TRUE;
+            g_render_compat_nominal_rows = raw_rows;
+            g_render_compat_raster_rows = raw_rows;
+            g_render_compat_aux_rows = 0;
+            g_render_compat_real_bands = 1;
+            g_render_compat_target_rows = mp_media_target_height(
+                g_render_compat_media, raw_width,
+                g_render_compat_resolution);
+            send_width = raw_width;
+        }
+
+        return Render(ct, (LONG)send_width, y, status);
+    }
+
+    /* The held candidate tiny band's row and close callbacks are swallowed
+     * with its case-0 call. The next status-0 callback decides whether to
+     * discard that blank extent (Final Writer's short terminator followed)
+     * or replay its height through the normal tiny-aux path. */
+    if (g_render_compat_swallow_band) {
+        if (status == 4)
+            g_render_compat_swallow_band = FALSE;
+        return PDERR_NOERR;
+    }
+
+    rc = Render(ct, x, y, status);
+
+    if (status == 4 && g_render_compat_page_active) {
+        BOOL boundary = FALSE;
+
+        if (!noformfeed) {
+            boundary = TRUE;
+        } else if (g_render_compat_current_tiny) {
+            if (g_render_compat_nominal_rows &&
+                g_render_compat_current_rows > 0 &&
+                g_render_compat_current_rows <
+                    g_render_compat_nominal_rows &&
+                mp_short_strip_completes_logical_page(
+                    g_render_compat_raster_rows,
+                    g_render_compat_aux_rows,
+                    g_render_compat_target_rows,
+                    g_render_compat_nominal_rows,
+                    g_render_compat_current_rows)) {
+                boundary = TRUE;
+            } else if (mp_media_page_complete(
+                           g_render_compat_raster_rows,
+                           g_render_compat_aux_rows,
+                           g_render_compat_target_rows)) {
+                boundary = TRUE;
+            }
+        } else {
+            if (g_render_compat_nominal_rows &&
+                g_render_compat_current_rows > 0 &&
+                g_render_compat_current_rows <
+                    g_render_compat_nominal_rows &&
+                mp_short_strip_completes_logical_page(
+                    g_render_compat_raster_rows,
+                    g_render_compat_aux_rows,
+                    g_render_compat_target_rows,
+                    g_render_compat_nominal_rows,
+                    g_render_compat_current_rows)) {
+                boundary = TRUE;
+            } else if (mp_media_page_complete(
+                           g_render_compat_raster_rows,
+                           g_render_compat_aux_rows,
+                           g_render_compat_target_rows)) {
+                boundary = TRUE;
+            }
+        }
+
+        if (boundary)
+            mp_render_compat_finish_page();
+    }
+
+    return rc;
 }

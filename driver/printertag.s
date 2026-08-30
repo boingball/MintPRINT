@@ -23,6 +23,7 @@
         .extern _CommandTable
         .extern _TextDoSpecial
         .extern _Render
+        .extern _MintPRINTCompatRender
         .extern _ConvFunc
         .extern _DriverTags
 
@@ -59,7 +60,7 @@ _PEDData:
         .word   300               /* YDotsInch */
         .long   _CommandTable
         .long   _TextDoSpecial
-        .long   _Render
+        .long   _MintPRINTCompatRender
         .long   30                /* timeout seconds */
         .long   0                 /* ped_8BitChars: use system default */
         .long   0                 /* ped_PrintMode */
@@ -103,5 +104,5 @@ printerName:
  * something that warrants a new version number outright.
  */
 mp_driver_version_marker:
-        .asciz  "$VER: MintPRINT 41.11 (30.08.2026)"
+        .asciz  "$VER: MintPRINT 41.12 (30.08.2026)"
         .even
