@@ -9724,3 +9724,23 @@ int main(void) {
     }
 
     // Close libraries in reverse order of opening
+    mp_clear_printer_icon();
+    if (SocketBase) {
+        CloseLibrary(SocketBase);
+        SocketBase = NULL;
+    }
+    if (GadToolsBase) {
+        CloseLibrary(GadToolsBase);
+        GadToolsBase = NULL;
+    }
+    if (GfxBase) {
+        CloseLibrary((struct Library *)GfxBase);
+        GfxBase = NULL;
+    }
+    if (IntuitionBase) {
+        CloseLibrary((struct Library *)IntuitionBase);
+        IntuitionBase = NULL;
+    }
+
+    return 0;
+}
