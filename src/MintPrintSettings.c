@@ -3854,6 +3854,49 @@ static void mp_fill_screen_palette32(struct ColorMap *cm, int pen_count,
     }
 }
 
+/* A nearest-colour lookup is useful on a 32+ colour screen, but it produces
+ * harsh, misleading colour blocks on a 16-colour Workbench palette. Keep
+ * the artwork readable there by ordered-dithering luminance between the
+ * closest dark and light existing pens. We never change Workbench's palette. */
+static void mp_low_colour_pens(const ULONG *palette, int pen_count,
+                               UBYTE *dark_out, UBYTE *light_out) {
+    int i;
+    ULONG dark_distance = 0xffffffffUL;
+    ULONG light_distance = 0xffffffffUL;
+    UBYTE dark = 0;
+    UBYTE light = 0;
+
+    for (i = 0; i < pen_count; ++i) {
+        LONG r = (LONG)((palette[i * 3 + 0] >> 24) & 0xffUL);
+        LONG g = (LONG)((palette[i * 3 + 1] >> 24) & 0xffUL);
+        LONG b = (LONG)((palette[i * 3 + 2] >> 24) & 0xffUL);
+        ULONG dark_d = (ULONG)(r * r + g * g + b * b);
+        LONG dr = r - 255;
+        LONG dg = g - 255;
+        LONG db = b - 255;
+        ULONG light_d = (ULONG)(dr * dr + dg * dg + db * db);
+
+        if (dark_d < dark_distance) {
+            dark_distance = dark_d;
+            dark = (UBYTE)i;
+        }
+        if (light_d < light_distance) {
+            light_distance = light_d;
+            light = (UBYTE)i;
+        }
+    }
+    *dark_out = dark;
+    *light_out = light;
+}
+
+static UBYTE mp_low_colour_dither(UBYTE r, UBYTE g, UBYTE b,
+                                  int x, int y, UBYTE dark, UBYTE light) {
+    static const UBYTE ordered[2][2] = {{0, 2}, {3, 1}};
+    ULONG luminance = (299UL * r + 587UL * g + 114UL * b) / 1000UL;
+    ULONG threshold = (ULONG)ordered[y & 1][x & 1] * 64UL + 32UL;
+    return luminance >= threshold ? light : dark;
+}
+
 static void mp_draw_sides_hint(void) {
     struct MPSidesHintImage *image;
     ULONG screen_palette[3 * 256];
@@ -3863,6 +3906,8 @@ static void mp_draw_sides_hint(void) {
     int screen_pen_count;
     int draw_w, draw_h;
     int x, y;
+    UBYTE low_dark = 0;
+    UBYTE low_light = 0;
     int left = MP_SIDES_HINT_LEFT;
     int top = g_topborder + MP_SIDES_HINT_TOP;
 
@@ -3878,6 +3923,9 @@ static void mp_draw_sides_hint(void) {
     if (screen_pen_count > 256)
         screen_pen_count = 256;
     mp_fill_screen_palette32(cm, screen_pen_count, screen_palette);
+    if (screen_pen_count <= 16)
+        mp_low_colour_pens(screen_palette, screen_pen_count,
+                           &low_dark, &low_light);
 
     SetDrMd(rp, JAM1);
     SetAPen(rp, 0);
@@ -3911,6 +3959,13 @@ static void mp_draw_sides_hint(void) {
         for (x = 0; x < draw_w; ++x) {
             int pixel = y * image->width + x;
             UBYTE pen = image->pens[pixel];
+
+            if (screen_pen_count <= 16)
+                pen = mp_low_colour_dither(image->rgb[pixel * 3 + 0],
+                                           image->rgb[pixel * 3 + 1],
+                                           image->rgb[pixel * 3 + 2],
+                                           left + x, top + y,
+                                           low_dark, low_light);
 
             if ((LONG)pen != last_pen) {
                 SetAPen(rp, pen);
@@ -6782,6 +6837,8 @@ static void mp_draw_printer_icon(void) {
     int top = g_topborder + MP_PRINTER_ICON_TOP;
     int i;
     LONG last_pen = -1;
+    UBYTE low_dark = 0;
+    UBYTE low_light = 0;
 
     if (!window || !screen)
         return;
@@ -6795,6 +6852,9 @@ static void mp_draw_printer_icon(void) {
     if (screen_pen_count > 256)
         screen_pen_count = 256;
     mp_fill_screen_palette32(cm, screen_pen_count, screen_palette);
+    if (screen_pen_count <= 16)
+        mp_low_colour_pens(screen_palette, screen_pen_count,
+                           &low_dark, &low_light);
 
     SetDrMd(rp, JAM1);
     SetAPen(rp, 0);
@@ -6843,6 +6903,13 @@ static void mp_draw_printer_icon(void) {
         if (!mp_printer_icon_mask[i])
             continue;
         pen = mp_printer_icon_pens[i];
+        if (screen_pen_count <= 16) {
+            const UBYTE *rgba = mp_printer_icon_rgba + i * 4;
+            pen = mp_low_colour_dither(rgba[0], rgba[1], rgba[2],
+                                       left + (i % MP_PRINTER_ICON_SIZE),
+                                       top + (i / MP_PRINTER_ICON_SIZE),
+                                       low_dark, low_light);
+        }
         if ((LONG)pen != last_pen) {
             SetAPen(rp, pen);
             last_pen = (LONG)pen;
