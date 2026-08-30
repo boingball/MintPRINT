@@ -169,6 +169,38 @@ int mp_is_tiny_leading_auxiliary_band(unsigned long band_width)
     return band_width > 0 && band_width <= 8UL;
 }
 
+int mp_strip_band_can_continue(unsigned long page_width,
+                               unsigned long band_width)
+{
+    unsigned long tolerance;
+
+    if (!page_width || !band_width ||
+        mp_is_tiny_auxiliary_band(page_width, band_width))
+        return 0;
+
+    /* A trimmed band can be arbitrarily narrower than the established page
+     * canvas. A wider band is only continuation-safe when it differs by a
+     * small printer.device rounding amount; otherwise retaining the old
+     * canvas would crop genuine new-page/orientation content. One percent
+     * comfortably covers the 2176 -> 2179 Final Writer trace while keeping
+     * a real portrait/landscape transition far outside the window. */
+    if (band_width <= page_width)
+        return 1;
+
+    tolerance = page_width / 100UL + 1UL;
+    return band_width - page_width <= tolerance;
+}
+
+unsigned long mp_strip_canvas_width(unsigned long reference_width,
+                                    unsigned long first_band_width)
+{
+    if (!first_band_width) return reference_width;
+    if (!reference_width) return first_band_width;
+
+    return mp_strip_band_can_continue(reference_width, first_band_width)
+        ? reference_width : first_band_width;
+}
+
 int mp_media_page_complete(unsigned long raster_rows,
                            unsigned long auxiliary_rows,
                            unsigned long target_rows)
