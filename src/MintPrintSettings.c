@@ -5255,26 +5255,46 @@ static int mp_scan_spool_jobs(struct MPSpoolJobEntry *jobs, int max_jobs,
                 sfh = Open((CONST_STRPTR)jobs[count].status_path,
                           MODE_OLDFILE);
                 if (sfh) {
-                    char line[192];
-                    while (FGets(sfh, line, sizeof(line))) {
-                        trim_config_line(line);
-                        if (strncmp(line, "STATE=", 6) == 0) {
-                            strncpy(jobs[count].state, line + 6,
-                                   sizeof(jobs[count].state) - 1);
-                            jobs[count].state[
-                                sizeof(jobs[count].state) - 1] = '\0';
-                        } else if (strncmp(line, "HOST=", 5) == 0) {
-                            strncpy(jobs[count].host, line + 5,
-                                   sizeof(jobs[count].host) - 1);
-                            jobs[count].host[
-                                sizeof(jobs[count].host) - 1] = '\0';
-                        } else if (strncmp(line, "PORT=", 5) == 0) {
-                            jobs[count].port = atoi(line + 5);
-                        } else if (strncmp(line, "ERROR=", 6) == 0) {
+                    char status[768];
+                    LONG got = Read(sfh, status, sizeof(status) - 1);
+                    char *p;
+
+                    /* Some AmigaDOS/NDK combinations are fussy about the
+                     * signed char buffer passed to FGets(). Read the small
+                     * sidecar in one bounded operation instead; this also
+                     * handles older sidecars that contain only STATE/ERROR.
+                     */
+                    if (got > 0) {
+                        status[got] = '\0';
+                        p = strstr(status, "STATE=");
+                        if (p) {
+                            char *eol = strchr(p, '\n');
+                            size_t n = eol ? (size_t)(eol - (p + 6))
+                                           : strlen(p + 6);
+                            if (n >= sizeof(jobs[count].state))
+                                n = sizeof(jobs[count].state) - 1;
+                            memcpy(jobs[count].state, p + 6, n);
+                            jobs[count].state[n] = '\0';
+                            trim_config_line(jobs[count].state);
+                        }
+                        p = strstr(status, "HOST=");
+                        if (p) {
+                            char *eol = strchr(p, '\n');
+                            size_t n = eol ? (size_t)(eol - (p + 5))
+                                           : strlen(p + 5);
+                            if (n >= sizeof(jobs[count].host))
+                                n = sizeof(jobs[count].host) - 1;
+                            memcpy(jobs[count].host, p + 5, n);
+                            jobs[count].host[n] = '\0';
+                            trim_config_line(jobs[count].host);
+                        }
+                        p = strstr(status, "PORT=");
+                        if (p) jobs[count].port = atoi(p + 5);
+                        p = strstr(status, "ERROR=");
+                        if (p) {
                             long e = 0, h = 0;
                             int ipp = 0;
-                            if (sscanf(line + 6, "%ld %ld %d",
-                                      &e, &h, &ipp) == 3)
+                            if (sscanf(p + 6, "%ld %ld %d", &e, &h, &ipp) == 3)
                                 mp_spool_error_reason(e, h, (UWORD)ipp,
                                     jobs[count].reason,
                                     sizeof(jobs[count].reason));
@@ -9704,23 +9724,3 @@ int main(void) {
     }
 
     // Close libraries in reverse order of opening
-    mp_clear_printer_icon();
-    if (SocketBase) {
-        CloseLibrary(SocketBase);
-        SocketBase = NULL;
-    }
-    if (GadToolsBase) {
-        CloseLibrary(GadToolsBase);
-        GadToolsBase = NULL;
-    }
-    if (GfxBase) {
-        CloseLibrary((struct Library *)GfxBase);
-        GfxBase = NULL;
-    }
-    if (IntuitionBase) {
-        CloseLibrary((struct Library *)IntuitionBase);
-        IntuitionBase = NULL;
-    }
-
-    return 0;
-}
