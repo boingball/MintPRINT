@@ -736,10 +736,9 @@ char printer_icon_uri[256] = "";
 #define MP_PRINTER_ICON_LEFT  400
 /* TOP/SIZE fill the full gap between the ink/toner panel above (its
  * bottom row is MP_MARKER_AREA_BOTTOM, 115) and the Sides/Quality row
- * below (TopEdge 153) - 37 is the largest size that fits both exactly
- * flush with zero overlap; growing it further means moving one of those
- * two neighbours too. */
-#define MP_PRINTER_ICON_TOP   110
+ * below (TopEdge 144). The artwork is deliberately kept above that row
+ * on the taller-font OS 2.x screens. */
+#define MP_PRINTER_ICON_TOP   101
 #define MP_PRINTER_ICON_SIZE   42
 #define MP_PRINTER_ICON_TEMP  "T:MintPRINT-printer-icon.img"
 #define MP_PRINTER_ICON_PIXELS (MP_PRINTER_ICON_SIZE * MP_PRINTER_ICON_SIZE)
@@ -3677,7 +3676,7 @@ int load_ilbm_to_rgb(const char *filename, unsigned char **rgb_out, int *width_o
  * GadTools gadget: it is purely an explanatory picture for the Sides cycle.
  * ------------------------------------------------------------------ */
 #define MP_SIDES_HINT_LEFT       460
-#define MP_SIDES_HINT_TOP        117
+#define MP_SIDES_HINT_TOP        108
 #define MP_SIDES_HINT_SIZE        32
 #define MP_SIDES_HINT_MAX_PENS    32
 #define MP_SIDES_HINT_COUNT        3
