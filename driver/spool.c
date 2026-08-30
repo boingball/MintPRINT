@@ -102,6 +102,61 @@ static void mp_spool_proc_close_job(BPTR *job_fh)
 
 #define MP_SPOOL_UNIQUE_NAME_MAX 192
 
+static void mp_spool_civil_from_days(ULONG z, UWORD *y, UWORD *m, UWORD *d)
+{
+    ULONG era, doe, yoe, doy, mp;
+    z += 719468UL;
+    era = z / 146097UL;
+    doe = z - era * 146097UL;
+    yoe = (doe - doe / 1460UL + doe / 36524UL - doe / 146096UL) / 365UL;
+    doy = doe - (365UL * yoe + yoe / 4UL - yoe / 100UL);
+    mp = (5UL * doy + 2UL) / 153UL;
+    *d = (UWORD)(doy - (153UL * mp + 2UL) / 5UL + 1UL);
+    *m = (UWORD)(mp + (mp < 10UL ? 3UL : (ULONG)(-9)));
+    *y = (UWORD)(yoe + era * 400UL + (*m <= 2 ? 1UL : 0UL));
+}
+
+/* Called only by the spool Process: DateStamp is a dos.library call and
+ * must not run in printer.device callbacks, which may originate in a bare
+ * Exec Task. */
+static void mp_spool_timestamp(char *out)
+{
+    struct DateStamp ds;
+    UWORD year, month, day, hour, minute, second, yy;
+
+    DateStamp(&ds);
+    mp_spool_civil_from_days((ULONG)ds.ds_Days + 2922UL,
+                             &year, &month, &day);
+    hour = (UWORD)(ds.ds_Minute / 60);
+    minute = (UWORD)(ds.ds_Minute % 60);
+    second = (UWORD)(ds.ds_Tick / 50);
+    yy = (UWORD)(year % 100U);
+    out[0] = (char)('0' + (day / 10) % 10); out[1] = (char)('0' + day % 10);
+    out[2] = (char)('0' + (month / 10) % 10); out[3] = (char)('0' + month % 10);
+    out[4] = (char)('0' + (yy / 10) % 10); out[5] = (char)('0' + yy % 10);
+    out[6] = (char)('0' + (hour / 10) % 10); out[7] = (char)('0' + hour % 10);
+    out[8] = (char)('0' + (minute / 10) % 10); out[9] = (char)('0' + minute % 10);
+    out[10] = (char)('0' + (second / 10) % 10); out[11] = (char)('0' + second % 10);
+    out[12] = 0;
+}
+
+static void mp_spool_insert_suffix(const char *src, const char *suffix,
+                                    char *dst, ULONG cap)
+{
+    ULONG len = 0, dot, i, j;
+    while (src[len]) ++len;
+    dot = len;
+    for (i = len; i > 0; --i) {
+        if (src[i - 1] == '.') { dot = i - 1; break; }
+    }
+    i = 0;
+    for (j = 0; j < dot && i + 1 < cap; ++j, ++i) dst[i] = src[j];
+    if (i + 1 < cap) dst[i++] = '-';
+    for (j = 0; suffix[j] && i + 1 < cap; ++j, ++i) dst[i] = suffix[j];
+    for (j = dot; j < len && i + 1 < cap; ++j, ++i) dst[i] = src[j];
+    dst[i] = 0;
+}
+
 /* Copies src into dst (bounded by cap, always NUL-terminated) - a plain
  * loop rather than strncpy(): this file has no libc, same as every other
  * translation unit here (see driver_core.c's mp_streq() comment for why). */
@@ -144,12 +199,10 @@ static void mp_spool_build_suffixed_name(const char *candidate, ULONG n,
 /* Resolves candidate to a name free of any existing file, trying
  * candidate itself first, then "-1", "-2", ... up to "-99" - the same
  * scheme a machine with no real-time clock relies on entirely (every job
- * built the same DDMMYYHHMMSS-less-than-set-clock candidate collides
- * with the last one, so every job after the first gets the next free
- * suffix). Giving up after 99 collisions and reusing that last candidate
- * (silently overwriting it) is an acceptable last resort - reaching that
- * many same-second jobs in practice is not realistic. */
-static void mp_spool_proc_unique_name(const char *candidate, char *resolved,
+ * built the same candidate, so every job after the first gets the next free
+ * suffix). Exhaustion is reported to the caller; an existing job is never
+ * silently overwritten. */
+static BOOL mp_spool_proc_unique_name(const char *candidate, char *resolved,
                                       ULONG cap)
 {
     ULONG n;
@@ -161,9 +214,11 @@ static void mp_spool_proc_unique_name(const char *candidate, char *resolved,
         if (n > 0)
             mp_spool_build_suffixed_name(candidate, n, resolved, cap);
         test = Lock((CONST_STRPTR)resolved, ACCESS_READ);
-        if (!test) return; /* name is free */
+        if (!test) return TRUE; /* name is free */
         UnLock(test);
     }
+
+    return FALSE;
 }
 
 /* Single-sided documents submit one Print-Job per page (see driver_core.c's
@@ -256,11 +311,19 @@ static LONG mp_spool_entry(void)
                     break;
 
                 case MP_SPOOL_CMD_JOB_OPEN_UNIQUE: {
+                    char timestamp[13];
+                    char timestamped[MP_SPOOL_UNIQUE_NAME_MAX];
                     char resolved[MP_SPOOL_UNIQUE_NAME_MAX];
 
                     mp_spool_proc_close_job(&job_fh);
-                    mp_spool_proc_unique_name(m->filename, resolved,
-                                              sizeof(resolved));
+                    mp_spool_timestamp(timestamp);
+                    mp_spool_insert_suffix(m->filename, timestamp, timestamped,
+                                           sizeof(timestamped));
+                    if (!mp_spool_proc_unique_name(timestamped, resolved,
+                                                   sizeof(resolved))) {
+                        m->result = -1;
+                        break;
+                    }
                     job_fh = Open((CONST_STRPTR)resolved, MODE_NEWFILE);
                     if (job_fh && m->out_buf)
                         mp_spool_copy_bounded(m->out_buf, m->out_cap,

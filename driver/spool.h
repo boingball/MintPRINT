@@ -51,10 +51,10 @@ void mp_spool_job_delete(CONST_STRPTR filename);
 
 /* Resolves `candidate` (a full desired path, e.g.
  * "DH0:MPSPOOL/MintPRINT-job-290826172011.jpg") to a name that does not
- * already exist on disk - inserting "-1", "-2", ... immediately before
- * the last '.' if it does, giving up and reusing candidate itself after
- * 99 collisions - then opens THAT name as the job file (same role as
- * mp_spool_job_open() above). The resolved name is copied into
+ * already exist on disk - first adding the current DOS timestamp inside
+ * the spool Process, then inserting "-1", "-2", ... immediately before
+ * the last '.' if needed. It fails after 99 collisions rather than
+ * overwriting an existing job. The resolved name is copied into
  * resolved_out (bounded by resolved_cap, always left NUL-terminated) so
  * the caller's own g_job_file_* buffer and any status sidecar use the
  * name that was actually opened. Only used when a Spooler HDD location

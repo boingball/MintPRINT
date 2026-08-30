@@ -387,108 +387,8 @@ static void mp_build_spool_paths(void)
     mp_build_spool_path(g_job_file_back, sizeof(g_job_file_back), MP_JOB_BASE_BACK);
 }
 
-/* Days-since-1970-01-01 (may assume non-negative here - the earliest an
- * Amiga clock ever reads is the 1978 epoch) to proleptic-Gregorian
- * civil date. The standard "civil_from_days" construction (Howard
- * Hinnant's days-to-civil algorithm): self-contained arithmetic, no
- * calendar table or library call needed - see mp_build_job_timestamp()
- * below for why that matters here. */
-static void mp_civil_from_days(ULONG z, UWORD *y, UWORD *m, UWORD *d)
-{
-    ULONG era, doe, yoe, doy, mp;
-
-    z += 719468UL;
-    era = z / 146097UL;
-    doe = z - era * 146097UL;                                   /* [0,146096] */
-    yoe = (doe - doe / 1460UL + doe / 36524UL - doe / 146096UL) / 365UL; /* [0,399] */
-    doy = doe - (365UL * yoe + yoe / 4UL - yoe / 100UL);         /* [0,365] */
-    mp = (5UL * doy + 2UL) / 153UL;                              /* [0,11] */
-
-    *d = (UWORD)(doy - (153UL * mp + 2UL) / 5UL + 1UL);          /* [1,31] */
-    *m = (UWORD)(mp + (mp < 10UL ? 3UL : (ULONG)(-9)));          /* [1,12] */
-    *y = (UWORD)(yoe + era * 400UL + (*m <= 2 ? 1UL : 0UL));
-}
-
-/* Builds "DDMMYYHHMMSS" (the Spooler management window's job-naming
- * convention) from the current AmigaDOS clock into out, which must be at
- * least 13 bytes. A machine with no battery-backed RTC - or one whose
- * clock was simply never set - boots at (or very near) the Amiga epoch
- * (1 Jan 1978), so every job built that day gets the same candidate
- * name; mp_spool_job_open_unique()'s "-1", "-2", ... collision suffix
- * (spool.c) is what actually disambiguates those, so nothing special is
- * needed here beyond building whatever the clock currently reads.
- *
- * Built from DateStamp() alone (days/minutes/ticks since 1 Jan 1978) via
- * mp_civil_from_days() above, rather than dos.library's own Amiga2Date()
- * - struct ClockData isn't declared by every NDK this project builds
- * against, and DateStamp() is the one dos.library clock call already
- * proven to compile here (mp_config_load() etc. via FGets/Open, this
- * driver's whole freestanding-C discipline). */
-static void mp_build_job_timestamp(char *out)
-{
-    struct DateStamp ds;
-    UWORD year, month, mday, hour, min, sec;
-    UWORD yy;
-
-    DateStamp(&ds);
-    /* 2922 = days from 1970-01-01 to the Amiga epoch (1978-01-01): eight
-     * years (1970..1977), two of them leap (1972, 1976) -> 8*365 + 2. */
-    mp_civil_from_days((ULONG)ds.ds_Days + 2922UL, &year, &month, &mday);
-    hour = (UWORD)(ds.ds_Minute / 60);
-    min  = (UWORD)(ds.ds_Minute % 60);
-    sec  = (UWORD)(ds.ds_Tick / 50);
-
-    yy = (UWORD)(year % 100U);
-
-    out[0]  = (char)('0' + (mday  / 10) % 10);
-    out[1]  = (char)('0' +  mday        % 10);
-    out[2]  = (char)('0' + (month / 10) % 10);
-    out[3]  = (char)('0' +  month       % 10);
-    out[4]  = (char)('0' + (yy    / 10) % 10);
-    out[5]  = (char)('0' +  yy          % 10);
-    out[6]  = (char)('0' + (hour  / 10) % 10);
-    out[7]  = (char)('0' +  hour        % 10);
-    out[8]  = (char)('0' + (min   / 10) % 10);
-    out[9]  = (char)('0' +  min         % 10);
-    out[10] = (char)('0' + (sec   / 10) % 10);
-    out[11] = (char)('0' +  sec         % 10);
-    out[12] = 0;
-}
-
-/* Inserts "-<suffix>" immediately before the last '.' in src (or at src's
- * own end, if it has none) into dst (bounded by cap). Turns this job's
- * fixed base filename (e.g. "DH0:MPSPOOL/MintPRINT-job.jpg") into a
- * per-job candidate (e.g. "...MintPRINT-job-290826172011.jpg") before
- * handing it to mp_spool_job_open_unique() for collision resolution. */
-static void mp_insert_name_suffix(const char *src, const char *suffix,
-                                  char *dst, ULONG cap)
-{
-    ULONG len = mp_strlen(src);
-    ULONG dot = len;
-    ULONG i, j;
-
-    for (i = len; i > 0; --i) {
-        if (src[i - 1] == '.') { dot = i - 1; break; }
-    }
-
-    i = 0;
-    for (j = 0; j < dot && i + 1 < cap; ++j, ++i) dst[i] = src[j];
-    if (i + 1 < cap) dst[i++] = '-';
-    for (j = 0; suffix[j] && i + 1 < cap; ++j, ++i) dst[i] = suffix[j];
-    for (j = dot; j < len && i + 1 < cap; ++j, ++i) dst[i] = src[j];
-    dst[i] = 0;
-}
-
-/* Appends suffix to the end of a NUL-terminated dst (bounded by cap) -
- * used to turn a resolved job filename into its ".status" sidecar path. */
-static void mp_append_bounded(char *dst, ULONG cap, const char *suffix)
-{
-    ULONG i = mp_strlen(dst);
-    ULONG j;
-    for (j = 0; suffix[j] && i + 1 < cap; ++j, ++i) dst[i] = suffix[j];
-    dst[i] = 0;
-}
-
+/* Timestamped job naming is implemented inside spool.c so all DOS clock
+ * access remains inside the dedicated spool Process. */
 static void mp_copy_bounded(char *dst, ULONG cap, const char *src)
 {
     ULONG i = 0;
@@ -906,15 +806,12 @@ static BOOL mp_job_begin(ULONG width, ULONG height)
         g_job_status_path[0] = 0;
 
         if (track) {
-            char timestamp[13];
-            char candidate[MP_SPOOL_PATH_MAX];
             char resolved[MP_SPOOL_PATH_MAX];
 
-            mp_build_job_timestamp(timestamp);
-            mp_insert_name_suffix((const char *)mp_job_filename(), timestamp,
-                                  candidate, sizeof(candidate));
-            g_job_open = mp_spool_job_open_unique((CONST_STRPTR)candidate,
-                                                  resolved, sizeof(resolved));
+            /* Timestamp generation happens inside the spool Process; this
+             * callback may be running in a bare Exec Task. */
+            g_job_open = mp_spool_job_open_unique(
+                (CONST_STRPTR)mp_job_filename(), resolved, sizeof(resolved));
             if (g_job_open) {
                 mp_copy_bounded(mp_current_job_file_buf(), MP_SPOOL_PATH_MAX,
                                 resolved);
