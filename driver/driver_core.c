@@ -55,7 +55,7 @@
  * MP_DRIVER_REV (the version half) only bumps for something that
  * warrants a new version number outright, not on every rebuild. */
 #define MP_DRIVER_REV 41
-#define MP_DRIVER_SUBREV 10
+#define MP_DRIVER_SUBREV 11
 
 struct ExecBase *SysBase = NULL;
 struct DosLibrary *DOSBase = NULL;
@@ -104,6 +104,15 @@ struct TagItem DriverTags[] = {
 #define MP_JOB_BASE_PS   ((const char *)"MintPRINT-job.ps")
 #define MP_JOB_BASE_URF  ((const char *)"MintPRINT-job.urf")
 #define MP_JOB_BASE_BACK ((const char *)"MintPRINT-back.rgb")
+/* Raw-row accumulation buffer for engines that cannot grow their own
+ * declared height after starting (JPEG/PDF/PostScript - see
+ * mp_engine_supports_strip_accumulation()'s comment). Unrelated to
+ * MP_JOB_BASE_BACK: that one holds a PWG duplex backside's pre-encoded
+ * rows in reverse order; this one holds a single page's raw processed RGB
+ * rows in forward order, for any of the three deferred engines. The two
+ * are never open at once (different engines), so sharing the single aux
+ * "slot" mp_spool_aux_*() provides is safe. */
+#define MP_JOB_BASE_ACCUM ((const char *)"MintPRINT-accum.rgb")
 
 #define MP_SPOOL_PATH_MAX (MP_CONFIG_OPTION_MAX + 40) /* + "MPSPOOL/" + base name */
 static char g_job_file_jpeg[MP_SPOOL_PATH_MAX];
@@ -112,6 +121,7 @@ static char g_job_file_pdf[MP_SPOOL_PATH_MAX];
 static char g_job_file_ps[MP_SPOOL_PATH_MAX];
 static char g_job_file_urf[MP_SPOOL_PATH_MAX];
 static char g_job_file_back[MP_SPOOL_PATH_MAX];
+static char g_job_file_accum[MP_SPOOL_PATH_MAX];
 
 /* Non-empty only while the current job is a tracked (Spooler HDD +
  * "Keep spooled jobs") one - the status sidecar mp_write_job_status()
@@ -278,6 +288,26 @@ static BOOL g_pwg_reverse_x = FALSE;
 static BOOL g_pwg_reverse_y = FALSE;
 static BOOL g_pwg_aux_open = FALSE;
 static ULONG g_pwg_aux_bytes = 0;
+/* TRUE for the whole lifetime of a page opened under mp_job_begin() while
+ * g_engine is JPEG/PDF/PostScript and SPECIAL_NOFORMFEED was set - see
+ * that function's own comment for why those three can't start their real
+ * encoder yet. g_job_open still becomes TRUE as usual (against
+ * g_job_file_accum, not the real destination file) so every other
+ * row-writing function in this file keeps working unmodified; they only
+ * ever check g_job_open to know whether a page is currently open for
+ * writing. mp_job_write_row()/mp_job_pad_page() check this flag to route
+ * rows to the accumulation file instead of the (not yet started) real
+ * encoder; mp_page_finalize() checks it to know to finally start that
+ * real encoder and replay every buffered row through it once the true
+ * accumulated height is known. Reset in mp_job_cleanup(). */
+static BOOL g_deferred_encoder = FALSE;
+/* TRUE specifically while g_job_file_accum's aux file handle is open -
+ * tracked separately from g_job_open (which also covers the real
+ * destination file, closed a completely different way -
+ * mp_spool_job_close(), not mp_spool_aux_close()) so mp_job_cleanup()
+ * always closes whichever one is actually open. See
+ * mp_close_deferred_accum(). */
+static BOOL g_deferred_aux_open = FALSE;
 
 /* config.c only writes one of the five known engine literal strings. */
 static int mp_detect_engine(const struct MPConfig *cfg)
@@ -321,11 +351,25 @@ static BOOL mp_duplex_requested(void)
 /* PWG Raster and URF are the only two engines whose page header declares a
  * growable height that can be patched after the fact (mp_pwg_grow()/
  * mp_urf_grow(), MP_PWG_HEIGHT_HEADER_OFFSET/MP_URF_HEIGHT_FIELD_OFFSET) -
- * so they're the only two that can safely accumulate several
- * SPECIAL_NOFORMFEED bands into one physical page. JPEG/PDF/PostScript
- * remain single-band: a NOFORMFEED band under those engines finalizes
- * immediately as its own (usually wrong) page, exactly as before this
- * predicate existed. */
+ * so they're the only two that can accumulate several SPECIAL_NOFORMFEED
+ * bands into one physical page THIS way. JPEG/PDF/PostScript all
+ * bottleneck through the same JPEG frame header (PDF/PostScript embed a
+ * JPEG bitstream verbatim - see pdf_writer.h/postscript_writer.h), which
+ * commits to width/height before any scan data and so cannot grow after
+ * starting either - but they can still accumulate, via a different
+ * mechanism entirely: buffering bands to a spool file and only starting
+ * their real encoder once the true final height is known (see
+ * g_deferred_encoder and mp_job_begin()'s/mp_page_finalize()'s own
+ * comments). This predicate says which of the two mechanisms applies to
+ * the current g_engine - not whether multi-band accumulation happens at
+ * all, which by now it does for every engine (see the SPECIAL_NOFORMFEED
+ * checks in Render()'s case 0 and case 4, neither gated to this predicate
+ * any more). Before g_deferred_encoder existed, TRUE here really did mean
+ * "can accumulate at all" and FALSE meant a NOFORMFEED band finalized
+ * immediately as its own (usually wrong) page under JPEG/PDF/PostScript -
+ * issue #74 (WordWorth 7/Final Writer 97 rendering text line-by-line as
+ * NOFORMFEED bands: every line became its own tiny, sideways-looking
+ * page). */
 static BOOL mp_engine_supports_strip_accumulation(void)
 {
     return g_engine == MP_ENGINE_PWG || g_engine == MP_ENGINE_URF;
@@ -385,6 +429,7 @@ static void mp_build_spool_paths(void)
     mp_build_spool_path(g_job_file_ps,   sizeof(g_job_file_ps),   MP_JOB_BASE_PS);
     mp_build_spool_path(g_job_file_urf,  sizeof(g_job_file_urf),  MP_JOB_BASE_URF);
     mp_build_spool_path(g_job_file_back, sizeof(g_job_file_back), MP_JOB_BASE_BACK);
+    mp_build_spool_path(g_job_file_accum, sizeof(g_job_file_accum), MP_JOB_BASE_ACCUM);
 }
 
 /* Timestamped job naming is implemented inside spool.c so all DOS clock
@@ -650,14 +695,87 @@ static void mp_pwg_close_aux(void)
     g_pwg_aux_bytes = 0;
 }
 
+/* Closes and deletes the deferred-encoder row-accumulation file, if it
+ * was ever opened. Called both from mp_job_cleanup() (error/cancel while
+ * still accumulating) and from mp_page_finalize()'s successful-replay
+ * path (once every buffered row has been read back and fed to the real
+ * encoder, before that real encoder's own destination file is opened) -
+ * mp_spool_job_delete() runs unconditionally either way, cheap hygiene
+ * against a stray leftover file even when the aux handle itself was
+ * already closed or never opened. */
+static void mp_close_deferred_accum(void)
+{
+    if (g_deferred_aux_open) {
+        mp_spool_aux_close();
+        g_deferred_aux_open = FALSE;
+    }
+    mp_spool_job_delete((CONST_STRPTR)g_job_file_accum);
+}
+
 static void mp_job_cleanup(void)
 {
     mp_pwg_close_aux();
-    if (g_job_open) {
+    mp_close_deferred_accum();
+    /* g_deferred_encoder means g_job_open (if set) refers to the aux
+     * accumulation file, already closed just above by
+     * mp_close_deferred_accum() - not the real destination file
+     * mp_spool_job_close() below expects. mp_page_finalize() always
+     * clears g_deferred_encoder before opening that real file, so this
+     * only skips mp_spool_job_close() while still mid-accumulation. */
+    if (g_job_open && !g_deferred_encoder) {
         mp_spool_job_close();
-        g_job_open = FALSE;
     }
+    g_job_open = FALSE;
+    g_deferred_encoder = FALSE;
     mp_job_release_buffers();
+}
+
+/* Opens this job's real destination file (or a fresh uniquely-named one
+ * for a tracked/kept job) and gets its .status sidecar path ready -
+ * shared by mp_job_begin()'s normal (non-deferred) path and
+ * mp_page_finalize()'s deferred-replay path, which reaches this same
+ * point once the true accumulated height of a JPEG/PDF/PostScript
+ * multi-band page is finally known. Calls mp_job_cleanup() and returns
+ * FALSE on failure, exactly as its own inlined form always did. */
+static BOOL mp_open_real_job_file(void)
+{
+    /* Only a hard drive Spooler location with "Keep spooled jobs" on
+     * gets a unique per-job name and a tracked status sidecar - RAM
+     * (or Keep off) reuses the fixed per-engine name exactly as
+     * before, unconditionally overwritten by mp_job_open()'s
+     * MODE_NEWFILE every time, same as MintPRINT has always done. */
+    BOOL track = g_config.spool_keep && g_config.spool[0] &&
+                !mp_streq(g_config.spool, "RAM");
+
+    g_job_status_path[0] = 0;
+
+    if (track) {
+        char resolved[MP_SPOOL_PATH_MAX];
+
+        /* Timestamp generation happens inside the spool Process; this
+         * callback may be running in a bare Exec Task. */
+        g_job_open = mp_spool_job_open_unique(
+            (CONST_STRPTR)mp_job_filename(), resolved, sizeof(resolved));
+        if (g_job_open) {
+            mp_copy_bounded(mp_current_job_file_buf(), MP_SPOOL_PATH_MAX,
+                            resolved);
+            mp_copy_bounded(g_job_status_path, sizeof(g_job_status_path),
+                            resolved);
+            mp_append_bounded(g_job_status_path,
+                              sizeof(g_job_status_path), ".status");
+        }
+    } else {
+        g_job_open = mp_spool_job_open(mp_job_filename());
+    }
+
+    if (!g_job_open) {
+        mp_log_text("Job open failed for output file");
+        mp_job_cleanup();
+        return FALSE;
+    }
+    g_job_file_bytes = 0;
+    mp_write_job_status("RENDERING", NULL);
+    return TRUE;
 }
 
 static BOOL mp_job_begin(ULONG width, ULONG height)
@@ -677,9 +795,30 @@ static BOOL mp_job_begin(ULONG width, ULONG height)
     if (append_duplex_page)
         mp_job_release_buffers();
     else {
+        /* mp_job_cleanup() resets g_deferred_encoder to FALSE (a fresh
+         * page/job has no opinion yet) - compute this call's own value
+         * AFTER it runs, not before, or it would be clobbered right back
+         * to FALSE here. append_duplex_page never applies to a deferred
+         * engine anyway (mp_duplex_requested() is already FALSE for
+         * JPEG/PDF/PostScript), so this ordering only matters for the one
+         * branch that actually needs it. */
         mp_job_cleanup();
         g_job_file_bytes = 0;
     }
+    /* JPEG/PDF/PostScript all bottleneck through the same JPEG frame
+     * header, which commits to a width/height before any scan data - so
+     * none of them can safely start yet if more SPECIAL_NOFORMFEED bands
+     * of this page are still coming and the true final height isn't known.
+     * See mp_engine_supports_strip_accumulation()'s comment, and the
+     * deferred-open/deferred-write branches below and in
+     * mp_job_write_row()/mp_job_pad_page()/mp_job_reserve_page()/
+     * mp_page_finalize(). A single-band page (the overwhelming common
+     * case - no SPECIAL_NOFORMFEED) is completely unaffected: this is
+     * FALSE for it exactly as before this existed, and every one of those
+     * functions falls straight through to its original behaviour. */
+    g_deferred_encoder = !mp_engine_supports_strip_accumulation() &&
+                         (g_current_special & SPECIAL_NOFORMFEED) ?
+                         TRUE : FALSE;
     g_job_rows_written = 0;
     g_job_failed = FALSE;
     g_pwg_defer_rows = FALSE;
@@ -803,44 +942,35 @@ static BOOL mp_job_begin(ULONG width, ULONG height)
             break;
     }
 
-    if (!g_job_open) {
-        /* Only a hard drive Spooler location with "Keep spooled jobs" on
-         * gets a unique per-job name and a tracked status sidecar - RAM
-         * (or Keep off) reuses the fixed per-engine name exactly as
-         * before, unconditionally overwritten by mp_job_open()'s
-         * MODE_NEWFILE every time, same as MintPRINT has always done. */
-        BOOL track = g_config.spool_keep && g_config.spool[0] &&
-                    !mp_streq(g_config.spool, "RAM");
-
-        g_job_status_path[0] = 0;
-
-        if (track) {
-            char resolved[MP_SPOOL_PATH_MAX];
-
-            /* Timestamp generation happens inside the spool Process; this
-             * callback may be running in a bare Exec Task. */
-            g_job_open = mp_spool_job_open_unique(
-                (CONST_STRPTR)mp_job_filename(), resolved, sizeof(resolved));
-            if (g_job_open) {
-                mp_copy_bounded(mp_current_job_file_buf(), MP_SPOOL_PATH_MAX,
-                                resolved);
-                mp_copy_bounded(g_job_status_path, sizeof(g_job_status_path),
-                                resolved);
-                mp_append_bounded(g_job_status_path,
-                                  sizeof(g_job_status_path), ".status");
-            }
-        } else {
-            g_job_open = mp_spool_job_open(mp_job_filename());
-        }
-
+    if (g_deferred_encoder) {
+        /* Neither the real destination file nor a tracked-job status
+         * sidecar is opened yet - both belong to the real encoder, which
+         * mp_page_finalize() starts once the true page height is known.
+         * g_job_open becomes TRUE against the accumulation file instead,
+         * so every other row-writing function in this file keeps working
+         * exactly as it already does for every other engine (see
+         * g_deferred_encoder's own comment at its declaration). Not
+         * reached for an append_duplex_page continuation: deferred mode
+         * never applies to a duplex-requesting engine (JPEG/PDF/
+         * PostScript can't declare duplex - mp_duplex_requested()), and
+         * this is always a fresh page for the ones that do enter it. */
         if (!g_job_open) {
-            mp_log_text("Job open failed for output file");
-            mp_job_cleanup();
-            return FALSE;
+            g_deferred_aux_open = mp_spool_aux_open(
+                (CONST_STRPTR)g_job_file_accum);
+            g_job_open = g_deferred_aux_open;
+            if (!g_job_open) {
+                mp_log_text("Deferred page buffer open failed");
+                mp_job_cleanup();
+                return FALSE;
+            }
         }
-        g_job_file_bytes = 0;
-        mp_write_job_status("RENDERING", NULL);
+        mp_log_3("Deferred band buffered width/height/scratch",
+                 (LONG)width, (LONG)height, (LONG)need);
+    } else if (!g_job_open) {
+        if (!mp_open_real_job_file()) return FALSE;
     }
+
+    if (g_deferred_encoder) return TRUE;
 
     switch (g_engine) {
         case MP_ENGINE_PWG: {
@@ -1128,56 +1258,74 @@ static BOOL mp_job_write_row(struct PrtInfo *pi, ULONG row_number)
                  (LONG)g_page_height);
     }
 
-    switch (g_engine) {
-        case MP_ENGINE_PWG:
-            if (g_pwg_reverse_x)
-                mp_pwg_reverse_rgb_row(g_rgb_row, g_page_width);
-            if (!mp_pwg_accept_row(g_rgb_row)) {
-                mp_log_3("PWG scanline failed row/written/expected",
-                         (LONG)row_number, (LONG)g_job_rows_written,
-                         (LONG)g_page_height);
-                g_job_failed = TRUE;
-                if (mp_duplex_requested()) g_duplex_job_failed = TRUE;
-                return FALSE;
-            }
-            break;
-        case MP_ENGINE_PDF:
-            if (!mp_pdf_write_scanline(&g_pdf, g_rgb_row)) {
-                mp_log_3("PDF scanline failed row/written/expected",
-                         (LONG)row_number, (LONG)g_job_rows_written,
-                         (LONG)g_page_height);
-                g_job_failed = TRUE;
-                return FALSE;
-            }
-            break;
-        case MP_ENGINE_POSTSCRIPT:
-            if (!mp_postscript_write_scanline(&g_postscript, g_rgb_row)) {
-                mp_log_3("PostScript scanline failed row/written/expected",
-                         (LONG)row_number, (LONG)g_job_rows_written,
-                         (LONG)g_page_height);
-                g_job_failed = TRUE;
-                return FALSE;
-            }
-            break;
-        case MP_ENGINE_URF:
-            if (!mp_urf_write_scanline(&g_urf, g_rgb_row)) {
-                mp_log_3("URF scanline failed row/written/expected",
-                         (LONG)row_number, (LONG)g_job_rows_written,
-                         (LONG)g_page_height);
-                g_job_failed = TRUE;
-                if (mp_duplex_requested()) g_duplex_job_failed = TRUE;
-                return FALSE;
-            }
-            break;
-        default:
-            if (!mp_jpeg_write_scanline(&g_jpeg, g_rgb_row)) {
-                mp_log_3("JPEG scanline failed row/written/expected",
-                         (LONG)row_number, (LONG)g_job_rows_written,
-                         (LONG)g_page_height);
-                g_job_failed = TRUE;
-                return FALSE;
-            }
-            break;
+    if (g_deferred_encoder) {
+        /* Real encoder not started yet - see mp_job_begin()'s comment.
+         * Append this already-fully-processed row (desaturated above if
+         * applicable) to the accumulation file verbatim; mp_page_finalize()
+         * replays it through the real per-engine write_scanline() once the
+         * true page height is known. Fixed-size records (g_rgb_row_bytes
+         * each), so replay can index straight to row N * g_rgb_row_bytes -
+         * no length-prefix bookkeeping needed the way PWG's own
+         * variable-length backside replay requires. */
+        if (!mp_spool_aux_write(g_rgb_row, g_rgb_row_bytes)) {
+            mp_log_3("Deferred row buffer write failed row/written/expected",
+                     (LONG)row_number, (LONG)g_job_rows_written,
+                     (LONG)g_page_height);
+            g_job_failed = TRUE;
+            return FALSE;
+        }
+    } else {
+        switch (g_engine) {
+            case MP_ENGINE_PWG:
+                if (g_pwg_reverse_x)
+                    mp_pwg_reverse_rgb_row(g_rgb_row, g_page_width);
+                if (!mp_pwg_accept_row(g_rgb_row)) {
+                    mp_log_3("PWG scanline failed row/written/expected",
+                             (LONG)row_number, (LONG)g_job_rows_written,
+                             (LONG)g_page_height);
+                    g_job_failed = TRUE;
+                    if (mp_duplex_requested()) g_duplex_job_failed = TRUE;
+                    return FALSE;
+                }
+                break;
+            case MP_ENGINE_PDF:
+                if (!mp_pdf_write_scanline(&g_pdf, g_rgb_row)) {
+                    mp_log_3("PDF scanline failed row/written/expected",
+                             (LONG)row_number, (LONG)g_job_rows_written,
+                             (LONG)g_page_height);
+                    g_job_failed = TRUE;
+                    return FALSE;
+                }
+                break;
+            case MP_ENGINE_POSTSCRIPT:
+                if (!mp_postscript_write_scanline(&g_postscript, g_rgb_row)) {
+                    mp_log_3("PostScript scanline failed row/written/expected",
+                             (LONG)row_number, (LONG)g_job_rows_written,
+                             (LONG)g_page_height);
+                    g_job_failed = TRUE;
+                    return FALSE;
+                }
+                break;
+            case MP_ENGINE_URF:
+                if (!mp_urf_write_scanline(&g_urf, g_rgb_row)) {
+                    mp_log_3("URF scanline failed row/written/expected",
+                             (LONG)row_number, (LONG)g_job_rows_written,
+                             (LONG)g_page_height);
+                    g_job_failed = TRUE;
+                    if (mp_duplex_requested()) g_duplex_job_failed = TRUE;
+                    return FALSE;
+                }
+                break;
+            default:
+                if (!mp_jpeg_write_scanline(&g_jpeg, g_rgb_row)) {
+                    mp_log_3("JPEG scanline failed row/written/expected",
+                             (LONG)row_number, (LONG)g_job_rows_written,
+                             (LONG)g_page_height);
+                    g_job_failed = TRUE;
+                    return FALSE;
+                }
+                break;
+        }
     }
 
     ++g_job_rows_written;
@@ -1238,15 +1386,17 @@ static BOOL mp_job_finish(ULONG expected_rows)
  * but unknown media (or - since driver revision 40 - the leading-margin
  * restoration below, which is not gated to any one engine) can still need
  * to grow it as more rows are accounted for. JPEG/PDF/PostScript have no
- * such contract - mp_job_begin() must have already sized them for
- * total_rows up front (which every current caller does: case 0 folds any
- * leading margin into encoder_height before calling mp_job_begin(), for
- * every engine, precisely so this never needs to grow one of them) - so
- * total_rows exceeding what they were already sized for is a real error,
+ * such contract once their real encoder is running - but while
+ * g_deferred_encoder is set, no real encoder is running yet at all (see
+ * mp_job_begin()): rows are still going to the accumulation file, which
+ * has no height to exceed, so this always succeeds there regardless of
+ * total_rows. Only once mp_page_finalize() has started the real encoder
+ * for total_rows exceeding what it was declared for become a real error,
  * not something this function can fix up after the fact. */
 static BOOL mp_job_reserve_page(ULONG total_rows)
 {
     if (!g_job_open || g_job_failed) return FALSE;
+    if (g_deferred_encoder) return TRUE;
     switch (g_engine) {
         case MP_ENGINE_URF:
             if (total_rows <= g_urf.height) return TRUE;
@@ -1293,23 +1443,31 @@ static BOOL mp_job_pad_page(ULONG target_rows)
     while (g_job_rows_written < target_rows) {
         BOOL ok;
 
-        switch (g_engine) {
-            case MP_ENGINE_URF:
-                ok = mp_urf_write_scanline(&g_urf, g_rgb_row) ? TRUE : FALSE;
-                break;
-            case MP_ENGINE_PWG:
-                ok = mp_pwg_accept_row(g_rgb_row);
-                break;
-            case MP_ENGINE_PDF:
-                ok = mp_pdf_write_scanline(&g_pdf, g_rgb_row) ? TRUE : FALSE;
-                break;
-            case MP_ENGINE_POSTSCRIPT:
-                ok = mp_postscript_write_scanline(&g_postscript, g_rgb_row)
-                    ? TRUE : FALSE;
-                break;
-            default: /* MP_ENGINE_JPEG */
-                ok = mp_jpeg_write_scanline(&g_jpeg, g_rgb_row) ? TRUE : FALSE;
-                break;
+        /* Same accumulation-file routing as mp_job_write_row() - a blank
+         * padding row is exactly as real a page row as a content one once
+         * it reaches replay, and needs to end up in the same place in the
+         * row sequence. */
+        if (g_deferred_encoder) {
+            ok = mp_spool_aux_write(g_rgb_row, g_rgb_row_bytes) ? TRUE : FALSE;
+        } else {
+            switch (g_engine) {
+                case MP_ENGINE_URF:
+                    ok = mp_urf_write_scanline(&g_urf, g_rgb_row) ? TRUE : FALSE;
+                    break;
+                case MP_ENGINE_PWG:
+                    ok = mp_pwg_accept_row(g_rgb_row);
+                    break;
+                case MP_ENGINE_PDF:
+                    ok = mp_pdf_write_scanline(&g_pdf, g_rgb_row) ? TRUE : FALSE;
+                    break;
+                case MP_ENGINE_POSTSCRIPT:
+                    ok = mp_postscript_write_scanline(&g_postscript, g_rgb_row)
+                        ? TRUE : FALSE;
+                    break;
+                default: /* MP_ENGINE_JPEG */
+                    ok = mp_jpeg_write_scanline(&g_jpeg, g_rgb_row) ? TRUE : FALSE;
+                    break;
+            }
         }
         if (!ok) {
             mp_log_text("Blank page padding failed");
@@ -1460,6 +1618,140 @@ static LONG mp_page_submit_and_track(ULONG rows_for_streak)
  * synchronous signal (they already returned PDERR_NOERR before this
  * could be known); the outcome is still fully visible in the driver
  * log. */
+
+/* Feeds content_rows rows back from the accumulation file (g_job_file_accum,
+ * still open - mp_spool_aux_read() reads from the same handle
+ * mp_spool_aux_write() wrote through, no close/reopen needed, exactly as
+ * mp_pwg_replay_backside() already relies on for its own aux file) through
+ * the now-started real encoder's write_scanline, one row at a time. Only
+ * called from mp_page_finalize() once g_deferred_encoder has already been
+ * cleared and the real encoder opened for g_accum_width x the true final
+ * height - see that function's own deferred-mode branch. Reuses g_rgb_row
+ * as the read scratch buffer: nothing else needs it once every Render()
+ * call for this page has already happened. Resets g_job_rows_written to 0
+ * first and counts back up as rows are actually fed to the real encoder -
+ * it already reached content_rows once during accumulation, but that
+ * counted rows buffered, not rows the real encoder (which did not exist
+ * yet) had received; mp_job_finish()'s expected_rows check needs the
+ * latter. */
+static BOOL mp_deferred_replay(ULONG content_rows)
+{
+    ULONG row;
+
+    g_job_rows_written = 0;
+    for (row = 0; row < content_rows; ++row) {
+        BOOL ok;
+
+        if (!mp_spool_aux_read(row * g_rgb_row_bytes, g_rgb_row,
+                               g_rgb_row_bytes)) {
+            mp_log_3("Deferred row replay read failed row/total/bytes",
+                     (LONG)row, (LONG)content_rows, (LONG)g_rgb_row_bytes);
+            return FALSE;
+        }
+        switch (g_engine) {
+            case MP_ENGINE_PDF:
+                ok = mp_pdf_write_scanline(&g_pdf, g_rgb_row) ? TRUE : FALSE;
+                break;
+            case MP_ENGINE_POSTSCRIPT:
+                ok = mp_postscript_write_scanline(&g_postscript, g_rgb_row)
+                    ? TRUE : FALSE;
+                break;
+            default: /* MP_ENGINE_JPEG */
+                ok = mp_jpeg_write_scanline(&g_jpeg, g_rgb_row) ? TRUE : FALSE;
+                break;
+        }
+        if (!ok) {
+            mp_log_3("Deferred row replay encode failed row/total/bytes",
+                     (LONG)row, (LONG)content_rows, (LONG)g_rgb_row_bytes);
+            return FALSE;
+        }
+        ++g_job_rows_written;
+    }
+    return TRUE;
+}
+
+/* Starts the real encoder for a page that was accumulated in deferred
+ * mode (g_deferred_encoder - see mp_job_begin()'s own comment) and
+ * replays every buffered row through it, now that mp_page_finalize()
+ * finally knows the true total height. width is g_accum_width - the
+ * page's established width, same as every band already agreed on to
+ * count as a continuation of it (see the case-0 continuation check).
+ * final_height is the true final row count this page will declare: at
+ * least content_rows (mp_job_pad_page() below tops it up to any larger
+ * media-derived target the same way PWG/URF's own branches above do).
+ * Returns FALSE (with g_job_failed already set) on any failure - the
+ * caller's existing mp_job_finish() call sees g_job_failed and reports it
+ * exactly as any other page failure. */
+static BOOL mp_deferred_finalize(ULONG width, ULONG content_rows,
+                                 ULONG final_height)
+{
+    /* g_pdf_scratch/g_jpeg_scratch/g_postscript_scratch (and their _bytes
+     * counterparts) are already allocated, sized for width - mp_job_begin()
+     * does that unconditionally before deciding whether this page is
+     * deferred, since scratch sizing only ever depends on width, never on
+     * the still-unknown final height. Nothing to redo here. */
+    if (!mp_open_real_job_file()) {
+        g_job_failed = TRUE;
+        return FALSE;
+    }
+
+    g_deferred_encoder = FALSE;
+
+    switch (g_engine) {
+        case MP_ENGINE_PDF:
+            if (!mp_pdf_begin(&g_pdf, width, final_height,
+                              g_config.resolution, g_pdf_scratch,
+                              g_pdf_scratch_bytes, mp_job_file_write, NULL)) {
+                mp_log_text("Deferred PDF encoder begin failed");
+                g_job_failed = TRUE;
+                return FALSE;
+            }
+            break;
+        case MP_ENGINE_POSTSCRIPT: {
+            ULONG page_width_points = 0;
+            ULONG page_height_points = 0;
+
+            mp_media_page_points(g_config.media, width, final_height,
+                                 &page_width_points, &page_height_points);
+            if (!mp_postscript_begin(&g_postscript, width, final_height,
+                                     page_width_points, page_height_points,
+                                     g_config.resolution,
+                                     g_postscript_scratch,
+                                     g_postscript_scratch_bytes,
+                                     mp_job_file_write, NULL)) {
+                mp_log_text("Deferred PostScript encoder begin failed");
+                g_job_failed = TRUE;
+                return FALSE;
+            }
+            break;
+        }
+        default: /* MP_ENGINE_JPEG */
+            if (!mp_jpeg_begin(&g_jpeg, width, final_height, g_jpeg_scratch,
+                               g_jpeg_scratch_bytes, mp_job_file_write, NULL)) {
+                mp_log_text("Deferred JPEG encoder begin failed");
+                g_job_failed = TRUE;
+                return FALSE;
+            }
+            break;
+    }
+    mp_log_3("Deferred replay begin width/finalHeight/contentRows",
+             (LONG)width, (LONG)final_height, (LONG)content_rows);
+
+    if (!mp_deferred_replay(content_rows)) {
+        g_job_failed = TRUE;
+        return FALSE;
+    }
+
+    mp_close_deferred_accum();
+
+    if (final_height > content_rows && !mp_job_pad_page(final_height)) {
+        g_job_failed = TRUE;
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
 static BOOL mp_page_finalize(void)
 {
     BOOL job_ok;
@@ -1547,6 +1839,28 @@ static BOOL mp_page_finalize(void)
             mp_log_text("Failed to patch accumulated URF page height");
             g_job_failed = TRUE;
         }
+    } else if (g_deferred_encoder && !g_job_failed) {
+        /* JPEG/PDF/PostScript's own equivalent of the PWG/URF branches
+         * above: mp_deferred_finalize() starts the real encoder (which
+         * this page's SPECIAL_NOFORMFEED bands never let start any
+         * earlier - see mp_job_begin()'s comment) and replays every
+         * buffered row through it. Same "physical page, not just ink
+         * rows" concern those branches have too - pad a strip-printed
+         * page up to the full media-derived height before it becomes
+         * this page's own declared height, or a short document reads as
+         * an oddly-shaped (often landscape-looking) page instead, same
+         * as an unpadded PWG/URF page would. */
+        ULONG final_height = g_accum_height;
+
+        if (g_page_had_noformfeed && g_page_target_height > final_height)
+            final_height = g_page_target_height;
+
+        if (mp_deferred_finalize(g_accum_width, g_accum_height, final_height))
+            g_accum_height = final_height;
+        /* On failure, mp_deferred_finalize() has already set g_job_failed
+         * and logged specifically what went wrong - mp_job_finish() below
+         * sees that and reports it the same way any other page failure
+         * would. */
     }
 
     job_ok = mp_job_finish(g_accum_height);
@@ -1577,15 +1891,15 @@ static BOOL mp_begin_split_page(ULONG width, ULONG remaining_height)
     g_page_height = remaining_height;
     g_recenter_clamped_page = FALSE;
 
-    if (mp_detect_engine(&g_config) == MP_ENGINE_PWG ||
-        mp_detect_engine(&g_config) == MP_ENGINE_URF) {
-        media_height = mp_media_target_height(g_config.media, width,
-                                              g_config.resolution);
-        if (mp_duplex_requested() && g_duplex_max_page_height > media_height)
-            media_height = g_duplex_max_page_height;
-        if (media_height > encoder_height)
-            encoder_height = media_height;
-    }
+    /* Every engine, not just PWG/URF - see case 0's identical widening and
+     * its own comment on why g_page_target_height matters for a deferred
+     * (JPEG/PDF/PostScript) engine too, not only encoder_height. */
+    media_height = mp_media_target_height(g_config.media, width,
+                                          g_config.resolution);
+    if (mp_duplex_requested() && g_duplex_max_page_height > media_height)
+        media_height = g_duplex_max_page_height;
+    if (media_height > encoder_height)
+        encoder_height = media_height;
 
     if (!mp_job_begin(width, encoder_height)) {
         if (mp_duplex_requested()) g_duplex_job_failed = TRUE;
@@ -1987,8 +2301,10 @@ LONG PRT_STDARGS Render(LONG ct, LONG x, LONG y, LONG status, ...)
              * 4962-pixel-wide page: discarding them removed 250 vertical
              * rows (10.6mm at 600dpi) from the document's top margin. Keep
              * suppressing the impossible-width raster itself, but case 4
-             * retains its height until the first normal-width page begins. */
-            if (!g_page_pending && mp_engine_supports_strip_accumulation() &&
+             * retains its height until the first normal-width page begins.
+             * Applies to every engine now, not just PWG/URF - see the
+             * SPECIAL_NOFORMFEED defer check in case 4. */
+            if (!g_page_pending &&
                 (g_current_special & SPECIAL_NOFORMFEED) &&
                 mp_is_tiny_leading_auxiliary_band((ULONG)x)) {
                 g_discard_aux_band = TRUE;
@@ -2002,9 +2318,9 @@ LONG PRT_STDARGS Render(LONG ct, LONG x, LONG y, LONG status, ...)
 
             /* Wordworth can also issue narrow graphics dumps under a page
              * already being accumulated. They cannot be appended as
-             * horizontal rows to the full-width PWG raster, so ignore their
+             * horizontal rows to the full-width raster, so ignore their
              * pixels but retain their height as page-boundary evidence. */
-            if (g_page_pending && mp_engine_supports_strip_accumulation() &&
+            if (g_page_pending &&
                 (g_current_special & SPECIAL_NOFORMFEED) &&
                 mp_is_tiny_auxiliary_band(g_accum_width, (ULONG)x)) {
                 g_discard_aux_band = TRUE;
@@ -2021,8 +2337,7 @@ LONG PRT_STDARGS Render(LONG ct, LONG x, LONG y, LONG status, ...)
             /* Same width as the page currently being accumulated -> this
              * is another band of it, not a new page - matches whatever
              * case 4 decided last time it saw SPECIAL_NOFORMFEED (below). */
-            continuation = g_page_pending && mp_engine_supports_strip_accumulation() &&
-                           (ULONG)x == g_accum_width;
+            continuation = g_page_pending && (ULONG)x == g_accum_width;
 
             if (g_page_pending && !continuation) {
                 /* A page was left pending without ever getting a
@@ -2175,9 +2490,18 @@ LONG PRT_STDARGS Render(LONG ct, LONG x, LONG y, LONG status, ...)
                 return PDERR_BUFFERMEMORY;
             }
             encoder_height = leading_height + g_page_height;
-            if ((mp_detect_engine(&g_config) == MP_ENGINE_PWG ||
-                 mp_detect_engine(&g_config) == MP_ENGINE_URF) &&
-                (g_current_special & SPECIAL_NOFORMFEED)) {
+            /* Every engine needs this media-derived target now, not just
+             * PWG/URF: g_page_target_height (set from media_height below,
+             * outside this block) is what mp_page_finalize()'s deferred-
+             * encoder branch pads a JPEG/PDF/PostScript strip page up to
+             * as well - see that function's comment. Bumping encoder_height
+             * itself only actually matters for PWG/URF's own
+             * mp_job_begin() call right below (sizing their real,
+             * already-growable encoder up front); a deferred engine
+             * ignores the height argument entirely at this point (see
+             * mp_job_begin()'s comment) and only cares once
+             * mp_page_finalize() reads g_page_target_height. */
+            if (g_current_special & SPECIAL_NOFORMFEED) {
                 media_height = mp_media_target_height(
                     g_config.media, g_page_width, g_config.resolution);
                 /* A physical duplex sheet's two sides must share one
@@ -2189,7 +2513,10 @@ LONG PRT_STDARGS Render(LONG ct, LONG x, LONG y, LONG status, ...)
                  * reject outright. Flooring every page's target at the
                  * tallest page this duplex job has finalized so far keeps
                  * the whole job converging on one height without ever
-                 * truncating real content - see g_duplex_max_page_height. */
+                 * truncating real content - see g_duplex_max_page_height.
+                 * mp_duplex_requested() is already FALSE for JPEG/PDF/
+                 * PostScript (none of them can declare duplex), so this
+                 * never applies to those three regardless. */
                 if (mp_duplex_requested() &&
                     g_duplex_max_page_height > media_height) {
                     media_height = g_duplex_max_page_height;
@@ -2365,12 +2692,17 @@ LONG PRT_STDARGS Render(LONG ct, LONG x, LONG y, LONG status, ...)
 
             /* SPECIAL_NOFORMFEED: "here's another band of the same page,
              * don't eject/submit yet" (RKM: "multiple graphics dump on a
-             * page oriented printer"). Only PWG and URF can stay pending
-             * across bands (see mp_job_reserve_page/mp_page_finalize) -
-             * JPEG/PDF/PostScript always finalize below exactly as before
-             * this change. */
-            if (mp_engine_supports_strip_accumulation() &&
-                (g_current_special & SPECIAL_NOFORMFEED)) {
+             * page oriented printer"). Every engine can now stay pending
+             * across bands - PWG and URF via their own growable header
+             * (mp_job_reserve_page/mp_page_finalize), JPEG/PDF/PostScript
+             * via buffering to g_job_file_accum and replaying once the
+             * true height is known (g_deferred_encoder - see
+             * mp_job_begin()'s comment). Before this, JPEG/PDF/PostScript
+             * always finalized immediately below regardless of this flag -
+             * exactly the WordWorth/FinalWriter issue (#74) this fixes:
+             * each line-height NOFORMFEED band became its own tiny,
+             * sideways-looking page. */
+            if (g_current_special & SPECIAL_NOFORMFEED) {
                 g_page_had_noformfeed = TRUE;
                 if (g_strip_current_band_short &&
                     mp_short_strip_completes_logical_page(
