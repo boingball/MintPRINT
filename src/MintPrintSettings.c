@@ -9530,12 +9530,11 @@ int main(void) {
         WA_AutoAdjust, TRUE,
         WA_Width, 520,
         WA_MinWidth, 520,
-        /* Sized to end exactly where the output box's bottom border does
-         * (OUTPUT_TOP + 81 - see the comment on OUTPUT_TOP), leaving no
-         * dead space below it - keep this in sync with OUTPUT_TOP if that
-         * ever changes again. */
-        WA_InnerHeight, 332,
-        WA_MinHeight, 332,
+        /* Keep the compact historical height. The status box is drawn
+         * inside the window and the remaining 18 pixels were unused dead
+         * space below its bottom border. */
+        WA_InnerHeight, 314,
+        WA_MinHeight, 314,
         WA_DragBar, TRUE,
         WA_DepthGadget, TRUE,
         WA_Activate, TRUE,
