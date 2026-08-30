@@ -139,7 +139,110 @@ LONG mp_config_load(struct MPConfig *cfg)
     fh = Open((CONST_STRPTR)"ENV:MintPRINT/Unit0", MODE_OLDFILE);
     if (fh) {
         source = MP_CONFIG_SOURCE_ENV;
-   ÒVÇ6R°¢f‚Ò÷Vâ‚„4ôå5Eõ5E%E"’$Tåd$3¤Ö–çE$”åBõVæ—C"ÂÔôDUôôÄDd”ÄR“°¢–b†f‚’6÷W&6RÒÕô4ôäd”uõ4õU$4UôTåd$3°¢Ð ¢–b‚f‚’&WGW&â6÷W&6S° ¢v†–ÆR„dvWG2†f‚Â…5E%E"–uö6öæf–uöÆ–æRÂ6—¦Vöb†uö6öæf–uöÆ–æR’’’°¢6öç7B6†"§fÇVS°¢$ôôÂö³°¢TÄôärã° ¢×ö6fu÷G&–ÕöVöÂ†uö6öæf–uöÆ–æR“°¢–b‚uö6öæf–uöÆ–æU³ÒÇÂuö6öæf–uöÆ–æU³ÒÓÒr2rÇÀ¢uö6öæf–uöÆ–æU³ÒÓÒs²r’6öçF–çVS° ¢–b†×ö6fu÷7F'G2†uö6öæf–uöÆ–æRÂ$„õ5CÒ"’’°¢fÇVRÒuö6öæf–uöÆ–æR²S°¢–b‡fÇVU³Ò’×ö6fuö6÷’†6frÓæ†÷7BÂ6—¦Vöb†6frÓæ†÷7B’ÂfÇVR“°¢6öçF–çVS°¢Ð ¢–b†×ö6fu÷7F'G2†uö6öæf–uöÆ–æRÂ%õ%CÒ"’’°¢fÇVRÒuö6öæf–uöÆ–æR²S°¢âÒ×ö6fu÷'6U÷VÆöær‡fÇVRÂfö²“°¢–b†ö²bbâãÒTÂbbâÃÒcSS3UTÂ’6frÓç÷'BÒ…Utõ$B–ã°¢6öçF–çVS°¢Ð ¢–b†×ö6fu÷7F'G2†uö6öæf–uöÆ–æRÂ%DƒÒ"’’°¢fÇVRÒuö6öæf–uöÆ–æR²S°¢–b‡fÇVU³ÒÓÒròr’×ö6fuö6÷’†6frÓçF‚Â6—¦Vöb†6frÓçF‚’ÂfÇVR“°¢6öçF–çVS°¢Ð ¢–b†×ö6fu÷7F'G2†uö6öæf–uöÆ–æRÂ$DT%TsÒ"’’°¢fÇVRÒuö6öæf–uöÆ–æR²c°¢6frÓæFV'VrÒ‡fÇVU³ÒÓÒsr’òdÅ4R¢E%TS°¢6öçF–çVS°¢Ð ¢–b†×ö6fu÷7F'G2†uö6öæf–uöÆ–æRÂ$´TU¤ô#Ò"’’°¢ò¢ÆVv7’Æ–3¢öÆB6öæf–w2W6VB&WFVçF–öâ2F†R6öÆRFV'Vp¢¢6öçG&öÂâ&W6W'fRF†V—"–çFVçBv†VâWw&F–ærâ¢ð¢fÇVRÒuö6öæf–uöÆ–æR²ƒ°¢6frÓæFV'VrÒ‡fÇVU³ÒÓÒsr’òdÅ4R¢E%TS°¢6öçF–çVS°¢Ð ¢–b†×ö6fu÷7F'G2†uö6öæf–uöÆ–æRÂ%$U4ôÅUD”ôãÒ"’’°¢fÇVRÒuö6öæf–uöÆ–æR²°¢âÒ×ö6fu÷'6U÷VÆöær‡fÇVRÂfö²“°¢6frÓç&W6öÇWF–öâÒ†ö²bbâÓÒcTÂ’òc¢3°¢6öçF–çVS°¢Ð ¢–b†×ö6fu÷7F'G2†uö6öæf–uöÆ–æRÂ$Tät”äSÒ"’’°¢fÇVRÒuö6öæf–uöÆ–æR²s°¢–b†×ö6fu÷7F'G2‡fÇVRÂ'vr×&7FW""’bb×ö6fuöÆVâ‡fÇVR’ÓÒ’°¢×ö6fuö6÷’†6frÓæVæv–æRÂ6—¦Vöb†6frÓæVæv–æR’Â'vr×&7FW""“°¢ÒVÇ6R–b†×ö6fu÷7F'G2‡fÇVRÂ'Fb"’bb×ö6fuöÆVâ‡fÇVR’ÓÒ2’°¢×ö6fuö6÷’†6frÓæVæv–æRÂ6—¦Vöb†6frÓæVæv–æR’Â'Fb"“°¢ÒVÇ6R–b†×ö6fu÷7F'G2‡fÇVRÂ'÷7G67&—B"’bb×ö6fuöÆVâ‡fÇVR’ÓÒ’°¢×ö6fuö6÷’†6frÓæVæv–æRÂ6—¦Vöb†6frÓæVæv–æR’Â'÷7G67&—B"“°¢ÒVÇ6R–b†×ö6fu÷7F'G2‡fÇVRÂ'W&b"’bb×ö6fuöÆVâ‡fÇVR’ÓÒ2’°¢×ö6fuö6÷’†6frÓæVæv–æRÂ6—¦Vöb†6frÓæVæv–æR’Â'W&b"“°¢ÒVÇ6R°¢×ö6fuö6÷’†6frÓæVæv–æRÂ6—¦Vöb†6frÓæVæv–æR’Â&§Vr"“°¢Ð¢6öçF–çVS°¢Ð ¢–b†×ö6fu÷7F'G2†uö6öæf–uöÆ–æRÂ$ÔTD”Ò"’’°¢fÇVRÒuö6öæf–uöÆ–æR²c°¢–b‡fÇVU³Ò’×ö6fuö6÷’†6frÓæÖVF–Â6—¦Vöb†6frÓæÖVF–’ÂfÇVR“°¢6öçF–çVS°¢Ð¢–b†×ö6fu÷7F'G2†uö6öæf–uöÆ–æRÂ%4õU$4SÒ"’’°¢fÇVRÒuö6öæf–uöÆ–æR²s°¢–b‡fÇVU³Ò’×ö6fuö6÷’†6frÓç6÷W&6RÂ6—¦Vöb†6frÓç6÷W&6R’ÂfÇVR“°¢6öçF–çVS°¢Ð¢–b†×ö6fu÷7F'G2†uö6öæf–uöÆ–æRÂ$4ôÄõ#Ò"’’°¢fÇVRÒuö6öæf–uöÆ–æR²c°¢–b‡fÇVU³Ò’×ö6fuö6÷’†6frÓæ6öÆ÷"Â6—¦Vöb†6frÓæ6öÆ÷"’ÂfÇVR“°¢6öçF–çVS°¢Ð¢–b†×ö6fu÷7F'G2†uö6öæf–uöÆ–æRÂ%TÄ•E“Ò"’’°¢fÇVRÒuö6öæf–uöÆ–æR²ƒ°¢–b‡fÇVU³Ò’×ö6fuö6÷’†6frÓçVÆ—G’Â6—¦Vöb†6frÓçVÆ—G’’ÂfÇVR“°¢6öçF–çVS°¢Ð¢–b†×ö6fu÷7F'G2†uö6öæf–uöÆ–æRÂ%44Ä”äsÒ"’’°¢fÇVRÒuö6öæf–uöÆ–æR²ƒ°¢–b‡fÇVU³Ò’×ö6fuö6÷’†6frÓç66Æ–ærÂ6—¦Vöb†6frÓç66Æ–ær’ÂfÇVR“°¢6öçF–çVS°¢Ð¢–b†×ö6fu÷7F'G2†uö6öæf–uöÆ–æRÂ%4”DU3Ò"’’°¢fÇVRÒuö6öæf–uöÆ–æR²c°¢–b‚†×ö6fu÷7F'G2‡fÇVRÂ&öæR×6–FVB"’b`¢×ö6fuöÆVâ‡fÇVR’ÓÒ’’ÇÀ¢†×ö6fu÷7F'G2‡fÇVRÂ'Gvò×6–FVBÖÆöærÖVFvR"’b`¢×ö6fuöÆVâ‡fÇVR’ÓÒ’’ÇÀ¢†×ö6fu÷7F'G2‡fÇVRÂ'Gvò×6–FVB×6†÷'BÖPdge") &&
+    } else {
+        fh = Open((CONST_STRPTR)"ENVARC:MintPRINT/Unit0", MODE_OLDFILE);
+        if (fh) source = MP_CONFIG_SOURCE_ENVARC;
+    }
+
+    if (!fh) return source;
+
+    while (FGets(fh, (STRPTR)g_config_line, sizeof(g_config_line))) {
+        const char *value;
+        BOOL ok;
+        ULONG n;
+
+        mp_cfg_trim_eol(g_config_line);
+        if (!g_config_line[0] || g_config_line[0] == '#' ||
+            g_config_line[0] == ';') continue;
+
+        if (mp_cfg_starts(g_config_line, "HOST=")) {
+            value = g_config_line + 5;
+            if (value[0]) mp_cfg_copy(cfg->host, sizeof(cfg->host), value);
+            continue;
+        }
+
+        if (mp_cfg_starts(g_config_line, "PORT=")) {
+            value = g_config_line + 5;
+            n = mp_cfg_parse_ulong(value, &ok);
+            if (ok && n >= 1UL && n <= 65535UL) cfg->port = (UWORD)n;
+            continue;
+        }
+
+        if (mp_cfg_starts(g_config_line, "PATH=")) {
+            value = g_config_line + 5;
+            if (value[0] == '/') mp_cfg_copy(cfg->path, sizeof(cfg->path), value);
+            continue;
+        }
+
+        if (mp_cfg_starts(g_config_line, "DEBUG=")) {
+            value = g_config_line + 6;
+            cfg->debug = (value[0] == '0') ? FALSE : TRUE;
+            continue;
+        }
+
+        if (mp_cfg_starts(g_config_line, "KEEPJOB=")) {
+            /* Legacy alias: old configs used retention as the sole debug
+             * control. Preserve their intent when upgrading. */
+            value = g_config_line + 8;
+            cfg->debug = (value[0] == '0') ? FALSE : TRUE;
+            continue;
+        }
+
+        if (mp_cfg_starts(g_config_line, "RESOLUTION=")) {
+            value = g_config_line + 11;
+            n = mp_cfg_parse_ulong(value, &ok);
+            cfg->resolution = (ok && n == 600UL) ? 600 : 300;
+            continue;
+        }
+
+        if (mp_cfg_starts(g_config_line, "ENGINE=")) {
+            value = g_config_line + 7;
+            if (mp_cfg_starts(value, "pwg-raster") && mp_cfg_len(value) == 10) {
+                mp_cfg_copy(cfg->engine, sizeof(cfg->engine), "pwg-raster");
+            } else if (mp_cfg_starts(value, "pdf") && mp_cfg_len(value) == 3) {
+                mp_cfg_copy(cfg->engine, sizeof(cfg->engine), "pdf");
+            } else if (mp_cfg_starts(value, "postscript") && mp_cfg_len(value) == 10) {
+                mp_cfg_copy(cfg->engine, sizeof(cfg->engine), "postscript");
+            } else if (mp_cfg_starts(value, "urf") && mp_cfg_len(value) == 3) {
+                mp_cfg_copy(cfg->engine, sizeof(cfg->engine), "urf");
+            } else {
+                mp_cfg_copy(cfg->engine, sizeof(cfg->engine), "jpeg");
+            }
+            continue;
+        }
+
+        if (mp_cfg_starts(g_config_line, "MEDIA=")) {
+            value = g_config_line + 6;
+            if (value[0]) mp_cfg_copy(cfg->media, sizeof(cfg->media), value);
+            continue;
+        }
+        if (mp_cfg_starts(g_config_line, "SOURCE=")) {
+            value = g_config_line + 7;
+            if (value[0]) mp_cfg_copy(cfg->source, sizeof(cfg->source), value);
+            continue;
+        }
+        if (mp_cfg_starts(g_config_line, "COLOR=")) {
+            value = g_config_line + 6;
+            if (value[0]) mp_cfg_copy(cfg->color, sizeof(cfg->color), value);
+            continue;
+        }
+        if (mp_cfg_starts(g_config_line, "QUALITY=")) {
+            value = g_config_line + 8;
+            if (value[0]) mp_cfg_copy(cfg->quality, sizeof(cfg->quality), value);
+            continue;
+        }
+        if (mp_cfg_starts(g_config_line, "SCALING=")) {
+            value = g_config_line + 8;
+            if (value[0]) mp_cfg_copy(cfg->scaling, sizeof(cfg->scaling), value);
+            continue;
+        }
+        if (mp_cfg_starts(g_config_line, "SIDES=")) {
+            value = g_config_line + 6;
+            if ((mp_cfg_starts(value, "one-sided") &&
+                 mp_cfg_len(value) == 9) ||
+                (mp_cfg_starts(value, "two-sided-long-edge") &&
+                 mp_cfg_len(value) == 19) ||
+                (mp_cfg_starts(value, "two-sided-short-edge") &&
                  mp_cfg_len(value) == 20)) {
                 mp_cfg_copy(cfg->sides, sizeof(cfg->sides), value);
             }
