@@ -55,6 +55,24 @@ int mp_is_tiny_auxiliary_band(unsigned long page_width,
  * classifier limited to widths that cannot plausibly be a printable page. */
 int mp_is_tiny_leading_auxiliary_band(unsigned long band_width);
 
+/* Final Writer 97 can trim every SPECIAL_NOFORMFEED graphics band to the
+ * width actually used by that band instead of repeating one fixed page
+ * width. A narrower real band therefore still belongs on the established
+ * page canvas. Permit a slightly wider band too, covering printer.device
+ * rounding (the real trace varies 2176 -> 2179), but reject tiny control
+ * dumps and substantial width increases so a genuine page/orientation
+ * change still takes the normal new-page path. */
+int mp_strip_band_can_continue(unsigned long page_width,
+                               unsigned long band_width);
+
+/* Choose the stable horizontal canvas for a new strip page. Once a
+ * variable-width producer has established a page width, a later page can
+ * begin with a shorter first line (Final Writer's second test page starts
+ * at 2164 after page one established 2176) without changing the physical
+ * page geometry. A substantial width increase establishes a new canvas. */
+unsigned long mp_strip_canvas_width(unsigned long reference_width,
+                                    unsigned long first_band_width);
+
 /* Decide whether the logical vertical extent accumulated under
  * SPECIAL_NOFORMFEED has reached the configured physical media height.
  * Auxiliary dumps are not written into the full-width PWG raster, but their
