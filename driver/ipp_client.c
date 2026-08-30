@@ -118,7 +118,13 @@ static LONG mp_recv_with_timeout(int sockfd, char *buf, ULONG cap,
 
 extern struct ExecBase *SysBase;
 extern struct DosLibrary *DOSBase;
-struct Library *SocketBase = NULL;
+/* extern, not defined here: this file links into both the driver build
+ * (driver_core.c owns the real definition, alongside SysBase/DOSBase) and
+ * MintPrintSettings.c (which already has its own, from its Query/Discover
+ * networking code, predating this file's addition to the GUI build for
+ * the Spooler window's Retry/Reprint) - two non-extern definitions of the
+ * same global in one link would collide. */
+extern struct Library *SocketBase;
 
 BOOL mp_ipp_socket_available(void)
 {

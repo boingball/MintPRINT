@@ -431,6 +431,28 @@ Debug's own T: naming in @{" Troubleshooting " LINK "Troubleshooting"}
 are unaffected either way - only the rendered job file's location
 changes.
 
+Choosing a hard drive Spooler unlocks a second option, "Keep Jobs
+(HDD)" - off by default. With it on, each job is kept under MPSPOOL
+after it prints (or fails to), instead of being deleted once sent,
+and given a unique name so later jobs never overwrite earlier ones.
+The "View Spool..." button opens a Spooler Management window listing
+every kept job with its current status (RENDERING, SUBMITTING, DONE,
+or FAILED with a plain-English reason - connection refused, out of
+paper, low ink, and so on) and the host:port it was sent to.
+
+    - Delete removes the selected job from the list and from disk.
+    - Retry resubmits it - to the printer named by the "Retry to:"
+      cycle gadget at the bottom of the window, which defaults to
+      whichever Unit is active in the main window but can be switched
+      to any other saved Unit profile first, letting a job that failed
+      against one printer be resent to a different one without
+      touching the main window at all.
+    - Copies... asks how many times to resubmit it, then does exactly
+      that - once per copy, each one individually recorded - since not
+      every printer this driver targets honours the IPP copies
+      attribute.
+    - Refresh rescans MPSPOOL for the latest status of every job.
+
 @{" Back to Contents " LINK "Main"}
 @endnode
 

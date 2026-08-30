@@ -19,6 +19,7 @@
 #include <proto/dos.h>
 #include <dos/dos.h>
 #include <dos/dosextens.h> // for struct DosList/LDF_DEVICES (Spooler HDD detection)
+#include <exec/lists.h> // for struct List/struct Node (Spooler job LISTVIEW_KIND)
 #include <dos/dostags.h> // for SYS_Asynch (SystemTags)
 
 /* The H (hidden) protection bit - Protect's HSPARWED flags, present since
@@ -54,6 +55,8 @@ typedef long ssize_t;
 #include "http_response.h"
 #include "dpi_options.h"
 #include "media_size.h"
+#include "config.h"
+#include "ipp_client.h"
 #include "ipp_enum.h"
 #include "lodepng.h"
 
@@ -112,6 +115,23 @@ extern struct ExecBase *SysBase;
 #define GAD_RESOLUTION 18
 #define GAD_SIDES 19
 #define GAD_SPOOLER 20
+#define GAD_SPOOL_KEEP 21
+#define GAD_VIEW_SPOOL 22
+
+/* Spooler management window gadget IDs (separate window/gadget list, like
+ * the discovery selection dialog's GAD_DISC_* above). */
+#define GAD_SPOOL_JOB_LIST 1
+#define GAD_SPOOL_REFRESH   2
+#define GAD_SPOOL_DELETE    3
+#define GAD_SPOOL_CLOSE     4
+#define GAD_SPOOL_RETRY     5
+#define GAD_SPOOL_COPIES    6
+#define GAD_SPOOL_UNIT      7
+
+/* Copies dialog gadget IDs (separate window/gadget list again). */
+#define GAD_SPOOL_COPIES_FIELD  1
+#define GAD_SPOOL_COPIES_OK     2
+#define GAD_SPOOL_COPIES_CANCEL 3
 
 // Discovery selection dialog gadget IDs (separate window/gadget list)
 #define GAD_DISC_CYCLE  1
@@ -147,19 +167,20 @@ static struct MPTestPrintJob test_print_job;
 // switchable GUI-side profiles (e.g. for a second/third network printer).
 #define MAX_UNITS 8
 
-/* A few pixels below the Test Print/Save/Exit row (198+12 tall) for even
- * spacing - see WA_InnerHeight in main() for why raising this also raises
- * that: the box's bottom border sits at OUTPUT_TOP + 81 (MAX_OUTPUT_LINES
- * lines at 10px, see below, plus the 2px border), and WA_InnerHeight is
- * kept equal to that so the box's border sits flush with the window's own
- * bottom edge instead of leaving dead space below it. */
-#define OUTPUT_TOP     232 // Below Test Print / Save / Exit row
+/* A few pixels below the Test Print/Debug/Save/Exit row (216+12 tall,
+ * itself 4px below Keep Spooled Jobs/View Spooler at 198) for even spacing - see
+ * WA_InnerHeight in main() for why raising this also raises that: the
+ * box's bottom border sits at OUTPUT_TOP + 81 (MAX_OUTPUT_LINES lines at
+ * 10px, see below, plus the 2px border), and WA_InnerHeight is kept equal
+ * to that so the box's border sits flush with the window's own bottom
+ * edge instead of leaving dead space below it. */
+#define OUTPUT_TOP     232 // Below Test Print / Debug / Save / Exit row
 #define OUTPUT_LEFT    10
 #define OUTPUT_RIGHT   (window->Width - 20)
 
 // Define the USED macro for GCC
 #define USED __attribute__((used))
-#define MINTPRINT_SETTINGS_VERSION "1.2.7"
+#define MINTPRINT_SETTINGS_VERSION "1.3.0"
 #define MINTPRINT_DRIVER_DEST ((CONST_STRPTR)"DEVS:Printers/MintPRINT")
 
 /* MintPrint Settings now ships as a single drawer containing both bundled
@@ -185,7 +206,7 @@ static BOOL mp_read_driver_version(CONST_STRPTR path, struct MPDriverVersion *ou
 
 /* Visible both to AmigaOS's Version command and in the About requester. */
 static const char USED mintprint_version[] =
-    "$VER: MintPrintSettings " MINTPRINT_SETTINGS_VERSION " (27.08.2026)";
+    "$VER: MintPrintSettings " MINTPRINT_SETTINGS_VERSION " (29.08.2026)";
 
 // Simple extension check
 BOOL has_extension(const char *filename, const char *ext) {
@@ -198,22 +219,18 @@ BOOL has_extension(const char *filename, const char *ext) {
  *
  * The "$STACK:" cookie is useful on newer AmigaOS startup code, but classic
  * m68k AmigaOS programs built with the GCC/libnix runtime use the __stack
- * variable.  This used to be 384 KiB, sized generously for the Settings
- * Query path's parsing / GadTools / bsdsocket call chains. The 256 KiB IPP
- * response buffers those call chains use are heap allocations now (not
- * stack), and the largest remaining per-frame users (encoders, PNG icon
- * decode) measure under 1 KiB each, so 128 KiB should carry the same
- * margin with room to spare. Exercise Query, the PNG printer icon,
- * Discover and Test Print on real AmigaOS 3.1 and 3.2 hardware before
- * trusting this on a release build; do not drop it further (e.g. to 64
- * KiB) without the same real-hardware exercise repeated at the new size.
+ * variable. Keep a 256 KiB margin: discovery/add chains through
+ * parsing, profile migration, cache/icon handling, and GadTools requesters;
+ * reducing this to 128 KiB caused a delayed 81000005 memory-list failure on
+ * classic OS 2.x testing. Exercise Query, Discover, Add and Test Print on
+ * real AmigaOS hardware before reducing this again.
  *
- * 128 KiB = 131072 bytes.
+ * 256 KiB = 262144 bytes.
  */
-unsigned long __stack = 131072UL;
+unsigned long __stack = 262144UL;
 
 /* Keep the cookie as harmless metadata for newer startup code too. */
-static const char USED min_stack[] = "$STACK:131072";
+static const char USED min_stack[] = "$STACK:262144";
 
 // Structure to map media sizes to trays (Updated to include tray name and medianame)
 struct MediaTrayMap {
@@ -433,6 +450,7 @@ static int mp_dpi_active_index(int dpi) {
 extern char driver_sides_buffer[MAX_ATTR_LEN];
 extern char driver_engine_buffer[32];
 extern char driver_spool_buffer[MAX_ATTR_LEN];
+extern BOOL driver_spool_keep;
 
 static BOOL mp_supported_side(const char *value) {
     int i;
@@ -483,6 +501,15 @@ static ULONG mp_spool_active_index(void) {
             return (ULONG)i;
     }
     return 0;
+}
+
+/* "Keep spooled jobs" only means anything once job files actually spool
+ * to a real drive - RAM keeps MintPRINT's original flat, always-
+ * overwritten behaviour regardless (see driver_core.c's mp_job_begin()),
+ * so the tickbox is disabled and forced off whenever driver_spool_buffer
+ * is empty or "RAM". */
+static BOOL mp_spool_keep_available(void) {
+    return driver_spool_buffer[0] && strcmp(driver_spool_buffer, "RAM") != 0;
 }
 
 /* Populates the Spooler cycle gadget's choices: "RAM" (index 0, always
@@ -692,6 +719,12 @@ char driver_sides_buffer[MAX_ATTR_LEN] = "";
  * with the rest of the Spooler gadget's static storage) for how its
  * choices are populated. */
 char driver_spool_buffer[MAX_ATTR_LEN] = "RAM";
+/* Keeps every hard-drive-spooled job under a unique retained name (see
+ * driver_core.c's mp_job_begin()) for the Spooler management window to
+ * list. Only meaningful - and only enabled in the GUI - when
+ * driver_spool_buffer names a real device; see mp_spool_keep_available()
+ * and its GAD_SPOOL_KEEP gating below. */
+BOOL driver_spool_keep = FALSE;
 int current_unit_index = 0;
 char printer_make_model[128] = "";
 char printer_icon_uri[256] = "";
@@ -699,10 +732,9 @@ char printer_icon_uri[256] = "";
 #define MP_PRINTER_ICON_LEFT  400
 /* TOP/SIZE fill the full gap between the ink/toner panel above (its
  * bottom row is MP_MARKER_AREA_BOTTOM, 115) and the Sides/Quality row
- * below (TopEdge 153) - 37 is the largest size that fits both exactly
- * flush with zero overlap; growing it further means moving one of those
- * two neighbours too. */
-#define MP_PRINTER_ICON_TOP   110
+ * below (TopEdge 162). The artwork is deliberately kept above that row
+ * on the taller-font OS 2.x screens. */
+#define MP_PRINTER_ICON_TOP   119
 #define MP_PRINTER_ICON_SIZE   42
 #define MP_PRINTER_ICON_TEMP  "T:MintPRINT-printer-icon.img"
 #define MP_PRINTER_ICON_PIXELS (MP_PRINTER_ICON_SIZE * MP_PRINTER_ICON_SIZE)
@@ -1194,6 +1226,9 @@ static BOOL write_driver_config_file(CONST_STRPTR filename) {
     FPuts(file, line);
     snprintf(line, sizeof(line), "SPOOL=%s\n", driver_spool_buffer);
     FPuts(file, line);
+    snprintf(line, sizeof(line), "SPOOL_KEEP=%d\n",
+             mp_spool_keep_available() && driver_spool_keep ? 1 : 0);
+    FPuts(file, line);
     snprintf(line, sizeof(line), "PWG_SHEET_BACK=%s\n", pwg_sheet_back_value);
     FPuts(file, line);
     snprintf(line, sizeof(line), "MODEL=%s\n", printer_make_model);
@@ -1272,6 +1307,7 @@ static BOOL load_driver_config(void) {
     driver_scaling_buffer[0] = '\0';
     driver_sides_buffer[0] = '\0';
     strcpy(driver_spool_buffer, "RAM");
+    driver_spool_keep = FALSE;
     strcpy(pwg_sheet_back_value, "normal");
     printer_make_model[0] = '\0';
 
@@ -1367,6 +1403,8 @@ static BOOL load_driver_config(void) {
                         sizeof(driver_spool_buffer) - 1);
                 driver_spool_buffer[sizeof(driver_spool_buffer) - 1] = '\0';
             }
+        } else if (strncmp(line, "SPOOL_KEEP=", 11) == 0) {
+            driver_spool_keep = (line[11] == '0') ? FALSE : TRUE;
         } else if (strncmp(line, "PWG_SHEET_BACK=", 15) == 0) {
             const char *sheet_back = line + 15;
             if (strcmp(sheet_back, "normal") == 0 ||
@@ -1725,6 +1763,28 @@ static void mp_set_test_print_enabled(struct Window *win, BOOL enabled)
     if (g && win) {
         GT_SetGadgetAttrs(g, win, NULL,
                           GA_Disabled, enabled ? FALSE : TRUE,
+                          TAG_DONE);
+    }
+}
+
+/* Keeps the Keep Spooled Jobs checkbox's enabled/ticked state in step
+ * with the Spooler cycle - called right after driver_spool_buffer
+ * changes (GAD_SPOOLER's handler below) and once at startup
+ * (apply_driver_config_to_gadgets()). Forces driver_spool_keep off the
+ * moment Spooler no longer names a real device, rather than leaving a
+ * stale tick nobody can see or clear on a disabled gadget - see
+ * mp_spool_keep_available(). */
+static void mp_update_spool_keep_gadget(struct Window *win)
+{
+    struct Gadget *g = find_gadget_by_id(GAD_SPOOL_KEEP);
+    BOOL available = mp_spool_keep_available();
+
+    if (!available) driver_spool_keep = FALSE;
+
+    if (g && win) {
+        GT_SetGadgetAttrs(g, win, NULL,
+                          GA_Disabled, (ULONG)(available ? FALSE : TRUE),
+                          GTCB_Checked, (ULONG)(available && driver_spool_keep),
                           TAG_DONE);
     }
 }
@@ -2155,6 +2215,8 @@ static void apply_driver_config_to_gadgets(struct Window *win) {
         GT_SetGadgetAttrs(g, win, NULL,
                           GTCY_Active, mp_spool_active_index(),
                           TAG_DONE);
+
+    mp_update_spool_keep_gadget(win);
 
     mp_update_model_display(win);
 
@@ -3610,7 +3672,7 @@ int load_ilbm_to_rgb(const char *filename, unsigned char **rgb_out, int *width_o
  * GadTools gadget: it is purely an explanatory picture for the Sides cycle.
  * ------------------------------------------------------------------ */
 #define MP_SIDES_HINT_LEFT       460
-#define MP_SIDES_HINT_TOP        117
+#define MP_SIDES_HINT_TOP        126
 #define MP_SIDES_HINT_SIZE        32
 #define MP_SIDES_HINT_MAX_PENS    32
 #define MP_SIDES_HINT_COUNT        3
@@ -3792,6 +3854,188 @@ static void mp_fill_screen_palette32(struct ColorMap *cm, int pen_count,
     }
 }
 
+/* cm->Count only names a real palette size on a "V38 compatible" ColorMap
+ * (cm->Type != 0 - graphics/view.h's own comment on that field: Type == 0
+ * means the older, simpler V1.2/V1.3-compatible ColorMap layout). A Type
+ * == 0 ColorMap - still seen from some OS2.0/2.04-era graphics.library
+ * builds - predates the Count field's meaning, so trusting it there feeds
+ * mp_fill_screen_palette32() and every nearest-pen search a pen_count
+ * that does not match the screen's real, much smaller pen table -
+ * anything at or past the true end of that table is whatever memory
+ * happens to sit there, and a search that picks one of those phantom
+ * entries returns a pen index the hardware cannot actually display (a
+ * 4-bitplane screen only ever has 16 real pens; SetAPen() with a larger
+ * index does not fail, it just displays *some* real pen picked by
+ * whichever low bits survive). Falling back to the bitmap's own plane
+ * count sidesteps this entirely - BitMap->Depth has been a stable,
+ * always-valid field since Kickstart 1.0, unlike Count's meaning here. */
+static int mp_screen_pen_count(struct Screen *scr, struct ColorMap *cm) {
+    int count = (cm->Type != 0) ? (int)cm->Count : 0;
+
+    if (count <= 0) {
+        count = (scr && scr->RastPort.BitMap)
+                    ? (1 << scr->RastPort.BitMap->Depth) : 16;
+    }
+    if (count > 256) count = 256;
+    if (count < 1) count = 1;
+    return count;
+}
+
+/* A pixel counts as "near-neutral" (grey-ish rather than a real hue) when
+ * its RGB channels are all within this many levels (0-255 scale) of each
+ * other - loose enough for a slightly warm/cool grey, tight enough to
+ * exclude a genuinely saturated colour. Used below to decide, per pixel,
+ * whether to prefer mp_low_colour_gray_pen()'s neutral-biased pen search
+ * over the plain nearest-colour one. */
+#define MP_NEUTRAL_SAT_THRESHOLD 32
+
+/* A nearest-colour lookup is useful on a 32+ colour screen, but it produces
+ * harsh, misleading colour blocks on a 16-colour Workbench palette. Use the
+ * closest-luminance, least-saturated existing pen there instead. This keeps
+ * printer artwork effectively grayscale without changing Workbench's palette
+ * or relying on colour pens such as blue and yellow. */
+static UBYTE mp_low_colour_gray_pen(const ULONG *palette, int pen_count,
+                                    UBYTE r, UBYTE g, UBYTE b) {
+    int i;
+    ULONG luminance = (299UL * r + 587UL * g + 114UL * b) / 1000UL;
+    ULONG best_score = 0xffffffffUL;
+    UBYTE best = 0;
+
+    for (i = 0; i < pen_count; ++i) {
+        LONG pr = (LONG)((palette[i * 3 + 0] >> 24) & 0xffUL);
+        LONG pg = (LONG)((palette[i * 3 + 1] >> 24) & 0xffUL);
+        LONG pb = (LONG)((palette[i * 3 + 2] >> 24) & 0xffUL);
+        LONG minimum = pr < pg ? pr : pg;
+        LONG maximum = pr > pg ? pr : pg;
+        ULONG palette_luminance;
+        LONG level_delta;
+        ULONG score;
+
+        if (pb < minimum)
+            minimum = pb;
+        if (pb > maximum)
+            maximum = pb;
+        palette_luminance = (299UL * (ULONG)pr +
+                             587UL * (ULONG)pg +
+                             114UL * (ULONG)pb) / 1000UL;
+        level_delta = (LONG)palette_luminance - (LONG)luminance;
+        if (level_delta < 0)
+            level_delta = -level_delta;
+        /* Chroma is weighted heavily so neutral pens win over similarly
+         * bright saturated pens in the old 16-colour Workbench palette. */
+        score = (ULONG)level_delta + (ULONG)(maximum - minimum) * 8UL;
+        if (score < best_score) {
+            best_score = score;
+            best = (UBYTE)i;
+        }
+    }
+    return best;
+}
+
+/* mp_low_colour_gray_pen() above always picks one flat pen - the single
+ * closest match. On a 16-colour Workbench theme that has no pen truly
+ * close to a given source luminance (a "loud" colour scheme, not
+ * predominantly neutral tones), that one flat pen can still look
+ * noticeably off, and OS2.0/2.1 predates graphics.library V39's
+ * ObtainBestPenA(), so there is no way to allocate a custom pen with the
+ * exact grey this driver wants - only whichever pens the running
+ * Workbench screen already has. Ordered dithering between the two
+ * existing pens whose luminance brackets the source pixel - alternating
+ * them in a fixed screen-position pattern - reads as a smoother, better-
+ * matched intermediate tone at normal viewing distance than either pen
+ * alone, the classic Amiga technique for photographic content on a
+ * constrained palette. */
+#define MP_NEUTRAL_RAMP_MAX 32
+/* Looser than MP_NEUTRAL_SAT_THRESHOLD (which gates a single best-match
+ * pick) - a dither ramp needs several usable rungs, not just the one
+ * closest pen, so this admits mildly-tinted pens too rather than only
+ * true greys. */
+#define MP_NEUTRAL_RAMP_SAT_THRESHOLD 48
+
+/* Scans the palette once (pen_count is at most 256 - cheap, done once per
+ * redraw, not per pixel) for its own near-neutral pens and returns them
+ * insertion-sorted by luminance into ramp_pens/ramp_luma, ready for
+ * mp_dither_neutral_pen(). Returns the count found (0 if this palette
+ * has no near-neutral pen at all - some Workbench colour themes
+ * genuinely don't; callers fall back to mp_low_colour_gray_pen() there). */
+static int mp_build_neutral_pen_ramp(const ULONG *palette, int pen_count,
+                                     UBYTE *ramp_pens, UBYTE *ramp_luma) {
+    int count = 0;
+    int i;
+
+    for (i = 0; i < pen_count && count < MP_NEUTRAL_RAMP_MAX; ++i) {
+        LONG pr = (LONG)((palette[i * 3 + 0] >> 24) & 0xffUL);
+        LONG pg = (LONG)((palette[i * 3 + 1] >> 24) & 0xffUL);
+        LONG pb = (LONG)((palette[i * 3 + 2] >> 24) & 0xffUL);
+        LONG p_max = (pr > pg) ? pr : pg;
+        LONG p_min = (pr < pg) ? pr : pg;
+        UBYTE luma;
+        int j;
+
+        if (pb > p_max) p_max = pb;
+        if (pb < p_min) p_min = pb;
+        if (p_max - p_min > MP_NEUTRAL_RAMP_SAT_THRESHOLD)
+            continue;
+
+        luma = (UBYTE)((299UL * (ULONG)pr + 587UL * (ULONG)pg +
+                        114UL * (ULONG)pb) / 1000UL);
+
+        j = count;
+        while (j > 0 && ramp_luma[j - 1] > luma) {
+            ramp_luma[j] = ramp_luma[j - 1];
+            ramp_pens[j] = ramp_pens[j - 1];
+            --j;
+        }
+        ramp_luma[j] = luma;
+        ramp_pens[j] = (UBYTE)i;
+        ++count;
+    }
+    return count;
+}
+
+/* Classic 4x4 Bayer ordered-dither matrix (values 0-15). */
+static const UBYTE mp_bayer4x4[4][4] = {
+    {  0,  8,  2, 10 },
+    { 12,  4, 14,  6 },
+    {  3, 11,  1,  9 },
+    { 15,  7, 13,  5 }
+};
+
+/* Picks a pen for (r,g,b) from a ramp built by mp_build_neutral_pen_ramp()
+ * (ramp_pens/ramp_luma, ramp_count entries, ascending luminance),
+ * dithering between the two ramp entries bracketing this pixel's own
+ * luminance using screen position (x,y) - not image-local coordinates,
+ * so the pattern stays consistent if two dithered patches ever sit
+ * side by side - rather than snapping to whichever single one is
+ * closest. Falls back to the nearest single ramp entry when the source
+ * luminance is at or past either end of the ramp, where there is nothing
+ * to dither between anyway. */
+static UBYTE mp_dither_neutral_pen(const UBYTE *ramp_pens,
+                                   const UBYTE *ramp_luma, int ramp_count,
+                                   UBYTE r, UBYTE g, UBYTE b, int x, int y) {
+    ULONG luma = (299UL * r + 587UL * g + 114UL * b) / 1000UL;
+    int lo, hi;
+    UBYTE lo_luma, hi_luma, threshold;
+    UWORD frac;
+
+    if (luma <= ramp_luma[0]) return ramp_pens[0];
+    if (luma >= ramp_luma[ramp_count - 1]) return ramp_pens[ramp_count - 1];
+
+    for (hi = 1; hi < ramp_count; ++hi) {
+        if (ramp_luma[hi] >= luma) break;
+    }
+    lo = hi - 1;
+
+    lo_luma = ramp_luma[lo];
+    hi_luma = ramp_luma[hi];
+    if (hi_luma == lo_luma) return ramp_pens[lo];
+
+    threshold = mp_bayer4x4[y & 3][x & 3];
+    frac = (UWORD)(((ULONG)(luma - lo_luma) * 15UL) /
+                   (ULONG)(hi_luma - lo_luma));
+    return (frac > threshold) ? ramp_pens[hi] : ramp_pens[lo];
+}
+
 static void mp_draw_sides_hint(void) {
     struct MPSidesHintImage *image;
     ULONG screen_palette[3 * 256];
@@ -3799,6 +4043,9 @@ static void mp_draw_sides_hint(void) {
     struct RastPort *rp;
     int index;
     int screen_pen_count;
+    UBYTE ramp_pens[MP_NEUTRAL_RAMP_MAX];
+    UBYTE ramp_luma[MP_NEUTRAL_RAMP_MAX];
+    int ramp_count;
     int draw_w, draw_h;
     int x, y;
     int left = MP_SIDES_HINT_LEFT;
@@ -3809,14 +4056,13 @@ static void mp_draw_sides_hint(void) {
 
     rp = window->RPort;
     cm = screen->ViewPort.ColorMap;
-    if (!cm || cm->Count == 0)
+    if (!cm)
         return;
 
-    screen_pen_count = (int)cm->Count;
-    if (screen_pen_count > 256)
-        screen_pen_count = 256;
+    screen_pen_count = mp_screen_pen_count(screen, cm);
     mp_fill_screen_palette32(cm, screen_pen_count, screen_palette);
-
+    ramp_count = mp_build_neutral_pen_ramp(screen_palette, screen_pen_count,
+                                           ramp_pens, ramp_luma);
     SetDrMd(rp, JAM1);
     SetAPen(rp, 0);
     RectFill(rp, left - 1, top - 1,
@@ -3848,7 +4094,35 @@ static void mp_draw_sides_hint(void) {
         LONG last_pen = -1;
         for (x = 0; x < draw_w; ++x) {
             int pixel = y * image->width + x;
+            UBYTE sr = image->rgb[pixel * 3 + 0];
+            UBYTE sg = image->rgb[pixel * 3 + 1];
+            UBYTE sb = image->rgb[pixel * 3 + 2];
+            UBYTE smax = (sr > sg) ? sr : sg;
+            UBYTE smin = (sr < sg) ? sr : sg;
             UBYTE pen = image->pens[pixel];
+
+            if (sb > smax) smax = sb;
+            if (sb < smin) smin = sb;
+
+            /* Per source pixel, not per screen: a screen's own advertised
+             * colour count/depth turned out not to be a reliable signal
+             * for whether it actually offers a smooth grey ramp (see
+             * mp_screen_pen_count()'s comment on why Count itself can be
+             * unreliable) - so this only asks whether THIS pixel looks
+             * like it was meant to be grey, and if so, prefers screen
+             * pens that are too, on any screen. A source pixel that is
+             * already a real colour still gets the plain nearest-colour
+             * match above unchanged. Dithers between the ramp's two
+             * bracketing pens when there are enough of them to dither
+             * with; a palette with 0 or 1 near-neutral pens falls back
+             * to mp_low_colour_gray_pen()'s single best pick. */
+            if ((int)smax - (int)smin <= MP_NEUTRAL_SAT_THRESHOLD) {
+                pen = (ramp_count >= 2)
+                    ? mp_dither_neutral_pen(ramp_pens, ramp_luma, ramp_count,
+                                            sr, sg, sb, left + x, top + y)
+                    : mp_low_colour_gray_pen(screen_palette, screen_pen_count,
+                                             sr, sg, sb);
+            }
 
             if ((LONG)pen != last_pen) {
                 SetAPen(rp, pen);
@@ -5006,6 +5280,1108 @@ static BOOL run_discovery_selection(struct Window *parent,
     return picked;
 }
 
+/* Spooler management window: lists jobs the driver is currently tracking
+ * (see driver_core.c's mp_job_begin()/mp_write_job_status() and the
+ * MPSPOOL drawer both write into) with their live STATE and, for a failed
+ * one, why - and lets the user delete a held job, retry/reprint it, or
+ * print extra copies. */
+#define MP_SPOOL_LIST_MAX 32
+
+struct MPSpoolJobEntry {
+    struct Node node; /* must be first - GadTools ListView owns this list */
+    char job_path[MAX_ATTR_LEN + 48];
+    char status_path[MAX_ATTR_LEN + 56];
+    char basename[80]; /* job_path's filename alone, for the list label */
+    struct DateStamp date; /* status sidecar's fib_Date - sort key, newest first */
+    char state[16];
+    char reason[64];
+    char host[64]; /* HOST= from the .status sidecar - who this job targets */
+    int port;      /* PORT=, -1 if the sidecar has none (pre-1.3.0 job) */
+    char label[192]; /* node.ln_Name points here */
+};
+
+/* Kept static (not a stack local) so a Refresh - which redoes this scan
+ * in place without recursing - never risks stack growth across repeated
+ * presses. Only ever touched from the mp_spool_win_*() functions below,
+ * single-threaded, one instance of the window open at a time. */
+static struct MPSpoolJobEntry mp_spool_jobs[MP_SPOOL_LIST_MAX];
+
+/* The Spooler window's entire live state, as globals rather than one
+ * function's stack locals - process_window_events()'s main loop needs to
+ * reach all of it between messages, since the window is non-modal: it
+ * Waits on this window's UserPort signal bit alongside the main window's
+ * own (see that function), so both windows keep processing input at the
+ * same time instead of one blocking the other the way a nested modal
+ * event loop would. g_spool_win doubling as "is the window open" (NULL
+ * when it isn't) is what lets that Wait() call skip this signal bit
+ * entirely while the window is closed. */
+static struct Window *g_spool_win = NULL;
+static struct Screen *g_spool_screen = NULL;
+static APTR g_spool_vi = NULL;
+static struct Gadget *g_spool_sglist = NULL;
+static struct Gadget *g_spool_job_listview = NULL;
+static struct Gadget *g_spool_delete_gadget = NULL;
+static struct Gadget *g_spool_retry_gadget = NULL;
+static struct Gadget *g_spool_copies_gadget = NULL;
+static struct List g_spool_job_list;
+static int g_spool_count = 0;
+static ULONG g_spool_selected = 0;
+static BOOL g_spool_selection_made = FALSE;
+static int g_spool_retry_unit = -1; /* -1 = not yet defaulted to current_unit_index */
+/* -1 = not yet positioned; the window is centred the first time it opens
+ * and then keeps whatever LeftEdge/TopEdge it was last closed at (drags
+ * included), rather than recentring itself every time it is reopened. */
+static WORD g_spool_win_left = -1;
+static WORD g_spool_win_top = -1;
+
+/* Turns the numeric (error, http_status, ipp_status) triple a job's
+ * .status sidecar records (driver_core.c's mp_write_job_status(),
+ * ERROR=) into the kind of short phrase a print queue normally shows for
+ * "why did this fail". error is mp_ipp_print_document()'s
+ * (driver/ipp_client.c) own return code, naming exactly which step
+ * failed; ipp_status is only meaningful once a real IPP response came
+ * back (error -15/-16 below - see that function's own rc comments).
+ * IPP's response status alone can't distinguish "out of paper" from "out
+ * of ink" - that lives in a separate printer-state-reasons attribute
+ * this driver doesn't currently request - so 0x0504 (server-error-
+ * device-error) is reported as a hardware problem in general, not a
+ * specific cause; naming one precisely would be a guess this data
+ * doesn't support. */
+static void mp_spool_error_reason(LONG error, LONG http_status,
+                                  UWORD ipp_status, char *out, size_t out_cap)
+{
+    const char *reason;
+
+    switch (error) {
+        case 0:   reason = "OK"; break;
+        case -2:  reason = "Could not open job file"; break;
+        case -3:  reason = "Job file is empty"; break;
+        case -7:
+        case -8:  reason = "Network unavailable"; break;
+        case -9:  reason = "Invalid printer address"; break;
+        case -10: reason = "Connection refused"; break;
+        case -18: reason = "Connection timed out"; break;
+        case -11:
+        case -13: reason = "Sending job failed (connection dropped)"; break;
+        case -12: reason = "Error reading job file"; break;
+        case -14: reason = "Printer sent an invalid response"; break;
+        case -17: reason = "Printer accepted job but never responded"; break;
+        case -15:
+            if (http_status == 401 || http_status == 403)
+                reason = "Printer refused (access denied)";
+            else if (http_status == 404)
+                reason = "Printer rejected request (wrong IPP path?)";
+            else if (http_status >= 500)
+                reason = "Printer error (HTTP)";
+            else
+                reason = "Printer rejected request (HTTP)";
+            break;
+        case -16:
+            switch (ipp_status) {
+                case 0x0507: reason = "Printer busy"; break;
+                case 0x0504:
+                    reason = "Printer hardware problem (check paper/ink)";
+                    break;
+                case 0x0506: reason = "Printer not accepting jobs"; break;
+                case 0x0508: reason = "Job canceled at printer"; break;
+                default:
+                    if (ipp_status >= 0x0500) reason = "Printer error";
+                    else if (ipp_status >= 0x0400) reason = "Printer rejected job";
+                    else reason = "Printer returned an unexpected status";
+                    break;
+            }
+            break;
+        default:  reason = "Failed"; break;
+    }
+
+    strncpy(out, reason, out_cap - 1);
+    out[out_cap - 1] = '\0';
+}
+
+/* Scans <driver_spool_buffer>MPSPOOL/ for job files this driver is
+ * tracking. Each *.status sidecar names a job file (the same name minus
+ * ".status") and holds its current STATE=/ERROR= - read here so this
+ * window never needs any live connection to the driver's spool process,
+ * and still shows a job's outcome long after that process (and the print
+ * that created it) is gone. Newest first: the timestamp embedded in each
+ * job's own filename is DDMMYYHHMMSS, which does not sort correctly as a
+ * plain string across month/year boundaries (e.g. "010823" < "150723"
+ * lexicographically despite being the later date), so this sorts by each
+ * sidecar file's real fib_Date instead - a simple insertion sort, plenty
+ * for the at-most MP_SPOOL_LIST_MAX (32) entries here. list is NewList()'d
+ * and filled with jobs[0] through jobs[count-1] via AddTail(), in that
+ * sorted order, ready for GTLV_Labels. Returns the number of jobs found;
+ * 0 if the drawer doesn't exist yet, or Spooler isn't a real device. */
+static int mp_scan_spool_jobs(struct MPSpoolJobEntry *jobs, int max_jobs,
+                              struct List *list)
+{
+    char dir_path[MAX_ATTR_LEN + 16];
+    BPTR lock;
+    /* A plain stack struct, not AllocDosObject(DOS_FIB, ...): Examine()/
+     * ExNext() have taken a caller-supplied struct FileInfoBlock * since
+     * Kickstart 1.x, and a normal C local already satisfies its longword
+     * alignment - one fewer NDK symbol (DOS_FIB, a V36+ addition) to
+     * depend on. */
+    struct FileInfoBlock fib;
+    int count = 0;
+    int i;
+
+    NewList(list);
+    if (!mp_spool_keep_available()) return 0;
+
+    snprintf(dir_path, sizeof(dir_path), "%sMPSPOOL", driver_spool_buffer);
+    lock = Lock((CONST_STRPTR)dir_path, ACCESS_READ);
+    if (!lock) return 0;
+
+    if (Examine(lock, &fib)) {
+        while (count < max_jobs && ExNext(lock, &fib)) {
+            char *name = (char *)fib.fib_FileName;
+            size_t len = strlen(name);
+
+            /* fib_DirEntryType < 0 -> plain file, not a drawer. */
+            if (fib.fib_DirEntryType < 0 && len > 7 &&
+                strcmp(name + len - 7, ".status") == 0) {
+                BPTR sfh;
+                size_t blen = (len - 7 < sizeof(jobs[count].basename) - 1)
+                    ? len - 7 : sizeof(jobs[count].basename) - 1;
+
+                memcpy(jobs[count].basename, name, blen);
+                jobs[count].basename[blen] = '\0';
+                jobs[count].date = fib.fib_Date;
+
+                snprintf(jobs[count].status_path,
+                         sizeof(jobs[count].status_path),
+                         "%s/%s", dir_path, name);
+                snprintf(jobs[count].job_path, sizeof(jobs[count].job_path),
+                         "%s/%s", dir_path, jobs[count].basename);
+
+                strcpy(jobs[count].state, "UNKNOWN");
+                jobs[count].reason[0] = '\0';
+                jobs[count].host[0] = '\0';
+                jobs[count].port = -1;
+                sfh = Open((CONST_STRPTR)jobs[count].status_path,
+                          MODE_OLDFILE);
+                if (sfh) {
+                    char status[768];
+                    LONG got = Read(sfh, status, sizeof(status) - 1);
+                    char *p;
+
+                    /* Some AmigaDOS/NDK combinations are fussy about the
+                     * signed char buffer passed to FGets(). Read the small
+                     * sidecar in one bounded operation instead; this also
+                     * handles older sidecars that contain only STATE/ERROR.
+                     */
+                    if (got > 0) {
+                        status[got] = '\0';
+                        p = strstr(status, "STATE=");
+                        if (p) {
+                            char *eol = strchr(p, '\n');
+                            size_t n = eol ? (size_t)(eol - (p + 6))
+                                           : strlen(p + 6);
+                            if (n >= sizeof(jobs[count].state))
+                                n = sizeof(jobs[count].state) - 1;
+                            memcpy(jobs[count].state, p + 6, n);
+                            jobs[count].state[n] = '\0';
+                            trim_config_line(jobs[count].state);
+                        }
+                        p = strstr(status, "HOST=");
+                        if (p) {
+                            char *eol = strchr(p, '\n');
+                            size_t n = eol ? (size_t)(eol - (p + 5))
+                                           : strlen(p + 5);
+                            if (n >= sizeof(jobs[count].host))
+                                n = sizeof(jobs[count].host) - 1;
+                            memcpy(jobs[count].host, p + 5, n);
+                            jobs[count].host[n] = '\0';
+                            trim_config_line(jobs[count].host);
+                        }
+                        p = strstr(status, "PORT=");
+                        if (p) jobs[count].port = atoi(p + 5);
+                        p = strstr(status, "ERROR=");
+                        if (p) {
+                            long e = 0, h = 0;
+                            int ipp = 0;
+                            if (sscanf(p + 6, "%ld %ld %d", &e, &h, &ipp) == 3)
+                                mp_spool_error_reason(e, h, (UWORD)ipp,
+                                    jobs[count].reason,
+                                    sizeof(jobs[count].reason));
+                        }
+                    }
+                    Close(sfh);
+                }
+
+                ++count;
+            }
+        }
+    }
+
+    UnLock(lock);
+
+    /* Newest first, by fib_Date (ds_Days, then ds_Minute, then ds_Tick -
+     * each a plain increasing count, so comparing them in that order is
+     * a correct chronological compare). */
+    for (i = 1; i < count; ++i) {
+        struct MPSpoolJobEntry tmp = jobs[i];
+        int j = i - 1;
+
+        while (j >= 0 &&
+               (jobs[j].date.ds_Days < tmp.date.ds_Days ||
+                (jobs[j].date.ds_Days == tmp.date.ds_Days &&
+                 (jobs[j].date.ds_Minute < tmp.date.ds_Minute ||
+                  (jobs[j].date.ds_Minute == tmp.date.ds_Minute &&
+                   jobs[j].date.ds_Tick < tmp.date.ds_Tick))))) {
+            jobs[j + 1] = jobs[j];
+            --j;
+        }
+        jobs[j + 1] = tmp;
+    }
+
+    for (i = 0; i < count; ++i) {
+        /* "who": the recorded destination for a tracked job, or a dash
+         * for one spooled before HOST=/PORT= sidecars existed. */
+        char who[24];
+
+        if (jobs[i].host[0])
+            snprintf(who, sizeof(who), "%s:%d", jobs[i].host,
+                     jobs[i].port > 0 ? jobs[i].port : 80);
+        else
+            strcpy(who, "-");
+
+        /* Column widths are a compromise: none of this fits comfortably
+         * on an Amiga screen without truncating something, and the
+         * reason (state names why a job failed - "connection refused",
+         * "printer hardware problem", ...) matters more moment-to-moment
+         * than the exact job name or destination, both already visible
+         * elsewhere (job name in Delete/Retry's own file path; "who" is
+         * exactly what the "Retry to:" picker is about to resubmit
+         * against). Selecting a row also puts the state and full,
+         * untruncated reason in the window title - see
+         * mp_spool_win_process()'s GAD_SPOOL_JOB_LIST handling - so
+         * nothing here is ever permanently unreadable, just abbreviated
+         * for the at-a-glance list. */
+        if (jobs[i].reason[0])
+            snprintf(jobs[i].label, sizeof(jobs[i].label),
+                     "%-20.20s %-10.10s %-15.15s %s", jobs[i].basename,
+                     jobs[i].state, who, jobs[i].reason);
+        else
+            snprintf(jobs[i].label, sizeof(jobs[i].label),
+                     "%-20.20s %-10.10s %s", jobs[i].basename,
+                     jobs[i].state, who);
+
+        jobs[i].node.ln_Name = jobs[i].label;
+        AddTail(list, &jobs[i].node);
+    }
+
+    return count;
+}
+
+static CONST_STRPTR mp_spool_document_format_for_ext(const char *path)
+{
+    size_t len = strlen(path);
+
+    if (len > 4 && strcmp(path + len - 4, ".jpg") == 0)
+        return (CONST_STRPTR)"image/jpeg";
+    if (len > 4 && strcmp(path + len - 4, ".pwg") == 0)
+        return (CONST_STRPTR)"image/pwg-raster";
+    if (len > 4 && strcmp(path + len - 4, ".pdf") == 0)
+        return (CONST_STRPTR)"application/pdf";
+    if (len > 3 && strcmp(path + len - 3, ".ps") == 0)
+        return (CONST_STRPTR)"application/postscript";
+    if (len > 4 && strcmp(path + len - 4, ".urf") == 0)
+        return (CONST_STRPTR)"image/urf";
+    return (CONST_STRPTR)"application/octet-stream";
+}
+
+/* A job is actionable only after the driver has closed the file and reached
+ * a terminal state. Allowing Retry/Delete while RENDERING or SUBMITTING can
+ * race the driver and either submit a truncated file or remove its live
+ * output underneath it. */
+static BOOL mp_spool_job_actionable(const struct MPSpoolJobEntry *job)
+{
+    if (!job) return FALSE;
+    return strcmp(job->state, "DONE") == 0 ||
+           strcmp(job->state, "FAILED") == 0;
+}
+
+static void mp_spool_update_action_buttons(struct Window *win)
+{
+    BOOL enabled = g_spool_selection_made &&
+                   g_spool_selected < (ULONG)g_spool_count &&
+                   mp_spool_job_actionable(
+                       &mp_spool_jobs[g_spool_selected]);
+    if (!win) return;
+    GT_SetGadgetAttrs(g_spool_delete_gadget, win, NULL,
+                      GA_Disabled, (ULONG)(enabled ? FALSE : TRUE), TAG_DONE);
+    GT_SetGadgetAttrs(g_spool_retry_gadget, win, NULL,
+                      GA_Disabled, (ULONG)(enabled ? FALSE : TRUE), TAG_DONE);
+    GT_SetGadgetAttrs(g_spool_copies_gadget, win, NULL,
+                      GA_Disabled, (ULONG)(enabled ? FALSE : TRUE), TAG_DONE);
+}
+
+/* Reads HOST=/PORT=/PATH= straight out of a saved Unit%d file, without
+ * touching any of the live GUI/driver-config globals (ip_buffer,
+ * driver_path_buffer, ...) that reload_current_unit() would disturb - so
+ * the Spooler window's Unit picker can target a specific saved profile
+ * regardless of which Unit the main window happens to have loaded right
+ * now. Returns TRUE only if the file existed and had a non-empty HOST=. */
+static BOOL mp_load_unit_endpoint(int idx, char *host, size_t host_cap,
+                                  int *port, char *path, size_t path_cap)
+{
+    BPTR file;
+    char env_path[64];
+    char envarc_path[64];
+    char line[192];
+    BOOL found = FALSE;
+
+    host[0] = '\0';
+    *port = 80;
+    strncpy(path, "/ipp/print", path_cap - 1);
+    path[path_cap - 1] = '\0';
+
+    unit_config_path(idx, FALSE, env_path, sizeof(env_path));
+    unit_config_path(idx, TRUE, envarc_path, sizeof(envarc_path));
+
+    file = Open((CONST_STRPTR)env_path, MODE_OLDFILE);
+    if (!file)
+        file = Open((CONST_STRPTR)envarc_path, MODE_OLDFILE);
+    if (!file)
+        return FALSE;
+
+    while (FGets(file, line, sizeof(line))) {
+        trim_config_line(line);
+        if (strncmp(line, "HOST=", 5) == 0) {
+            strncpy(host, line + 5, host_cap - 1);
+            host[host_cap - 1] = '\0';
+            found = host[0] != '\0';
+        } else if (strncmp(line, "PORT=", 5) == 0) {
+            int p = atoi(line + 5);
+            if (p >= 1 && p <= 65535) *port = p;
+        } else if (strncmp(line, "PATH=", 5) == 0 && line[5] == '/') {
+            strncpy(path, line + 5, path_cap - 1);
+            path[path_cap - 1] = '\0';
+        }
+    }
+    Close(file);
+    return found;
+}
+
+/* Resubmits an already-rendered, retained job file over IPP - used for
+ * Retry (a held, failed job), Reprint (a successful one sent again), and
+ * each pass of multi-copy printing. unit_index selects which saved Unit's
+ * HOST/PORT/PATH to send it to (the Spooler window's Unit picker - lets a
+ * job be reassigned to a different printer than the one it originally
+ * failed against); if that Unit has no saved HOST=, this falls back to
+ * whatever the main window currently has loaded, the previous behaviour.
+ * Either way, only the endpoint comes from today's settings - the
+ * retained file's own content already reflects whichever job-template
+ * options (media, colour, quality, ...) were live when it was first
+ * rendered, so resending it with today's attributes layered on top would
+ * be misleading; empty attributes are the same "nothing extra" no-op
+ * mp_ipp_print_document() already treats them as, see that function's own
+ * comment in driver/ipp_client.c. Updates the job's own .status sidecar
+ * with the outcome and the endpoint actually used, the same
+ * STATE=/HOST=/PORT=/ERROR= format the driver itself writes, so a
+ * following Refresh shows it. Returns TRUE on success. */
+static BOOL mp_spool_retry_job(struct MPSpoolJobEntry *job, int unit_index)
+{
+    struct MPConfig cfg;
+    struct MPIPPResult result;
+    CONST_STRPTR document_format;
+    char host[64];
+    char path[MAX_ATTR_LEN];
+    int port = 80;
+    LONG rc;
+    BPTR sfh;
+
+    memset(&cfg, 0, sizeof(cfg));
+
+    if (!mp_load_unit_endpoint(unit_index, host, sizeof(host), &port,
+                               path, sizeof(path)) || !host[0]) {
+        int fallback_port = -1;
+        if (!parse_ip_and_port(ip_buffer, host, sizeof(host),
+                               &fallback_port) || !host[0])
+            return FALSE;
+        port = (fallback_port > 0 && fallback_port <= 65535)
+                   ? fallback_port : 80;
+        strncpy(path, driver_path_buffer[0] == '/' ? driver_path_buffer
+                                                     : "/ipp/print",
+               sizeof(path) - 1);
+        path[sizeof(path) - 1] = '\0';
+    }
+
+    strncpy(cfg.host, host, sizeof(cfg.host) - 1);
+    cfg.port = (UWORD)port;
+    strncpy(cfg.path, path, sizeof(cfg.path) - 1);
+
+    document_format = mp_spool_document_format_for_ext(job->job_path);
+
+    result.error = -1;
+    result.http_status = 0;
+    result.ipp_status = 0xffff;
+    result.document_bytes = 0;
+    rc = mp_ipp_print_document(&cfg, (CONST_STRPTR)job->job_path,
+                               document_format, &result);
+
+    sfh = Open((CONST_STRPTR)job->status_path, MODE_NEWFILE);
+    if (sfh) {
+        char buf[96];
+        int n = snprintf(buf, sizeof(buf), "STATE=%s\n",
+                         rc == 0 ? "DONE" : "FAILED");
+        Write(sfh, buf, n);
+        n = snprintf(buf, sizeof(buf), "HOST=%s\n", cfg.host);
+        Write(sfh, buf, n);
+        n = snprintf(buf, sizeof(buf), "PORT=%d\n", (int)cfg.port);
+        Write(sfh, buf, n);
+        if (rc != 0) {
+            n = snprintf(buf, sizeof(buf), "ERROR=%ld %ld %d\n",
+                        (long)result.error, (long)result.http_status,
+                        (int)result.ipp_status);
+            Write(sfh, buf, n);
+        }
+        Close(sfh);
+    }
+
+    return rc == 0;
+}
+
+/* Small OK/Cancel dialog asking how many copies to print - see
+ * GAD_SPOOL_COPIES in mp_spool_win_process() below, which resubmits the
+ * selected job that many times (mp_spool_retry_job() per copy) rather
+ * than relying on the IPP copies Job Template attribute, since not every
+ * printer this driver targets is known to honour it - see the project's
+ * own multi-copy design discussion. Returns TRUE if OK was pressed, with
+ * *out_copies set to 1-99; FALSE (out_copies untouched past its initial
+ * 1) on Cancel or any setup failure. */
+static BOOL run_copies_dialog(struct Window *parent, int *out_copies)
+{
+    struct Screen *cscreen;
+    APTR cvi;
+    struct Gadget *cglist = NULL;
+    struct Gadget *gad;
+    struct Gadget *copies_field;
+    struct NewGadget ng;
+    struct Window *cwin;
+    static char copies_buffer[8];
+    BOOL confirmed = FALSE;
+    BOOL terminated = FALSE;
+    UWORD topborder;
+
+    (void)parent;
+    *out_copies = 1;
+    strcpy(copies_buffer, "1");
+
+    cscreen = LockPubScreen(NULL);
+    if (!cscreen) return FALSE;
+    cvi = GetVisualInfo(cscreen, TAG_DONE);
+    if (!cvi) {
+        UnlockPubScreen(NULL, cscreen);
+        return FALSE;
+    }
+
+    topborder = cscreen->WBorTop + (cscreen->Font->ta_YSize + 1);
+
+    gad = CreateContext(&cglist);
+    if (!gad) {
+        FreeVisualInfo(cvi);
+        UnlockPubScreen(NULL, cscreen);
+        return FALSE;
+    }
+
+    ng.ng_TextAttr = &Topaz80;
+    ng.ng_VisualInfo = cvi;
+    ng.ng_Flags = 0;
+    ng.ng_LeftEdge = 10;
+    ng.ng_TopEdge = 10 + topborder;
+    ng.ng_Width = 100;
+    ng.ng_Height = 14;
+    ng.ng_GadgetText = (STRPTR)"Copies:";
+    ng.ng_GadgetID = GAD_SPOOL_COPIES_FIELD;
+    gad = CreateGadget(STRING_KIND, gad, &ng,
+        GTST_String, (ULONG)copies_buffer,
+        GTST_MaxChars, sizeof(copies_buffer) - 1,
+        GA_Immediate, TRUE,
+        TAG_DONE);
+    if (!gad) {
+        FreeGadgets(cglist);
+        FreeVisualInfo(cvi);
+        UnlockPubScreen(NULL, cscreen);
+        return FALSE;
+    }
+    copies_field = gad;
+
+    ng.ng_TopEdge += 26;
+    ng.ng_LeftEdge = 10;
+    ng.ng_Width = 90;
+    ng.ng_GadgetText = (STRPTR)"_OK";
+    ng.ng_GadgetID = GAD_SPOOL_COPIES_OK;
+    gad = CreateGadget(BUTTON_KIND, gad, &ng, GT_Underscore, '_', TAG_DONE);
+    if (!gad) {
+        FreeGadgets(cglist);
+        FreeVisualInfo(cvi);
+        UnlockPubScreen(NULL, cscreen);
+        return FALSE;
+    }
+
+    ng.ng_LeftEdge = 120;
+    ng.ng_GadgetText = (STRPTR)"_Cancel";
+    ng.ng_GadgetID = GAD_SPOOL_COPIES_CANCEL;
+    gad = CreateGadget(BUTTON_KIND, gad, &ng, GT_Underscore, '_', TAG_DONE);
+    if (!gad) {
+        FreeGadgets(cglist);
+        FreeVisualInfo(cvi);
+        UnlockPubScreen(NULL, cscreen);
+        return FALSE;
+    }
+
+    cwin = OpenWindowTags(NULL,
+        WA_Title, (ULONG)"Print Copies",
+        WA_Gadgets, (ULONG)cglist,
+        WA_Width, 230,
+        WA_InnerHeight, 70,
+        WA_DragBar, TRUE,
+        WA_DepthGadget, TRUE,
+        WA_Activate, TRUE,
+        WA_CloseGadget, TRUE,
+        WA_SimpleRefresh, TRUE,
+        WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW | BUTTONIDCMP | STRINGIDCMP,
+        WA_PubScreen, (ULONG)cscreen,
+        TAG_DONE);
+    if (!cwin) {
+        FreeGadgets(cglist);
+        FreeVisualInfo(cvi);
+        UnlockPubScreen(NULL, cscreen);
+        return FALSE;
+    }
+
+    GT_RefreshWindow(cwin, NULL);
+
+    while (!terminated) {
+        struct IntuiMessage *imsg;
+
+        Wait(1L << cwin->UserPort->mp_SigBit);
+        imsg = GT_GetIMsg(cwin->UserPort);
+        while (!terminated && imsg) {
+            struct Gadget *g = (struct Gadget *)imsg->IAddress;
+            ULONG cls = imsg->Class;
+            GT_ReplyIMsg(imsg);
+
+            if (cls == IDCMP_CLOSEWINDOW) {
+                terminated = TRUE;
+            } else if (cls == IDCMP_REFRESHWINDOW) {
+                GT_BeginRefresh(cwin);
+                GT_EndRefresh(cwin, TRUE);
+            } else if (cls == IDCMP_GADGETUP) {
+                if (g->GadgetID == GAD_SPOOL_COPIES_CANCEL) {
+                    terminated = TRUE;
+                } else if (g->GadgetID == GAD_SPOOL_COPIES_OK) {
+                    char *value = mp_string_gadget_value(copies_field);
+                    int n = value ? atoi(value) : 1;
+                    if (n < 1) n = 1;
+                    if (n > 99) n = 99;
+                    *out_copies = n;
+                    confirmed = TRUE;
+                    terminated = TRUE;
+                }
+            }
+            imsg = GT_GetIMsg(cwin->UserPort);
+        }
+    }
+
+    CloseWindow(cwin);
+    FreeGadgets(cglist);
+    FreeVisualInfo(cvi);
+    UnlockPubScreen(NULL, cscreen);
+    return confirmed;
+}
+
+/* Rescans MPSPOOL and swaps the results into the already-open Spooler
+ * window's listview in place - the window itself is never closed. Follows
+ * MintAMP's RadioRefreshResults(): detach the gadget from its current
+ * label list first (GTLV_Labels/GTLV_Selected set to ~0 tells GadTools to
+ * let go of the old struct List's nodes) before touching that struct
+ * List's contents, then rebuild it and reattach. Mutating a live
+ * LISTVIEW_KIND's list while the gadget still points at it is exactly the
+ * kind of thing that produced this window's earlier "selects then
+ * deselects itself" symptom - detaching first is what makes the swap
+ * safe. *count/*selected/*selection_made are reset the same way a fresh
+ * open would: a rescan can renumber, add, or remove rows, so whatever was
+ * selected before no longer means anything. Also resyncs
+ * Delete/Retry/Copies' enabled state to whether the list has anything in
+ * it now, and clears any "select a job first"/"Retrying..." title text
+ * left over from whichever action triggered this refresh. */
+static void mp_spool_refresh_list_live(struct Window *swin,
+                                       struct Gadget *job_listview,
+                                       struct Gadget *delete_gadget,
+                                       struct Gadget *retry_gadget,
+                                       struct Gadget *copies_gadget,
+                                       struct List *job_list,
+                                       int *count, ULONG *selected,
+                                       BOOL *selection_made)
+{
+    BOOL have_selection;
+
+    GT_SetGadgetAttrs(job_listview, swin, NULL,
+                      GTLV_Labels, (ULONG)~0,
+                      GTLV_Selected, (ULONG)~0,
+                      TAG_DONE);
+
+    *count = mp_scan_spool_jobs(mp_spool_jobs, MP_SPOOL_LIST_MAX, job_list);
+    *selected = 0;
+    *selection_made = FALSE;
+    have_selection = *count > 0;
+
+    GT_SetGadgetAttrs(job_listview, swin, NULL,
+                      GTLV_Labels, (ULONG)job_list,
+                      GTLV_Selected, (ULONG)~0,
+                      GA_Disabled, (ULONG)(have_selection ? FALSE : TRUE),
+                      TAG_DONE);
+    /* Nothing is selected after a rescan. Keep the action buttons disabled
+     * until the user selects a terminal (DONE/FAILED) job. */
+    (void)delete_gadget;
+    (void)retry_gadget;
+    (void)copies_gadget;
+    mp_spool_update_action_buttons(swin);
+    SetWindowTitles(swin, (STRPTR)"Spooler Management", (STRPTR)~0);
+}
+
+/* Closes the Spooler window (if open) and releases everything opening it
+ * took - screen lock, visual info, gadget list - leaving g_spool_win NULL
+ * so process_window_events()'s Wait() stops listening on its signal bit.
+ * Records LeftEdge/TopEdge first so the next mp_spool_win_open() reopens
+ * in the same place rather than recentring. */
+static void mp_spool_win_close(void)
+{
+    if (!g_spool_win) return;
+
+    g_spool_win_left = g_spool_win->LeftEdge;
+    g_spool_win_top = g_spool_win->TopEdge;
+    CloseWindow(g_spool_win);
+    g_spool_win = NULL;
+
+    FreeGadgets(g_spool_sglist);
+    g_spool_sglist = NULL;
+    g_spool_job_listview = NULL;
+    g_spool_delete_gadget = NULL;
+    g_spool_retry_gadget = NULL;
+    g_spool_copies_gadget = NULL;
+
+    FreeVisualInfo(g_spool_vi);
+    g_spool_vi = NULL;
+    UnlockPubScreen(NULL, g_spool_screen);
+    g_spool_screen = NULL;
+}
+
+/* Opens the Spooler window, or - if one is already open - just brings the
+ * existing one to the front instead of opening a second instance sharing
+ * the same g_spool_*() globals underneath it. Non-modal: unlike the
+ * discovery-selection and Copies dialogs, this does not run its own
+ * IDCMP loop. It returns immediately after opening, and
+ * process_window_events()'s own main-window loop below folds this
+ * window's UserPort signal bit into the same Wait() call as the main
+ * window's, calling mp_spool_win_process() whenever it fires - the same
+ * technique already used there for test_print_job's async completion.
+ * That is what lets both windows accept input at the same time instead
+ * of one blocking the other the way a nested modal loop would. */
+static void mp_spool_win_open(struct Window *parent)
+{
+    struct Gadget *sglist = NULL;
+    struct Gadget *gad;
+    struct NewGadget ng;
+    UWORD topborder;
+    BOOL have_selection;
+
+    (void)parent;
+
+    if (g_spool_win) {
+        WindowToFront(g_spool_win);
+        ActivateWindow(g_spool_win);
+        return;
+    }
+
+    g_spool_screen = LockPubScreen(NULL);
+    if (!g_spool_screen) return;
+
+    g_spool_vi = GetVisualInfo(g_spool_screen, TAG_DONE);
+    if (!g_spool_vi) {
+        UnlockPubScreen(NULL, g_spool_screen);
+        g_spool_screen = NULL;
+        return;
+    }
+
+    topborder = g_spool_screen->WBorTop +
+                (g_spool_screen->Font->ta_YSize + 1);
+
+    /* Centred the first time this ever opens; every later open reuses
+     * wherever it was last closed (drags included) instead of recentring. */
+    if (g_spool_win_left < 0) {
+        g_spool_win_left = (g_spool_screen->Width > 620)
+                                ? (g_spool_screen->Width - 620) / 2 : 0;
+        g_spool_win_top = (g_spool_screen->Height > 220 + topborder)
+                               ? (g_spool_screen->Height - 220) / 2
+                               : topborder;
+    }
+
+    /* Which saved Unit a Retry/Copies resubmission targets - defaults to
+     * whatever the main window currently has active the first time this
+     * opens, but the Unit cycle gadget below lets it be reassigned to any
+     * other saved printer profile, and that choice (like the window's
+     * position) is remembered across closing and reopening this window. */
+    if (g_spool_retry_unit < 0) {
+        g_spool_retry_unit = current_unit_index;
+        if (g_spool_retry_unit < 0) g_spool_retry_unit = 0;
+        if (g_spool_retry_unit >= MAX_UNITS)
+            g_spool_retry_unit = MAX_UNITS - 1;
+    }
+
+    g_spool_count = mp_scan_spool_jobs(mp_spool_jobs, MP_SPOOL_LIST_MAX,
+                                       &g_spool_job_list);
+    g_spool_selected = 0;
+    g_spool_selection_made = FALSE;
+    have_selection = g_spool_count > 0;
+
+    gad = CreateContext(&sglist);
+    if (!gad) {
+        FreeVisualInfo(g_spool_vi); g_spool_vi = NULL;
+        UnlockPubScreen(NULL, g_spool_screen); g_spool_screen = NULL;
+        return;
+    }
+
+    /* A real scrolling multi-row list (GadTools LISTVIEW_KIND), not
+     * the single-entry-at-a-time CYCLE_KIND browsing gadget the
+     * discovery dialog uses - every tracked job and its status is
+     * visible at once, the way MintAMP/MintVID-style list windows
+     * show theirs. */
+    ng.ng_TextAttr = &Topaz80;
+    ng.ng_VisualInfo = g_spool_vi;
+    ng.ng_Flags = 0;
+    ng.ng_LeftEdge = 10;
+    ng.ng_TopEdge = 10 + topborder;
+    ng.ng_Width = 600;
+    ng.ng_Height = 150;
+    ng.ng_GadgetText = NULL;
+    ng.ng_GadgetID = GAD_SPOOL_JOB_LIST;
+    /* No GTLV_ReadOnly here: that attribute, despite its name, does
+     * not mean "not editable" (a plain text listview like this one
+     * was never editable in the first place) - it means "the user
+     * cannot select an entry at all", which is exactly why rows
+     * couldn't be clicked. Selectable-but-not-editable is simply the
+     * GadTools default with no tag needed. */
+    /* GTLV_Selected starts at ~0 (no row pre-highlighted), the same
+     * sentinel MintAMP's working radio-results listview uses - not 0,
+     * which pre-selects row 0 and can confuse the "did my click do
+     * anything" read on the very first paint. GTLV_ShowSelected is
+     * included too, matching that same gadget, even though this list
+     * has no companion display gadget to copy the selection into. */
+    gad = CreateGadget(LISTVIEW_KIND, gad, &ng,
+        GTLV_Labels, (ULONG)&g_spool_job_list,
+        GTLV_Selected, (ULONG)~0,
+        GTLV_ShowSelected, (ULONG)NULL,
+        GA_Disabled, (ULONG)(have_selection ? FALSE : TRUE),
+        TAG_DONE);
+    if (!gad) {
+        FreeGadgets(sglist);
+        FreeVisualInfo(g_spool_vi); g_spool_vi = NULL;
+        UnlockPubScreen(NULL, g_spool_screen); g_spool_screen = NULL;
+        return;
+    }
+    g_spool_job_listview = gad;
+
+    ng.ng_TopEdge += 162;
+    ng.ng_LeftEdge = 10;
+    ng.ng_Width = 100;
+    ng.ng_Height = 14;
+    ng.ng_GadgetText = (STRPTR)"_Refresh";
+    ng.ng_GadgetID = GAD_SPOOL_REFRESH;
+    gad = CreateGadget(BUTTON_KIND, gad, &ng, GT_Underscore, '_', TAG_DONE);
+    if (!gad) goto fail;
+
+    ng.ng_LeftEdge = 120;
+    ng.ng_GadgetText = (STRPTR)"_Delete";
+    ng.ng_GadgetID = GAD_SPOOL_DELETE;
+    gad = CreateGadget(BUTTON_KIND, gad, &ng,
+        GT_Underscore, '_', GA_Disabled, (ULONG)(have_selection ? FALSE : TRUE),
+        TAG_DONE);
+    if (!gad) goto fail;
+    g_spool_delete_gadget = gad;
+
+    ng.ng_LeftEdge = 230;
+    ng.ng_GadgetText = (STRPTR)"_Retry";
+    ng.ng_GadgetID = GAD_SPOOL_RETRY;
+    gad = CreateGadget(BUTTON_KIND, gad, &ng,
+        GT_Underscore, '_', GA_Disabled, (ULONG)(have_selection ? FALSE : TRUE),
+        TAG_DONE);
+    if (!gad) goto fail;
+    g_spool_retry_gadget = gad;
+
+    ng.ng_LeftEdge = 340;
+    ng.ng_Width = 110;
+    ng.ng_GadgetText = (STRPTR)"_Copies...";
+    ng.ng_GadgetID = GAD_SPOOL_COPIES;
+    gad = CreateGadget(BUTTON_KIND, gad, &ng,
+        GT_Underscore, '_', GA_Disabled, (ULONG)(have_selection ? FALSE : TRUE),
+        TAG_DONE);
+    if (!gad) goto fail;
+    g_spool_copies_gadget = gad;
+
+    ng.ng_LeftEdge = 460;
+    ng.ng_Width = 90;
+    ng.ng_GadgetText = (STRPTR)"_Close";
+    ng.ng_GadgetID = GAD_SPOOL_CLOSE;
+    gad = CreateGadget(BUTTON_KIND, gad, &ng, GT_Underscore, '_', TAG_DONE);
+    if (!gad) goto fail;
+
+    /* Which printer a Retry/Copies resubmission goes to - defaults to
+     * the main window's active Unit, reassignable to any other saved
+     * Unit profile right here without having to close this window,
+     * switch it in the main window, and reopen. Purely a resubmission
+     * target: it does not change which Unit a job's "assigned to"
+     * host:port column shows - that always reflects where the job
+     * actually went (or will go, once retried against this choice). */
+    /* PLACETEXT_LEFT draws the label to the left of ng_LeftEdge, not
+     * inside it - the same off-window trap the "Keep Jobs (HDD)"
+     * checkbox above hit at LeftEdge=10 (see its own comment). Leaving
+     * room here by starting the box itself at LeftEdge=90 instead. */
+    ng.ng_TopEdge += 22;
+    ng.ng_LeftEdge = 90;
+    ng.ng_Width = 520;
+    ng.ng_GadgetText = (STRPTR)"Retry to:";
+    ng.ng_GadgetID = GAD_SPOOL_UNIT;
+    ng.ng_Flags = PLACETEXT_LEFT;
+    gad = CreateGadget(CYCLE_KIND, gad, &ng,
+        GTCY_Labels, (ULONG)unit_dropdown_labels,
+        GTCY_Active, (ULONG)g_spool_retry_unit,
+        TAG_DONE);
+    if (!gad) goto fail;
+
+    /* Gadgets are attached after OpenWindowTags via AddGList/RefreshGList,
+     * not the WA_Gadgets tag - the same sequence MintAMP's working
+     * listview windows use. WA_Gadgets attaches the list at open time
+     * too in principle, but this is the pattern proven to leave a
+     * GadTools LISTVIEW_KIND actually clickable on real hardware. */
+    g_spool_win = OpenWindowTags(NULL,
+        WA_Title, (ULONG)"Spooler Management",
+        WA_Left, (ULONG)g_spool_win_left,
+        WA_Top, (ULONG)g_spool_win_top,
+        WA_Width, 620,
+        WA_InnerHeight, 220,
+        WA_DragBar, TRUE,
+        WA_DepthGadget, TRUE,
+        WA_Activate, TRUE,
+        WA_CloseGadget, TRUE,
+        WA_SimpleRefresh, TRUE,
+        WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW | BUTTONIDCMP | LISTVIEWIDCMP,
+        WA_PubScreen, (ULONG)g_spool_screen,
+        TAG_DONE);
+    if (!g_spool_win) goto fail;
+
+    g_spool_sglist = sglist;
+    AddGList(g_spool_win, sglist, (UWORD)-1, -1, NULL);
+    RefreshGList(sglist, g_spool_win, NULL, -1);
+    GT_RefreshWindow(g_spool_win, NULL);
+    return;
+
+fail:
+    FreeGadgets(sglist);
+    FreeVisualInfo(g_spool_vi); g_spool_vi = NULL;
+    UnlockPubScreen(NULL, g_spool_screen); g_spool_screen = NULL;
+    g_spool_job_listview = NULL;
+    g_spool_delete_gadget = NULL;
+    g_spool_retry_gadget = NULL;
+    g_spool_copies_gadget = NULL;
+}
+
+/* Drains and dispatches every IntuiMessage currently queued on the
+ * Spooler window's port - called from process_window_events()'s main
+ * loop whenever that window's signal bit comes back from Wait(), the
+ * same way test_print_job's completion port is handled there. swin is
+ * captured up front and used for the whole drain even if a Close request
+ * is seen partway through: every message GadTools hands back must be
+ * GT_ReplyIMsg()'d before mp_spool_win_close() calls CloseWindow(),
+ * including ones still queued from a rapid double-click on Retry/
+ * Copies/Delete that arrived while the first click's (possibly blocking,
+ * network-bound) handler was still running - so this keeps draining and
+ * replying right up to the end, it just stops acting on anything once a
+ * close was requested, which is what stops a queued second Retry click
+ * from firing a second resubmission behind the first one's back. */
+static void mp_spool_win_process(void)
+{
+    struct Window *swin = g_spool_win;
+    struct IntuiMessage *imsg;
+    BOOL want_close = FALSE;
+
+    if (!swin) return;
+
+    imsg = GT_GetIMsg(swin->UserPort);
+    while (imsg) {
+        struct Gadget *g = (struct Gadget *)imsg->IAddress;
+        ULONG cls = imsg->Class;
+        UWORD code = imsg->Code;
+        GT_ReplyIMsg(imsg);
+
+        if (want_close) {
+            imsg = GT_GetIMsg(swin->UserPort);
+            continue;
+        }
+
+        if (cls == IDCMP_CLOSEWINDOW) {
+            want_close = TRUE;
+        } else if (cls == IDCMP_REFRESHWINDOW) {
+            GT_BeginRefresh(swin);
+            GT_EndRefresh(swin, TRUE);
+        } else if (cls == IDCMP_GADGETUP) {
+            if (g->GadgetID == GAD_SPOOL_JOB_LIST) {
+                if ((ULONG)code < (ULONG)g_spool_count) {
+                    g_spool_selected = (ULONG)code;
+                    g_spool_selection_made = TRUE;
+                    /* GadTools does not persist which row a click
+                     * selected on its own - a later IDCMP_REFRESHWINDOW
+                     * (there are more of those than you'd expect: window
+                     * activation, another window uncovering this one,
+                     * ...) repaints the listview from its own stored
+                     * GTLV_Selected, which otherwise still says "none",
+                     * making the highlight vanish right after the click.
+                     * Mirroring the selection back here is what makes it
+                     * stick. */
+                    GT_SetGadgetAttrs(g_spool_job_listview, swin, NULL,
+                                      GTLV_Selected, g_spool_selected,
+                                      TAG_DONE);
+                    mp_spool_update_action_buttons(swin);
+                    /* The list truncates each row to fit the window - a
+                     * failure reason like "Printer rejected request
+                     * (wrong IPP path?)" does not fit in the column
+                     * budget mp_scan_spool_jobs() has to work with on any
+                     * Amiga screen this driver targets. The window title
+                     * has the room a list column doesn't, so show the
+                     * selected job's full state/reason there instead.
+                     * static, not a stack local: SetWindowTitles() keeps
+                     * only a pointer, not a copy, and this has to stay
+                     * valid for however long this title stays on screen -
+                     * across GadTools refresh events this function isn't
+                     * even running for - not just this one call. */
+                    {
+                        static char spool_title[192];
+                        struct MPSpoolJobEntry *job =
+                            &mp_spool_jobs[g_spool_selected];
+                        if (job->reason[0])
+                            snprintf(spool_title, sizeof(spool_title),
+                                    "Spooler Management - %s: %s",
+                                    job->state, job->reason);
+                        else
+                            snprintf(spool_title, sizeof(spool_title),
+                                    "Spooler Management - %s", job->state);
+                        SetWindowTitles(swin, (STRPTR)spool_title,
+                                        (STRPTR)~0);
+                    }
+                }
+            } else if (g->GadgetID == GAD_SPOOL_UNIT) {
+                g_spool_retry_unit = (int)code;
+            } else if (g->GadgetID == GAD_SPOOL_CLOSE) {
+                want_close = TRUE;
+            } else if (g->GadgetID == GAD_SPOOL_REFRESH) {
+                /* Swaps the listview's contents in place - the window
+                 * stays open, same as MintAMP's search results Refresh -
+                 * see mp_spool_refresh_list_live()'s own comment. */
+                mp_spool_refresh_list_live(swin, g_spool_job_listview,
+                    g_spool_delete_gadget, g_spool_retry_gadget,
+                    g_spool_copies_gadget, &g_spool_job_list,
+                    &g_spool_count, &g_spool_selected,
+                    &g_spool_selection_made);
+            } else if (g->GadgetID == GAD_SPOOL_DELETE) {
+                if (g_spool_selection_made &&
+                    g_spool_selected < (ULONG)g_spool_count &&
+                    mp_spool_job_actionable(
+                        &mp_spool_jobs[g_spool_selected])) {
+                    DeleteFile((CONST_STRPTR)
+                        mp_spool_jobs[g_spool_selected].job_path);
+                    DeleteFile((CONST_STRPTR)
+                        mp_spool_jobs[g_spool_selected].status_path);
+                    mp_spool_refresh_list_live(swin, g_spool_job_listview,
+                        g_spool_delete_gadget, g_spool_retry_gadget,
+                        g_spool_copies_gadget, &g_spool_job_list,
+                        &g_spool_count, &g_spool_selected,
+                        &g_spool_selection_made);
+                } else {
+                    SetWindowTitles(swin,
+                        (STRPTR)"Spooler Management - select a job first",
+                        (STRPTR)~0);
+                }
+            } else if (g->GadgetID == GAD_SPOOL_RETRY) {
+                if (g_spool_selection_made &&
+                    g_spool_selected < (ULONG)g_spool_count &&
+                    mp_spool_job_actionable(
+                        &mp_spool_jobs[g_spool_selected])) {
+                    /* Blocking (network I/O) - said so up front, and the
+                     * buttons are disabled for the same reason a second
+                     * click mid-retry queued up behind this one is
+                     * drained above without triggering a second
+                     * resubmission. The main window stays responsive
+                     * throughout, since this whole dispatch only runs
+                     * when the Spooler window's own signal bit fires -
+                     * but this call itself still blocks until the
+                     * network round-trip finishes. */
+                    SetWindowTitles(swin,
+                        (STRPTR)"Spooler Management - Retrying...",
+                        (STRPTR)~0);
+                    GT_SetGadgetAttrs(g_spool_retry_gadget, swin, NULL,
+                                      GA_Disabled, TRUE, TAG_DONE);
+                    GT_SetGadgetAttrs(g_spool_copies_gadget, swin, NULL,
+                                      GA_Disabled, TRUE, TAG_DONE);
+                    mp_spool_retry_job(&mp_spool_jobs[g_spool_selected],
+                                       g_spool_retry_unit);
+                    mp_spool_refresh_list_live(swin, g_spool_job_listview,
+                        g_spool_delete_gadget, g_spool_retry_gadget,
+                        g_spool_copies_gadget, &g_spool_job_list,
+                        &g_spool_count, &g_spool_selected,
+                        &g_spool_selection_made);
+                } else {
+                    SetWindowTitles(swin,
+                        (STRPTR)"Spooler Management - select a job first",
+                        (STRPTR)~0);
+                }
+            } else if (g->GadgetID == GAD_SPOOL_COPIES) {
+                int copies = 1;
+                if (g_spool_selection_made &&
+                    g_spool_selected < (ULONG)g_spool_count &&
+                    mp_spool_job_actionable(
+                        &mp_spool_jobs[g_spool_selected]) &&
+                    run_copies_dialog(swin, &copies)) {
+                    int i;
+                    GT_SetGadgetAttrs(g_spool_retry_gadget, swin, NULL,
+                                      GA_Disabled, TRUE, TAG_DONE);
+                    GT_SetGadgetAttrs(g_spool_copies_gadget, swin, NULL,
+                                      GA_Disabled, TRUE, TAG_DONE);
+                    for (i = 0; i < copies; ++i) {
+                        /* static: see the row-selection title's own
+                         * comment above on why a stack local isn't safe
+                         * for a SetWindowTitles() string. */
+                        static char title[64];
+                        snprintf(title, sizeof(title),
+                                "Spooler Management - Retrying (%d/%d)...",
+                                i + 1, copies);
+                        SetWindowTitles(swin, (STRPTR)title, (STRPTR)~0);
+                        mp_spool_retry_job(
+                            &mp_spool_jobs[g_spool_selected],
+                            g_spool_retry_unit);
+                    }
+                    mp_spool_refresh_list_live(swin, g_spool_job_listview,
+                        g_spool_delete_gadget, g_spool_retry_gadget,
+                        g_spool_copies_gadget, &g_spool_job_list,
+                        &g_spool_count, &g_spool_selected,
+                        &g_spool_selection_made);
+                } else if (!g_spool_selection_made) {
+                    SetWindowTitles(swin,
+                        (STRPTR)"Spooler Management - select a job first",
+                        (STRPTR)~0);
+                }
+            }
+        }
+        imsg = GT_GetIMsg(swin->UserPort);
+    }
+
+    if (want_close)
+        mp_spool_win_close();
+}
+
 /* Bounded, GUI-responsive connect(): socket -> IoctlSocket(FIONBIO on) ->
  * connect() -> if EINPROGRESS, WaitSelect() on the write+exception sets in
  * short chunks (pumping GUI events between them) until connected, refused,
@@ -5614,24 +6990,27 @@ static void mp_draw_printer_icon(void) {
     struct ColorMap *cm;
     struct RastPort *rp;
     int screen_pen_count;
+    UBYTE ramp_pens[MP_NEUTRAL_RAMP_MAX];
+    UBYTE ramp_luma[MP_NEUTRAL_RAMP_MAX];
+    int ramp_count;
     int left = MP_PRINTER_ICON_LEFT;
     int top = g_topborder + MP_PRINTER_ICON_TOP;
     int i;
     LONG last_pen = -1;
+    UBYTE bg_r, bg_g, bg_b;
 
     if (!window || !screen)
         return;
 
     rp = window->RPort;
     cm = screen->ViewPort.ColorMap;
-    if (!cm || cm->Count == 0)
+    if (!cm)
         return;
 
-    screen_pen_count = (int)cm->Count;
-    if (screen_pen_count > 256)
-        screen_pen_count = 256;
+    screen_pen_count = mp_screen_pen_count(screen, cm);
     mp_fill_screen_palette32(cm, screen_pen_count, screen_palette);
-
+    ramp_count = mp_build_neutral_pen_ramp(screen_palette, screen_pen_count,
+                                           ramp_pens, ramp_luma);
     SetDrMd(rp, JAM1);
     SetAPen(rp, 0);
     RectFill(rp, left - 1, top - 1,
@@ -5640,14 +7019,18 @@ static void mp_draw_printer_icon(void) {
     if (!mp_printer_icon_valid)
         return;
 
-    /* Convert RGBA to the current screen's pens once per downloaded icon,
-     * not on every refresh.  Partial alpha is composited against pen 0,
-     * which is exactly the background we just cleared the icon box with. */
-    if (!mp_printer_icon_pens_valid) {
-        UBYTE bg_r = (UBYTE)((screen_palette[0] >> 24) & 0xffUL);
-        UBYTE bg_g = (UBYTE)((screen_palette[1] >> 24) & 0xffUL);
-        UBYTE bg_b = (UBYTE)((screen_palette[2] >> 24) & 0xffUL);
+    /* Partial alpha is composited against pen 0, which is exactly the
+     * background we just cleared the icon box with - needed both to
+     * populate the cached base pens below and, every redraw, to decide
+     * per pixel whether the actual on-screen colour a viewer would see
+     * is itself near-neutral. */
+    bg_r = (UBYTE)((screen_palette[0] >> 24) & 0xffUL);
+    bg_g = (UBYTE)((screen_palette[1] >> 24) & 0xffUL);
+    bg_b = (UBYTE)((screen_palette[2] >> 24) & 0xffUL);
 
+    /* Convert RGBA to the current screen's pens once per downloaded icon,
+     * not on every refresh. */
+    if (!mp_printer_icon_pens_valid) {
         for (i = 0; i < MP_PRINTER_ICON_PIXELS; ++i) {
             const UBYTE *p = mp_printer_icon_rgba + i * 4;
             ULONG a = p[3];
@@ -5676,15 +7059,51 @@ static void mp_draw_printer_icon(void) {
         int x;
         int y;
         UBYTE pen;
+        const UBYTE *p;
+        ULONG a;
+        UBYTE r, g, b, smax, smin;
+
         if (!mp_printer_icon_mask[i])
             continue;
         pen = mp_printer_icon_pens[i];
+
+        /* Per pixel, not per screen: a screen's own advertised colour
+         * count/depth turned out not to be a reliable signal for whether
+         * it actually offers a smooth grey ramp (see
+         * mp_screen_pen_count()'s comment on why Count itself can be
+         * unreliable) - so this only asks whether the actual on-screen
+         * colour this pixel composites to (background-blended, same as
+         * the cached base pen above - not the raw un-composited RGBA)
+         * looks like it was meant to be grey, and if so, prefers screen
+         * pens that are too, on any screen depth. A pixel that
+         * composites to a real colour still gets the plain nearest-colour
+         * cached pen unchanged. Dithers between the ramp's two bracketing
+         * pens when there are enough of them to dither with; a palette
+         * with 0 or 1 near-neutral pens falls back to
+         * mp_low_colour_gray_pen()'s single best pick. */
+        x = i % MP_PRINTER_ICON_SIZE;
+        y = i / MP_PRINTER_ICON_SIZE;
+        p = mp_printer_icon_rgba + i * 4;
+        a = p[3];
+        r = (UBYTE)(((ULONG)p[0] * a + (ULONG)bg_r * (255UL - a) + 127UL) / 255UL);
+        g = (UBYTE)(((ULONG)p[1] * a + (ULONG)bg_g * (255UL - a) + 127UL) / 255UL);
+        b = (UBYTE)(((ULONG)p[2] * a + (ULONG)bg_b * (255UL - a) + 127UL) / 255UL);
+        smax = (r > g) ? r : g;
+        smin = (r < g) ? r : g;
+        if (b > smax) smax = b;
+        if (b < smin) smin = b;
+        if ((int)smax - (int)smin <= MP_NEUTRAL_SAT_THRESHOLD) {
+            pen = (ramp_count >= 2)
+                ? mp_dither_neutral_pen(ramp_pens, ramp_luma, ramp_count,
+                                        r, g, b, left + x, top + y)
+                : mp_low_colour_gray_pen(screen_palette, screen_pen_count,
+                                         r, g, b);
+        }
+
         if ((LONG)pen != last_pen) {
             SetAPen(rp, pen);
             last_pen = (LONG)pen;
         }
-        x = i % MP_PRINTER_ICON_SIZE;
-        y = i / MP_PRINTER_ICON_SIZE;
         WritePixel(rp, left + x, top + y);
     }
 }
@@ -7521,7 +8940,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // prettified labels ("A4 (Bypass Tray)") need far less room than the
     // raw IPP keywords ("iso_a4_210x297mm (by-pass-tray)") did.
     ng.ng_LeftEdge = 135;
-    ng.ng_TopEdge = 117 + topborder;
+    ng.ng_TopEdge = 108 + topborder;
     ng.ng_Width = 180;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"Media (Tray):";
@@ -7540,7 +8959,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
     // Scaling dropdown
     ng.ng_LeftEdge = 135;
-    ng.ng_TopEdge = 135 + topborder;
+    ng.ng_TopEdge = 126 + topborder;
     ng.ng_Width = 150;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"Scaling:";
@@ -7553,7 +8972,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
     // Quality dropdown
     ng.ng_LeftEdge = 135;
-    ng.ng_TopEdge = 153 + topborder;
+    ng.ng_TopEdge = 144 + topborder;
     ng.ng_Width = 150;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"Quality:";
@@ -7566,10 +8985,10 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
     // Capture DPI - shares the Quality row and is populated by Query from
     // printer-resolution-supported/PWG raster resolution capabilities.
-    ng.ng_LeftEdge = 348;
+    ng.ng_LeftEdge = 350;
     ng.ng_Width = 100;
     ng.ng_Height = 12;
-    ng.ng_TopEdge = 171 + topborder;
+    ng.ng_TopEdge = 180 + topborder;
     ng.ng_GadgetText = (STRPTR)"DPI:";
     ng.ng_GadgetID = GAD_RESOLUTION;
     gad = CreateGadget(CYCLE_KIND, gad, &ng,
@@ -7584,7 +9003,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
     // Print Mode radio buttons
     ng.ng_LeftEdge = 135;
-    ng.ng_TopEdge = 171 + topborder;
+    ng.ng_TopEdge = 162 + topborder;
     ng.ng_Width = 150;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"Print Mode:";
@@ -7605,7 +9024,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     ng.ng_LeftEdge = 350;
     ng.ng_Width = 150;
     ng.ng_Height = 12;
-    ng.ng_TopEdge = 153 + topborder;
+    ng.ng_TopEdge = 162 + topborder;
     ng.ng_GadgetText = (STRPTR)"Sides:";
     ng.ng_GadgetID = GAD_SIDES;
     gad = CreateGadget(CYCLE_KIND, gad, &ng,
@@ -7683,6 +9102,52 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
         return NULL;
     }
 
+    // Keep spooled jobs - only meaningful, and only enabled, once Spooler
+    // names a real hard drive (see mp_spool_keep_available()); the
+    // GAD_SPOOLER handler below disables and unticks this live the moment
+    // Spooler is switched back to RAM.
+    //
+    // PLACETEXT_RIGHT is required here: CHECKBOX_KIND's own default
+    // placement is PLACETEXT_LEFT (label to the LEFT of the box, unlike
+    // BUTTON_KIND/CYCLE_KIND above), which at this gadget's LeftEdge=10
+    // - flush against the window's own left edge - draws the label
+    // entirely off-window, leaving what looks like an unlabelled
+    // checkbox.
+    ng.ng_LeftEdge = 10;
+    ng.ng_TopEdge = 180 + topborder;
+    ng.ng_Width = 160;
+    ng.ng_Height = 12;
+    ng.ng_GadgetText = (STRPTR)"Keep Jobs (HDD)";
+    ng.ng_GadgetID = GAD_SPOOL_KEEP;
+    ng.ng_Flags = PLACETEXT_RIGHT;
+    gad = CreateGadget(CHECKBOX_KIND, gad, &ng,
+        GTCB_Checked, (ULONG)(mp_spool_keep_available() && driver_spool_keep),
+        GA_Disabled, (ULONG)(mp_spool_keep_available() ? FALSE : TRUE),
+        TAG_DONE);
+    if (!gad) {
+        printf("Failed to create keep-spooled-jobs checkbox\n");
+        return NULL;
+    }
+
+    // Opens the Spooler management window listing tracked jobs - see
+    // mp_spool_win_open(). Unlike run_discovery_selection(), it is
+    // non-modal: it returns immediately and process_window_events()'s
+    // main loop drives it from then on, so both windows stay usable.
+    ng.ng_LeftEdge = 175;
+    ng.ng_TopEdge = 180 + topborder;
+    ng.ng_Width = 130;
+    ng.ng_Height = 12;
+    ng.ng_Flags = 0;
+    ng.ng_GadgetText = (STRPTR)"_View Spooler";
+    ng.ng_GadgetID = GAD_VIEW_SPOOL;
+    gad = CreateGadget(BUTTON_KIND, gad, &ng,
+        GT_Underscore, '_',
+        TAG_DONE);
+    if (!gad) {
+        printf("Failed to create view spool button\n");
+        return NULL;
+    }
+
     return gad;
 }
 
@@ -7703,11 +9168,22 @@ void process_window_events(struct Window *win) {
 
         if (test_print_job.active && test_print_job.port)
             wait_mask |= 1L << test_print_job.port->mp_SigBit;
+        /* Spooler window folded into the same Wait() as the main window's
+         * own port, not a separate nested event loop - see
+         * mp_spool_win_process()'s own comment for why: that is what
+         * keeps this window and the Spooler window both live for input
+         * at once instead of one blocking the other. */
+        if (g_spool_win)
+            wait_mask |= 1L << g_spool_win->UserPort->mp_SigBit;
 
         received_signals = Wait(wait_mask);
         if (test_print_job.active && test_print_job.port &&
             (received_signals & (1L << test_print_job.port->mp_SigBit))) {
             mp_test_print_complete(win);
+        }
+        if (g_spool_win &&
+            (received_signals & (1L << g_spool_win->UserPort->mp_SigBit))) {
+            mp_spool_win_process();
         }
         if (!(received_signals & window_signal))
             continue;
@@ -7862,8 +9338,17 @@ void process_window_events(struct Window *win) {
                                 driver_spool_buffer[
                                     sizeof(driver_spool_buffer) - 1] = '\0';
                             }
+                            mp_update_spool_keep_gadget(win);
                         }
                         break;
+
+                        case GAD_SPOOL_KEEP:
+                            driver_spool_keep = imsgCode ? TRUE : FALSE;
+                            break;
+
+                        case GAD_VIEW_SPOOL:
+                            mp_spool_win_open(win);
+                            break;
 
                         case GAD_QUALITY_MODE:
                         {
@@ -8120,6 +9605,12 @@ void process_window_events(struct Window *win) {
     if (test_print_job.active)
         mp_test_print_cancel(win);
 
+    /* The main window is closing (or the app is quitting) - an orphaned
+     * Spooler window left open would keep its UserPort registered with
+     * Intuition after this Task exits, which is not safe. Close it the
+     * same way its own Close button would. */
+    if (g_spool_win)
+        mp_spool_win_close();
 }
 
 static BOOL mp_open_tcp_stack(void) {
@@ -8289,10 +9780,9 @@ int main(void) {
         WA_AutoAdjust, TRUE,
         WA_Width, 520,
         WA_MinWidth, 520,
-        /* Sized to end exactly where the output box's bottom border does
-         * (OUTPUT_TOP + 81 - see the comment on OUTPUT_TOP), leaving no
-         * dead space below it - keep this in sync with OUTPUT_TOP if that
-         * ever changes again. */
+        /* Keep the compact historical height. OUTPUT_TOP is positioned so
+         * the complete hand-drawn status box remains inside this 314px
+         * RastPort, with no unused strip below it. */
         WA_InnerHeight, 314,
         WA_MinHeight, 314,
         WA_DragBar, TRUE,

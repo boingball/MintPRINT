@@ -49,6 +49,26 @@ BOOL mp_spool_job_write(const UBYTE *data, ULONG length);
 void mp_spool_job_close(void);
 void mp_spool_job_delete(CONST_STRPTR filename);
 
+/* Resolves `candidate` (a full desired path, e.g.
+ * "DH0:MPSPOOL/MintPRINT-job-290826172011.jpg") to a name that does not
+ * already exist on disk - first adding the current DOS timestamp inside
+ * the spool Process, then inserting "-1", "-2", ... immediately before
+ * the last '.' if needed. It fails after 99 collisions rather than
+ * overwriting an existing job. The resolved name is copied into
+ * resolved_out (bounded by resolved_cap, always left NUL-terminated) so
+ * the caller's own g_job_file_* buffer and any status sidecar use the
+ * name that was actually opened. Only used when a Spooler HDD location
+ * is keeping multiple named jobs - see driver_core.c's mp_job_begin(). */
+BOOL mp_spool_job_open_unique(CONST_STRPTR candidate, char *resolved_out,
+                              ULONG resolved_cap);
+
+/* Writes a small status sidecar file - state (RENDERING/SUBMITTING/DONE/
+ * FAILED) plus error detail, see driver_core.c's mp_spool_write_status()
+ * - in one shot: open, write, close. Best-effort, like mp_spool_log()
+ * above - a lost status update never fails the job itself. */
+void mp_spool_status_write(CONST_STRPTR filename, const char *text,
+                           ULONG length);
+
 /* Rewrites length bytes at byte offset `offset` (from the start of the
  * currently-open job file), then seeks back to the end so a following
  * mp_spool_job_write() continues appending exactly where it left off.

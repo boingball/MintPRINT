@@ -30,6 +30,7 @@ extern struct DosLibrary *DOSBase;
 enum {
     MP_SPOOL_CMD_LOG = 1,
     MP_SPOOL_CMD_JOB_OPEN,
+    MP_SPOOL_CMD_JOB_OPEN_UNIQUE,
     MP_SPOOL_CMD_JOB_WRITE,
     MP_SPOOL_CMD_JOB_PATCH,
     MP_SPOOL_CMD_JOB_CLOSE,
@@ -40,6 +41,7 @@ enum {
     MP_SPOOL_CMD_AUX_CLOSE,
     MP_SPOOL_CMD_IPP_SUBMIT,
     MP_SPOOL_CMD_CONFIG_LOAD,
+    MP_SPOOL_CMD_STATUS_WRITE,
     MP_SPOOL_CMD_QUIT
 };
 
@@ -55,6 +57,11 @@ struct MPSpoolMsg {
     struct MPConfig *cfg_io;
     CONST_STRPTR document_format;
     struct MPIPPResult ipp_result;
+    /* Only read/written by MP_SPOOL_CMD_JOB_OPEN_UNIQUE: the name it
+     * actually opened (candidate, or candidate with a "-N" collision
+     * suffix inserted), copied out for the caller's own bookkeeping. */
+    char *out_buf;
+    ULONG out_cap;
     LONG result;
 };
 
@@ -91,6 +98,127 @@ static void mp_spool_proc_close_job(BPTR *job_fh)
         Close(*job_fh);
         *job_fh = 0;
     }
+}
+
+#define MP_SPOOL_UNIQUE_NAME_MAX 192
+
+static void mp_spool_civil_from_days(ULONG z, UWORD *y, UWORD *m, UWORD *d)
+{
+    ULONG era, doe, yoe, doy, mp;
+    z += 719468UL;
+    era = z / 146097UL;
+    doe = z - era * 146097UL;
+    yoe = (doe - doe / 1460UL + doe / 36524UL - doe / 146096UL) / 365UL;
+    doy = doe - (365UL * yoe + yoe / 4UL - yoe / 100UL);
+    mp = (5UL * doy + 2UL) / 153UL;
+    *d = (UWORD)(doy - (153UL * mp + 2UL) / 5UL + 1UL);
+    *m = (UWORD)(mp + (mp < 10UL ? 3UL : (ULONG)(-9)));
+    *y = (UWORD)(yoe + era * 400UL + (*m <= 2 ? 1UL : 0UL));
+}
+
+/* Called only by the spool Process: DateStamp is a dos.library call and
+ * must not run in printer.device callbacks, which may originate in a bare
+ * Exec Task. */
+static void mp_spool_timestamp(char *out)
+{
+    struct DateStamp ds;
+    UWORD year, month, day, hour, minute, second, yy;
+
+    DateStamp(&ds);
+    mp_spool_civil_from_days((ULONG)ds.ds_Days + 2922UL,
+                             &year, &month, &day);
+    hour = (UWORD)(ds.ds_Minute / 60);
+    minute = (UWORD)(ds.ds_Minute % 60);
+    second = (UWORD)(ds.ds_Tick / 50);
+    yy = (UWORD)(year % 100U);
+    out[0] = (char)('0' + (day / 10) % 10); out[1] = (char)('0' + day % 10);
+    out[2] = (char)('0' + (month / 10) % 10); out[3] = (char)('0' + month % 10);
+    out[4] = (char)('0' + (yy / 10) % 10); out[5] = (char)('0' + yy % 10);
+    out[6] = (char)('0' + (hour / 10) % 10); out[7] = (char)('0' + hour % 10);
+    out[8] = (char)('0' + (minute / 10) % 10); out[9] = (char)('0' + minute % 10);
+    out[10] = (char)('0' + (second / 10) % 10); out[11] = (char)('0' + second % 10);
+    out[12] = 0;
+}
+
+static void mp_spool_insert_suffix(const char *src, const char *suffix,
+                                    char *dst, ULONG cap)
+{
+    ULONG len = 0, dot, i, j;
+    while (src[len]) ++len;
+    dot = len;
+    for (i = len; i > 0; --i) {
+        if (src[i - 1] == '.') { dot = i - 1; break; }
+    }
+    i = 0;
+    for (j = 0; j < dot && i + 1 < cap; ++j, ++i) dst[i] = src[j];
+    if (i + 1 < cap) dst[i++] = '-';
+    for (j = 0; suffix[j] && i + 1 < cap; ++j, ++i) dst[i] = suffix[j];
+    for (j = dot; j < len && i + 1 < cap; ++j, ++i) dst[i] = src[j];
+    dst[i] = 0;
+}
+
+/* Copies src into dst (bounded by cap, always NUL-terminated) - a plain
+ * loop rather than strncpy(): this file has no libc, same as every other
+ * translation unit here (see driver_core.c's mp_streq() comment for why). */
+static void mp_spool_copy_bounded(char *dst, ULONG cap, const char *src)
+{
+    ULONG i = 0;
+    if (!dst || !cap) return;
+    while (src && src[i] && i + 1 < cap) { dst[i] = src[i]; ++i; }
+    dst[i] = 0;
+}
+
+/* Inserts "-<n>" (n = 1..99) immediately before the last '.' in
+ * candidate (or at candidate's own end, if it has no '.'), into buf
+ * (bounded by cap). Only called once mp_spool_proc_unique_name() below
+ * has found candidate itself already names an existing file. */
+static void mp_spool_build_suffixed_name(const char *candidate, ULONG n,
+                                         char *buf, ULONG cap)
+{
+    ULONG len = 0, dot, i, j;
+    char digits[3];
+    ULONG ndigits = 0;
+
+    while (candidate[len]) ++len;
+    dot = len;
+    for (i = len; i > 0; --i) {
+        if (candidate[i - 1] == '.') { dot = i - 1; break; }
+    }
+
+    if (n >= 10) digits[ndigits++] = (char)('0' + (n / 10));
+    digits[ndigits++] = (char)('0' + (n % 10));
+
+    i = 0;
+    for (j = 0; j < dot && i + 1 < cap; ++j, ++i) buf[i] = candidate[j];
+    if (i + 1 < cap) buf[i++] = '-';
+    for (j = 0; j < ndigits && i + 1 < cap; ++j, ++i) buf[i] = digits[j];
+    for (j = dot; j < len && i + 1 < cap; ++j, ++i) buf[i] = candidate[j];
+    buf[i] = 0;
+}
+
+/* Resolves candidate to a name free of any existing file, trying
+ * candidate itself first, then "-1", "-2", ... up to "-99" - the same
+ * scheme a machine with no real-time clock relies on entirely (every job
+ * built the same candidate, so every job after the first gets the next free
+ * suffix). Exhaustion is reported to the caller; an existing job is never
+ * silently overwritten. */
+static BOOL mp_spool_proc_unique_name(const char *candidate, char *resolved,
+                                      ULONG cap)
+{
+    ULONG n;
+    BPTR test;
+
+    mp_spool_copy_bounded(resolved, cap, candidate);
+
+    for (n = 0; n <= 99; ++n) {
+        if (n > 0)
+            mp_spool_build_suffixed_name(candidate, n, resolved, cap);
+        test = Lock((CONST_STRPTR)resolved, ACCESS_READ);
+        if (!test) return TRUE; /* name is free */
+        UnLock(test);
+    }
+
+    return FALSE;
 }
 
 /* Single-sided documents submit one Print-Job per page (see driver_core.c's
@@ -181,6 +309,42 @@ static LONG mp_spool_entry(void)
                     job_fh = Open(m->filename, MODE_NEWFILE);
                     m->result = job_fh ? 0 : -1;
                     break;
+
+                case MP_SPOOL_CMD_JOB_OPEN_UNIQUE: {
+                    char timestamp[13];
+                    char timestamped[MP_SPOOL_UNIQUE_NAME_MAX];
+                    char resolved[MP_SPOOL_UNIQUE_NAME_MAX];
+
+                    mp_spool_proc_close_job(&job_fh);
+                    mp_spool_timestamp(timestamp);
+                    mp_spool_insert_suffix((const char *)m->filename,
+                                           timestamp, timestamped,
+                                           sizeof(timestamped));
+                    if (!mp_spool_proc_unique_name(timestamped, resolved,
+                                                   sizeof(resolved))) {
+                        m->result = -1;
+                        break;
+                    }
+                    job_fh = Open((CONST_STRPTR)resolved, MODE_NEWFILE);
+                    if (job_fh && m->out_buf)
+                        mp_spool_copy_bounded(m->out_buf, m->out_cap,
+                                              resolved);
+                    m->result = job_fh ? 0 : -1;
+                    break;
+                }
+
+                case MP_SPOOL_CMD_STATUS_WRITE: {
+                    BPTR st = Open(m->filename, MODE_NEWFILE);
+                    if (st) {
+                        if (m->data && m->length)
+                            Write(st, (APTR)m->data, (LONG)m->length);
+                        Close(st);
+                        m->result = 0;
+                    } else {
+                        m->result = -1;
+                    }
+                    break;
+                }
 
                 case MP_SPOOL_CMD_JOB_WRITE:
                     if (job_fh && m->data && m->length) {
@@ -416,6 +580,30 @@ BOOL mp_spool_job_open(CONST_STRPTR filename)
     m.cmd = MP_SPOOL_CMD_JOB_OPEN;
     m.filename = filename;
     return mp_spool_send(&m);
+}
+
+BOOL mp_spool_job_open_unique(CONST_STRPTR candidate, char *resolved_out,
+                              ULONG resolved_cap)
+{
+    struct MPSpoolMsg m;
+    if (resolved_out && resolved_cap) resolved_out[0] = 0;
+    m.cmd = MP_SPOOL_CMD_JOB_OPEN_UNIQUE;
+    m.filename = candidate;
+    m.out_buf = resolved_out;
+    m.out_cap = resolved_cap;
+    return mp_spool_send(&m);
+}
+
+void mp_spool_status_write(CONST_STRPTR filename, const char *text,
+                           ULONG length)
+{
+    struct MPSpoolMsg m;
+    if (!filename) return;
+    m.cmd = MP_SPOOL_CMD_STATUS_WRITE;
+    m.filename = filename;
+    m.data = (const UBYTE *)text;
+    m.length = length;
+    mp_spool_send(&m); /* best-effort: a lost status update never fails the job */
 }
 
 BOOL mp_spool_job_write(const UBYTE *data, ULONG length)
