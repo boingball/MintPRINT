@@ -219,18 +219,18 @@ BOOL has_extension(const char *filename, const char *ext) {
  *
  * The "$STACK:" cookie is useful on newer AmigaOS startup code, but classic
  * m68k AmigaOS programs built with the GCC/libnix runtime use the __stack
- * variable. Keep the original 384 KiB margin: discovery/add chains through
+ * variable. Keep a 256 KiB margin: discovery/add chains through
  * parsing, profile migration, cache/icon handling, and GadTools requesters;
  * reducing this to 128 KiB caused a delayed 81000005 memory-list failure on
  * classic OS 2.x testing. Exercise Query, Discover, Add and Test Print on
  * real AmigaOS hardware before reducing this again.
  *
- * 384 KiB = 393216 bytes.
+ * 256 KiB = 262144 bytes.
  */
-unsigned long __stack = 393216UL;
+unsigned long __stack = 262144UL;
 
 /* Keep the cookie as harmless metadata for newer startup code too. */
-static const char USED min_stack[] = "$STACK:393216";
+static const char USED min_stack[] = "$STACK:262144";
 
 // Structure to map media sizes to trays (Updated to include tray name and medianame)
 struct MediaTrayMap {
