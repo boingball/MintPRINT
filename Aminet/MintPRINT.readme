@@ -90,6 +90,22 @@ Requirements
   - AirPrint or IPP Everywhere printers are the most likely to work
     without additional printer-specific support
 
+Memory and storage
+------------------
+
+With the default RAM/T: spooler, allow roughly 2 MB of free RAM as a
+practical minimum for a full-page print, especially on AmigaOS 2.x/3.x
+systems. MintPRINT still needs memory for the GUI, row buffer and active
+encoder scratch area, while T: normally stores the rendered document in RAM.
+
+Selecting a mounted hard-drive Spooler moves the rendered document and
+retained jobs into its hidden MPSPOOL drawer. This can make a 1 MB system
+practical, provided enough contiguous memory remains for the program and
+encoder buffers; 1 MB is a practical lower limit, not a guarantee for every
+printer, resolution or TCP/IP stack. Spooler storage is limited by free
+space on the selected drive and the filesystem's normal file-size and
+directory limits, rather than by Amiga RAM.
+
 MintPrint Settings performs network discovery and IPP capability parsing
 and therefore needs a larger stack than small classic Amiga utilities.
 Use the supplied MintPrintSettings.info file when launching from

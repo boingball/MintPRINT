@@ -44,6 +44,12 @@ be managed from the new Spooler window. The driver revision is **41.11**.
   **Keep Jobs (HDD)** to retain completed and failed jobs with unique names,
   live status sidecars, retry, reprint, copies, delete and printer
   reassignment from **View Spooler**.
+- **Lower memory requirement with HDD spooling.** With RAM/T: spooling, allow
+  roughly 2 MB of free RAM for a full-page print. Moving the rendered document
+  to an HDD can make a 1 MB system practical, although the GUI, row buffer,
+  encoder scratch and TCP/IP stack still require contiguous memory. Retained
+  spool storage is limited by free HDD space and normal filesystem file-size
+  limits, not by RAM.
 - **WordWorth 7 / Final Writer 97 strip printing fixed across all engines.**
   JPEG, PDF and PostScript now buffer `SPECIAL_NOFORMFEED` bands on disk until
   the complete page height is known, preventing one line per sheet and

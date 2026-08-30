@@ -480,6 +480,14 @@ paper, low ink, and so on) and the host:port it was sent to.
       attribute.
     - Refresh rescans MPSPOOL for the latest status of every job.
 
+As a practical guide, allow roughly 2 MB of free RAM when using the default
+RAM/T: spooler for a full-page print. An HDD Spooler can make a 1 MB system
+practical because the rendered document is no longer held in RAM, but the
+GUI, row buffer, encoder scratch and TCP/IP stack still need contiguous
+memory. The 1 MB figure is not a guarantee for every printer or resolution.
+With HDD spooling, retained-job storage is limited by free space on the
+selected drive and its filesystem's normal file-size and directory limits.
+
 @{" Back to Contents " LINK "Main"}
 @endnode
 
