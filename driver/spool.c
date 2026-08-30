@@ -317,7 +317,8 @@ static LONG mp_spool_entry(void)
 
                     mp_spool_proc_close_job(&job_fh);
                     mp_spool_timestamp(timestamp);
-                    mp_spool_insert_suffix(m->filename, timestamp, timestamped,
+                    mp_spool_insert_suffix((const char *)m->filename,
+                                           timestamp, timestamped,
                                            sizeof(timestamped));
                     if (!mp_spool_proc_unique_name(timestamped, resolved,
                                                    sizeof(resolved))) {
