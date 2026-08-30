@@ -732,9 +732,9 @@ char printer_icon_uri[256] = "";
 #define MP_PRINTER_ICON_LEFT  400
 /* TOP/SIZE fill the full gap between the ink/toner panel above (its
  * bottom row is MP_MARKER_AREA_BOTTOM, 115) and the Sides/Quality row
- * below (TopEdge 144). The artwork is deliberately kept above that row
+ * below (TopEdge 162). The artwork is deliberately kept above that row
  * on the taller-font OS 2.x screens. */
-#define MP_PRINTER_ICON_TOP   101
+#define MP_PRINTER_ICON_TOP   119
 #define MP_PRINTER_ICON_SIZE   42
 #define MP_PRINTER_ICON_TEMP  "T:MintPRINT-printer-icon.img"
 #define MP_PRINTER_ICON_PIXELS (MP_PRINTER_ICON_SIZE * MP_PRINTER_ICON_SIZE)
@@ -3672,7 +3672,7 @@ int load_ilbm_to_rgb(const char *filename, unsigned char **rgb_out, int *width_o
  * GadTools gadget: it is purely an explanatory picture for the Sides cycle.
  * ------------------------------------------------------------------ */
 #define MP_SIDES_HINT_LEFT       460
-#define MP_SIDES_HINT_TOP        108
+#define MP_SIDES_HINT_TOP        126
 #define MP_SIDES_HINT_SIZE        32
 #define MP_SIDES_HINT_MAX_PENS    32
 #define MP_SIDES_HINT_COUNT        3
@@ -8733,7 +8733,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     ng.ng_LeftEdge = 348;
     ng.ng_Width = 100;
     ng.ng_Height = 12;
-    ng.ng_TopEdge = 162 + topborder;
+    ng.ng_TopEdge = 180 + topborder;
     ng.ng_GadgetText = (STRPTR)"DPI:";
     ng.ng_GadgetID = GAD_RESOLUTION;
     gad = CreateGadget(CYCLE_KIND, gad, &ng,
@@ -8769,7 +8769,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     ng.ng_LeftEdge = 350;
     ng.ng_Width = 150;
     ng.ng_Height = 12;
-    ng.ng_TopEdge = 144 + topborder;
+    ng.ng_TopEdge = 162 + topborder;
     ng.ng_GadgetText = (STRPTR)"Sides:";
     ng.ng_GadgetID = GAD_SIDES;
     gad = CreateGadget(CYCLE_KIND, gad, &ng,
@@ -8878,9 +8878,9 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // mp_spool_win_open(). Unlike run_discovery_selection(), it is
     // non-modal: it returns immediately and process_window_events()'s
     // main loop drives it from then on, so both windows stay usable.
-    ng.ng_LeftEdge = 220;
+    ng.ng_LeftEdge = 200;
     ng.ng_TopEdge = 180 + topborder;
-    ng.ng_Width = 120;
+    ng.ng_Width = 140;
     ng.ng_Height = 12;
     ng.ng_Flags = 0;
     ng.ng_GadgetText = (STRPTR)"_View Spooler";

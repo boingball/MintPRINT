@@ -133,9 +133,10 @@ real-hardware use. Driver revision **41.2**.
   Workbench launch, reported as sluggish loading on real hardware.
   Removed. The per-pixel nearest-screen-pen colour match for that same
   icon is also now cached instead of recomputed on every redraw.
-- **GUI stack set to 256 KiB.** Discovery/Add needs more headroom than the
-  earlier 128 KiB experiment allowed; `__stack`, the `$STACK:` cookie, and
-  the Workbench icon's `do_StackSize` now all agree.
+- **GUI stack reduced from 384 KiB to 128 KiB.** The 256 KiB IPP response
+  buffers behind that figure are heap allocations now, not stack; `__stack`,
+  the `$STACK:` cookie, and the Workbench icon's `do_StackSize` all move
+  together.
 - Relabeled "Printer IP/Host" to "Printer IPv4" - both the GUI and driver
   only ever resolve it with `inet_addr()`, so a hostname was never
   actually supported.
