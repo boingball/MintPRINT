@@ -473,11 +473,13 @@ LONG PRT_STDARGS MintPRINTCompatRender(LONG ct, LONG x, LONG y,
                               raw_rows > 0 &&
                               raw_rows < g_render_compat_nominal_rows;
 
-            if (this_short) {
+            if (this_short || !noformfeed) {
                 /* Final Writer pattern: 1x128 then 1x100. The full-height
                  * control band is redundant blank extent because the normal
                  * page finalizer pads to the physical target; let the short
-                 * band be the strong logical delimiter instead. */
+                 * band be the strong logical delimiter instead. If the app
+                 * clears NOFORMFEED here, also drop the held blank tail and
+                 * let the normal final-band path close the page unchanged. */
                 g_render_compat_hold_tiny = FALSE;
                 g_render_compat_hold_rows = 0;
             } else {
