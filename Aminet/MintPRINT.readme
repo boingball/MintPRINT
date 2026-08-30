@@ -2,9 +2,9 @@ Short:        IPP/AirPrint driver and setup tool
 Author:       Darren Banfi (boingball)
 Uploader:     boingball@gmail.com
 Type:         driver/print
-Version:      1.2.7
-Requires:     68000+; AmigaOS 3.0+; TCP/IP stack providing bsdsocket.library
-Architecture: m68k-amigaos >= 3.0.0
+Version:      1.3.0
+Requires:     68000+; AmigaOS 2.04+; TCP/IP stack providing bsdsocket.library
+Architecture: m68k-amigaos >= 2.04
 
 MintPRINT
 =========
@@ -18,12 +18,13 @@ Settings, a GUI setup, discovery and test tool.
 Print graphics from applications that use AmigaOS' standard printer graphics
 dump interface (including MultiView, GraphicDump and many paint/DTP programs),
 or print plain text through the standard PRT: device. MintPRINT converts the
-printer.device output into JPEG, PostScript, PWG Raster, or PDF and submits the
+printer.device output into JPEG, PostScript, PWG Raster, Apple Raster (URF),
+or PDF and submits the
 resulting document directly to the printer's IPP endpoint over the network.
 
-AmigaOS 3.0/3.1 use the separate classic pre-V44 driver build. Newer
+AmigaOS 2.04 through 3.1 use the separate classic pre-V44 driver build. Newer
 V44-capable AmigaOS releases use the normal extended driver build. Both use
-the same MintPrint Settings GUI and the same IPP/JPEG/PostScript/PWG/PDF
+the same MintPrint Settings GUI and the same IPP/JPEG/PostScript/PWG/PDF/URF
 backend. MintPrint Settings detects which build this machine needs and
 installs the matching one automatically - see Installation below.
 
@@ -41,7 +42,7 @@ This archive contains one drawer plus an Installer script:
       MintPRINT-V44/
         MintPRINT           driver for V44-capable AmigaOS (3.2, 3.5, 3.9+)
       MintPRINT-OS31/
-        MintPRINT           classic AmigaOS 3.0/3.1 driver build
+        MintPRINT           classic AmigaOS 2.04-3.1 driver build
 
 Run MintPrintSettings (or the Install script) and it picks the correct
 Drivers/ subdrawer for this machine automatically - there is no separate
@@ -51,11 +52,12 @@ Features
 --------
 
   - Real DEVS:Printers/ printer.device driver
-  - AmigaOS 3.0/3.1 support via a dedicated classic driver build
+  - AmigaOS 2.04/2.1/3.0/3.1 support via a dedicated classic driver build
   - 68000-compatible driver
   - Graphics printing through the standard printer.device raster interface
   - Plain-text printing through PRT:/CMD_WRITE
-  - Prints using JPEG, PostScript, PWG Raster, or PDF, selectable per printer
+  - Prints using JPEG, PostScript, PWG Raster, Apple Raster (URF), or PDF,
+    selectable per printer
   - LAN printer discovery using SSDP and mDNS
   - IPP capability query - reads the printer's supported media, trays,
     colour modes, quality settings and document formats directly
@@ -64,6 +66,9 @@ Features
   - Printer make/model shown after a successful query
   - Built-in test page sent through printer.device
   - Built-in AmigaGuide help from the Help menu
+  - Optional disk-backed spooler for low-memory systems
+  - Retained spool jobs with status, retry, reprint, copies and delete
+  - WordWorth 7 and Final Writer 97 strip-printing support across all engines
   - Warns if a printer advertises none of the formats MintPRINT can
     produce, with information on reporting the printer for support
   - Detects this machine's AmigaOS/printer.device generation and offers to
@@ -76,12 +81,12 @@ Requirements
 ------------
 
   - Motorola 68000 or later
-  - AmigaOS 3.0 or later
+  - AmigaOS 2.04 or later (AmigaOS 2.0/2.1-era systems use the classic build)
   - A running TCP/IP stack providing bsdsocket.library. This is required
     for every printing path because MintPRINT talks directly to the
     printer over IP.
   - A network printer supporting IPP and at least one document format
-    MintPRINT can generate: JPEG, PostScript, PWG Raster, or PDF
+    MintPRINT can generate: JPEG, PostScript, PWG Raster, Apple Raster, or PDF
   - AirPrint or IPP Everywhere printers are the most likely to work
     without additional printer-specific support
 
@@ -99,7 +104,7 @@ run MintPrintSettings.
 On first run MintPrintSettings detects your AmigaOS/printer.device
 generation (from workbench.library's version) and tells you which bundled
 driver it picked - Drivers/MintPRINT-V44/ for AmigaOS 3.2, 3.5, 3.9 and
-later, or Drivers/MintPRINT-OS31/ for the classic pre-V44 AmigaOS 3.0/3.1
+later, or Drivers/MintPRINT-OS31/ for the classic pre-V44 AmigaOS 2.04-3.1
 build - before offering to install it to DEVS:Printers/MintPRINT. On later
 runs, if the matching bundled driver is newer than the installed copy, it
 offers to update it.
@@ -128,8 +133,8 @@ After rebooting:
 The active printer configuration is Unit0. Additional configurations can
 be stored in Unit1-Unit7 and copied to Unit0 when required.
 
-AmigaOS 3.0/3.1 notes
----------------------
+AmigaOS 2.x/3.0/3.1 notes
+--------------------------
 
 The Drivers/MintPRINT-OS31 build uses a classic pre-V44 printer driver
 structure and a compatibility rendering path for the older printer.device
@@ -137,16 +142,18 @@ raster format. The same ABI also covers AmigaOS 3.0. The IPP networking and
 JPEG/PostScript/PWG Raster/PDF output code is shared with the newer driver
 build.
 
-AmigaOS 3.0 compatibility follows from the V39/V37 library requirements and
-pre-V44 printer.device ABI used by this build. AmigaOS 3.1 has had more direct
-real-hardware testing, so 3.0 user reports are especially welcome.
+AmigaOS 2.04/2.1 compatibility follows from the V37 library requirements and
+pre-V44 printer.device ABI used by this build. The settings GUI and classic
+driver have been exercised on OS 2.x emulation; AmigaOS 3.1 has had more
+direct real-hardware testing, so physical OS 2.x reports are especially
+welcome.
 
 MintPrintSettings should be launched using the supplied icon so its
 configured stack size is used. If launching from a Shell on a classic
 system and using a build which does not provide its own enlarged stack,
 set a large Shell stack first, for example:
 
-  Stack 131072
+  Stack 262144
 
 Reporting a problem
 -------------------
@@ -170,7 +177,7 @@ Please include the AmigaOS version, TCP/IP stack, document engine, DPI,
 media/tray, scaling, quality and colour mode so a successful configuration
 can be reproduced by another user.
 
-When reporting an AmigaOS 3.0/3.1 problem, please also mention that the
+When reporting an AmigaOS 2.x/3.0/3.1 problem, please also mention that the
 MintPRINT-OS31 driver build is being used.
 
 Source Code
@@ -196,6 +203,25 @@ from Anthropic Claude.
 
 History
 -------
+
+1.3.0  Spooler management, AmigaOS 2.x compatibility and strip-printing fixes,
+       driver revision 41.11.
+
+       - Added optional disk-backed spooling for low-memory systems, with
+         RAM/T: retained as the default and hard-drive jobs stored in the
+         hidden MPSPOOL drawer.
+       - Added retained job management: unique names, status sidecars,
+         retry, reprint, copies, delete, printer reassignment and refresh.
+       - Added the Keep Jobs (HDD) option and View Spooler management window.
+       - Added the classic AmigaOS 2.04/2.1-compatible GUI path; the classic
+         pre-V44 driver remains the correct choice through AmigaOS 3.1.
+       - Improved low-colour printer and duplex artwork for older Workbench
+         screens, including grayscale-style rendering on 16-colour screens.
+       - Fixed WordWorth 7 and Final Writer 97 strip printing for JPEG, PDF
+         and PostScript by buffering SPECIAL_NOFORMFEED bands on disk until
+         the complete page height is known.
+       - Increased the Workbench launch stack to 256 KiB for safer discovery,
+         printer selection and low-memory OS 2.x use.
 
 1.2.7  Fixed two-sided printing of plain text, driver revision 41.4.
 

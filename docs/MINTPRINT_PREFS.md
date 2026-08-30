@@ -53,11 +53,13 @@ worth keeping, save them to an empty unit slot first. Activate on Unit0
 itself is a no-op (it is already active); on a unit with nothing saved yet
 it just reports that there is nothing to copy.
 
-`ENGINE=jpeg`, `ENGINE=postscript`, `ENGINE=pwg-raster`, and `ENGINE=pdf` are
-persisted by the preferences program and all four are real driver backends:
+`ENGINE=jpeg`, `ENGINE=postscript`, `ENGINE=pwg-raster`, `ENGINE=urf`, and
+`ENGINE=pdf` are persisted by the preferences program and all five are real
+driver backends:
 `DEVS:Printers/MintPRINT` reads Unit0's `ENGINE=` and produces a JPEG, a
-PostScript (`application/postscript`), PWG Raster (`image/pwg-raster`), or a
-PDF (`application/pdf`) document accordingly. See `docs/POSTSCRIPT_ENGINE.md`,
+PostScript (`application/postscript`), PWG Raster (`image/pwg-raster`), Apple
+Raster (`image/urf`), or a PDF (`application/pdf`) document accordingly. See
+`docs/POSTSCRIPT_ENGINE.md`,
 `docs/PWG_RASTER.md`, and `docs/PDF_ENGINE.md` for how each encoder works and
 what has and hasn't been physically test-printed yet.
 

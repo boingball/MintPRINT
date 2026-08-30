@@ -1,5 +1,5 @@
 @database MintPrintSettings.guide
-@$VER: MintPrintSettings.guide 1.2.8 (29.08.2026)
+@$VER: MintPrintSettings.guide 1.3.0 (30.08.2026)
 @author "MintPRINT project (boingball)"
 @(c) "Copyright (c) 2026 Darren Banfi (boingball). MIT License."
 @width 74
@@ -13,6 +13,10 @@ MintPrint Settings is the setup and test program for MintPRINT, the
 IPP/AirPrint printer.device driver. It finds your network printer,
 asks it what it can do, and saves the settings MintPRINT needs to
 print from ordinary Amiga applications.
+
+MintPrint Settings supports AmigaOS 2.04 and later. Use the supplied
+Workbench icon when launching it so the configured 256 KiB stack is
+applied, especially on older low-memory systems.
 
 This guide covers the program window itself. For the driver's own
 design notes and printer-by-printer compatibility results, see the
@@ -32,6 +36,7 @@ Topics:
     @{" Multiple printers (Units) " LINK "Units"}
     @{" Installing the driver "  LINK "DriverInstall"}
     @{" Why two driver builds? "  LINK "TwoDrivers"}
+    @{" AmigaOS 2.x compatibility " LINK "OS2Compatibility"}
     @{" Spooler: RAM or hard drive "  LINK "Spooler"}
     @{" Test Print "             LINK "TestPrint"}
     @{" Troubleshooting "        LINK "Troubleshooting"}
@@ -305,7 +310,7 @@ MintPRINT ships as one drawer containing MintPrintSettings and BOTH
 compiled driver builds, under Drivers/:
 
     Drivers/MintPRINT-V44/MintPRINT    AmigaOS 3.2, 3.5, 3.9 and later
-    Drivers/MintPRINT-OS31/MintPRINT   AmigaOS 3.0 and 3.1 (classic
+    Drivers/MintPRINT-OS31/MintPRINT   AmigaOS 2.04 through 3.1 (classic
                                         pre-V44 printer.device)
 
 This is a real ABI split in printer.device itself, not just a build
@@ -339,10 +344,32 @@ installs the driver and the MintPrintSettings drawer, and you still
 need to select MintPRINT in Printer Preferences afterwards, same as
 above.
 
-On AmigaOS 3.0/3.1, both the classic driver and MintPrint Settings
+On AmigaOS 2.04 through 3.1, both the classic driver and MintPrint Settings
 itself require a bsdsocket.library V4-compatible TCP/IP stack
 (Roadshow, AmiTCP, Miami or similar) - Settings checks for a usable
 socket before opening its window, and refuses to start without one.
+
+@{" Back to Contents " LINK "Main"}
+@endnode
+
+@node OS2Compatibility "AmigaOS 2.x compatibility"
+@toc Main
+                         AmigaOS 2.x compatibility
+                         -------------------------
+
+MintPrint Settings and the classic pre-V44 driver build support
+AmigaOS 2.04/2.1-era systems. The GUI uses the older v37 library
+interfaces available on those systems, while the V44 driver build is
+reserved for AmigaOS 3.2 and later.
+
+The classic build is selected for AmigaOS 2.04 through 3.1. Both the
+GUI and driver have been exercised in OS 2.x emulation. Physical OS 2.x
+systems can vary with their printer.device and TCP/IP stack, so reports
+should include the exact AmigaOS version and bsdsocket.library stack.
+
+For older Workbench screens with 16 colours or fewer, printer and
+duplex artwork uses grayscale-style pen selection so the standard
+Workbench palette does not produce garish coloured graphics.
 
 @{" Back to Contents " LINK "Main"}
 @endnode
@@ -362,7 +389,7 @@ to bridge it.
 
 What actually changed at V44:
 
-    - Before V44 (AmigaOS 3.0/3.1's "classic" printer.device), a
+    - Before V44 (AmigaOS 2.04 through 3.1's "classic" printer.device), a
       driver only sees the original PrinterExtendedData layout, and
       printer.device's own graphics pipeline only ever supplies
       4-bit-per-gun (0-15) Yellow/Magenta/Cyan/Black intensity values

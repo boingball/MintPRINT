@@ -1,4 +1,4 @@
-# MintPRINT on AmigaOS 3.1
+# MintPRINT on AmigaOS 2.x and 3.1
 
 MintPRINT now has a separate **classic printer.device build** intended for
 AmigaOS 3.1 / printer.device V40.
@@ -110,7 +110,7 @@ containing `MintPrintSettings` and both driver builds under `Drivers/`:
 - `Drivers/MintPRINT-V44/MintPRINT` - V44+ driver for AmigaOS 3.2, 3.5, 3.9
   and later.
 - `Drivers/MintPRINT-OS31/MintPRINT` - classic pre-V44 driver for AmigaOS
-  3.0/3.1.
+  2.04 through 3.1.
 
 `mp_needs_os31_driver()` in `src/MintPrintSettings.c` checks
 `mp_os_version()` (workbench.library's version, not exec.library's - see
@@ -124,7 +124,7 @@ which driver it picked (and why) before installing it. The `Install`
 script at the repository root offers the same auto-detect-then-confirm
 flow for anyone installing without running MintPrintSettings first.
 
-## AmigaOS 2.0/2.04 (experimental, unconfirmed)
+## AmigaOS 2.04/2.1 compatibility
 
 The classic driver's own printer.device interface (pre-V44
 `PrinterExtendedData`, `PPC_COLORGFX` only) is the same interface that's
@@ -143,29 +143,11 @@ used only for the printer-status ink/toner strip's marker-colour fill), is
 now skipped on a sub-v39 `graphics.library` - that strip just shows no fill
 on such a system rather than calling an entry point that doesn't exist.
 
-**First physical test on real AmigaOS 2.04 (v37)**: MintPrint Settings built
-and ran, and the OS31 driver installed and completed a Test Print - after
-several minutes, on a system with roughly 2MB of RAM (the practical minimum
-observed so far; see the memory preflight check below). The printed page was
-not centered - content was pushed toward the left edge rather than centred on
-the page, the same symptom class as the pre-fix V44 DUMPRPORT geometry quirk
-described in `mp_job_write_row()` (`driver/driver_core.c`) and in
-`mintprint_test_page()`'s own history (`src/MintPrintSettings.c`). That
-comment's fix (the `g_recenter_clamped_page` clamp, keyed off how far
-printer.device's reported page width diverges from the configured media's
-expected width) is shared, unmodified code between both driver builds, so it
-is already compiled into the OS31/2.04 build too - it just may not be
-tripping the same way on this older printer.device's own reported geometry.
-Root-causing this precisely needs the actual numbers from a debug-enabled
-run (`Debug: on` in MintPrint Settings, then `T:MintPRINT-driver.log` off the
-test machine) - in particular the "Render begin width/height", "Clamping
-oversized page width", and "Row xpos printer/used/scaled" lines - rather than
-guessing at a fix that might only patch this one case and regress the
-already-confirmed V44 behaviour.
-
-Building and running MintPrint Settings itself successfully on a v37 system
-is confirmed; the driver binary's own behaviour there is the second,
-separate question, now underway per the above.
+MintPrint Settings and the classic driver now use the v37 library interface
+needed by OS 2.04/2.1-era systems. The GUI and classic driver selection have
+been exercised in OS 2.x emulation, including the compact settings window.
+Physical OS 2.x systems can still vary with their printer.device and TCP/IP
+stack, so reports from real hardware are welcome.
 
 ## Test status
 
@@ -183,6 +165,7 @@ Still worth confirming as testing continues:
 4. A second reboot/install/update cycle (updating an already-installed
    driver, not just a first install).
 5. A real bsdsocket.library stack other than the one already tested.
+6. Physical OS 2.04/2.1 hardware, beyond the existing emulation tests.
 
 If the OS3.1 printer transport opens Parallel/Serial even though MintPRINT
 never calls `PD->pd_PWrite`, that is the first compatibility point to inspect.

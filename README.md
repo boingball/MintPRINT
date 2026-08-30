@@ -3,7 +3,7 @@
   MintPRINT
 </h1>
 
-![AmigaOS](https://img.shields.io/badge/AmigaOS-3.0%2B-orange)
+![AmigaOS](https://img.shields.io/badge/AmigaOS-2.04%2B-orange)
 ![CPU](https://img.shields.io/badge/CPU-m68k-blue)
 ![Printing](https://img.shields.io/badge/Printing-IPP%20%2F%20AirPrint-0078D4)
 ![Formats](https://img.shields.io/badge/Formats-PWG%20%7C%20URF%20%7C%20JPEG%20%7C%20PDF%20%7C%20PostScript-purple)
@@ -20,17 +20,42 @@
 **Modern network printing for classic Amigas.**
 
 Print directly from normal Amiga applications to modern IPP/AirPrint printers
-using PWG Raster, JPEG, PDF or PostScript — no PC print server required.
+using PWG Raster, Apple Raster, JPEG, PDF or PostScript — no PC print server
+required.
 
 # MintPRINT
 
 IPP/AirPrint printing for classic AmigaOS - print to modern network
-printers (JPEG, PostScript, PWG Raster, or PDF; no driver-specific software
+printers (JPEG, PostScript, PWG Raster, Apple Raster or PDF; no driver-specific software
 on the printer side) straight from Amiga applications, via a real `DEVS:Printers/`
 printer.device driver plus a GUI setup tool.
 
 <img width="525" height="327" alt="image" src="https://github.com/user-attachments/assets/ba4cfd1f-8b0f-4aee-91b9-a6b221712ca5" />
 
+
+## What's new in 1.3.0
+
+MintPRINT 1.3.0 is the spooler and compatibility milestone. The GUI now runs
+on AmigaOS 2.04-era systems as well as later releases, and retained jobs can
+be managed from the new Spooler window. The driver revision is **41.11**.
+
+- **Disk-backed spooler management.** Choose RAM/T: for the traditional
+  behaviour, or a mounted hard drive for a hidden `MPSPOOL` directory. Enable
+  **Keep Jobs (HDD)** to retain completed and failed jobs with unique names,
+  live status sidecars, retry, reprint, copies, delete and printer
+  reassignment from **View Spooler**.
+- **WordWorth 7 / Final Writer 97 strip printing fixed across all engines.**
+  JPEG, PDF and PostScript now buffer `SPECIAL_NOFORMFEED` bands on disk until
+  the complete page height is known, preventing one line per sheet and
+  sideways-looking pages. PWG Raster and Apple Raster retain their existing
+  accumulation paths.
+- **AmigaOS 2.x compatibility.** The classic pre-V44 build and settings GUI
+  now use the older library interface required by AmigaOS 2.04/2.1-era
+  systems. The classic driver remains the correct choice through AmigaOS 3.1;
+  V44+ systems use the extended build.
+- **Older Workbench graphics improved.** Printer and duplex artwork is kept
+  readable on constrained 16-colour screens, with grayscale-style pen
+  selection instead of garish palette colours.
 
 ## What's new in 1.2.7
 
@@ -162,7 +187,7 @@ testing it. Driver behaviour is unchanged (still driver revision 41.1).
   separate `MintPRINT` / `MintPRINT-OS31` release bundles are merged into a
   single `MintPRINT/` drawer, with both compiled drivers staged under
   `Drivers/MintPRINT-V44/` (AmigaOS 3.2, 3.5, 3.9+) and
-  `Drivers/MintPRINT-OS31/` (AmigaOS 3.0/3.1 classic) - see
+  `Drivers/MintPRINT-OS31/` (AmigaOS 2.04 through 3.1 classic) - see
   `docs/OS31_SUPPORT.md`. There is no longer a "which archive do I
   download" question.
 - **Automatic driver selection.** MintPrint Settings now reads
@@ -402,7 +427,7 @@ still selected by default where available.
 MintPRINT ships as one drawer (`MintPRINT/`) containing `MintPrintSettings`
 and both driver builds under `Drivers/` - `Drivers/MintPRINT-V44/` for
 AmigaOS 3.2, 3.5, 3.9 (and later), `Drivers/MintPRINT-OS31/` for the
-classic pre-V44 AmigaOS 3.0/3.1 build (see `docs/OS31_SUPPORT.md`).
+classic pre-V44 AmigaOS 2.04 through 3.1 build (see `docs/OS31_SUPPORT.md`).
 
 Run `MintPrintSettings` - it detects which driver this machine needs from
 workbench.library's version, tells you what it found, and offers to
@@ -438,7 +463,7 @@ Requires `m68k-amigaos-gcc` (Bebbo's cross-toolchain) on `PATH`, or set
 
     make gui       # MintPrintSettings
     make driver    # build/driver/MintPRINT (V44+ build)
-    make driver31  # build/driver31/MintPRINT (AmigaOS 3.0/3.1 classic build)
+    make driver31  # build/driver31/MintPRINT (AmigaOS 2.04-3.1 classic build)
     make release   # all three, staged into release/MintPRINT/ ready to distribute
     make clean
 
@@ -469,8 +494,8 @@ be added with its AmigaOS version, TCP/IP stack, engine and exact print options.
 
 ## Status
 
-MintPRINT is now a real, working app: version **1.2.7** GUI with **driver
-revision 41.4**, with multiple printers confirmed fully working over IPP/AirPrint
+MintPRINT is now a real, working app: version **1.3.0** GUI with **driver
+revision 41.11**, with multiple printers confirmed fully working over IPP/AirPrint
 from real Amiga hardware. It's still actively developed and not every printer
 is confirmed yet, so check the
 [printer compatibility page](docs/PRINTER_COMPATIBILITY.md) for your specific
