@@ -167,14 +167,14 @@ static struct MPTestPrintJob test_print_job;
 // switchable GUI-side profiles (e.g. for a second/third network printer).
 #define MAX_UNITS 8
 
-/* A few pixels below the Keep Spooled Jobs/View Spool row (216+12 tall,
- * itself 18px below Test Print/Save/Exit at 198) for even spacing - see
+/* A few pixels below the Test Print/Debug/Save/Exit row (216+12 tall,
+ * itself 18px below Keep Spooled Jobs/View Spooler at 198) for even spacing - see
  * WA_InnerHeight in main() for why raising this also raises that: the
  * box's bottom border sits at OUTPUT_TOP + 81 (MAX_OUTPUT_LINES lines at
  * 10px, see below, plus the 2px border), and WA_InnerHeight is kept equal
  * to that so the box's border sits flush with the window's own bottom
  * edge instead of leaving dead space below it. */
-#define OUTPUT_TOP     250 // Below Keep Spooled Jobs / View Spool row
+#define OUTPUT_TOP     250 // Below Test Print / Debug / Save / Exit row
 #define OUTPUT_LEFT    10
 #define OUTPUT_RIGHT   (window->Width - 20)
 
@@ -8789,7 +8789,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
 
     // Test Print button
     ng.ng_LeftEdge = 10;
-    ng.ng_TopEdge = 198 + topborder;
+    ng.ng_TopEdge = 216 + topborder;
     ng.ng_Width = 110;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"_Test Print";
@@ -8808,7 +8808,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // so it needs no separate GadgetText prefix, unlike the stacked
     // Printer Engine/Spooler cycles above.
     ng.ng_LeftEdge = 160;
-    ng.ng_TopEdge = 198 + topborder;
+    ng.ng_TopEdge = 216 + topborder;
     ng.ng_Width = 110;
     ng.ng_Height = 12;
     ng.ng_GadgetText = NULL;
@@ -8825,7 +8825,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // Save button - same action as File -> Save Driver Settings.
     ng.ng_LeftEdge = 304;
     ng.ng_Width = 90;
-    ng.ng_TopEdge = 198 + topborder;
+    ng.ng_TopEdge = 216 + topborder;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"_Save";
     ng.ng_GadgetID = GAD_SAVE_BUTTON;
@@ -8840,7 +8840,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // Exit button
     ng.ng_LeftEdge = 408;
     ng.ng_Width = 90;
-    ng.ng_TopEdge = 198 + topborder;
+    ng.ng_TopEdge = 216 + topborder;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"_Exit";
     ng.ng_GadgetID = GAD_EXIT_BUTTON;
@@ -8864,7 +8864,7 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // entirely off-window, leaving what looks like an unlabelled
     // checkbox.
     ng.ng_LeftEdge = 10;
-    ng.ng_TopEdge = 216 + topborder;
+    ng.ng_TopEdge = 198 + topborder;
     ng.ng_Width = 160;
     ng.ng_Height = 12;
     ng.ng_GadgetText = (STRPTR)"Keep Jobs (HDD)";
@@ -8884,11 +8884,11 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     // non-modal: it returns immediately and process_window_events()'s
     // main loop drives it from then on, so both windows stay usable.
     ng.ng_LeftEdge = 200;
-    ng.ng_TopEdge = 216 + topborder;
+    ng.ng_TopEdge = 198 + topborder;
     ng.ng_Width = 140;
     ng.ng_Height = 12;
     ng.ng_Flags = 0;
-    ng.ng_GadgetText = (STRPTR)"_View Spool...";
+    ng.ng_GadgetText = (STRPTR)"_View Spooler";
     ng.ng_GadgetID = GAD_VIEW_SPOOL;
     gad = CreateGadget(BUTTON_KIND, gad, &ng,
         GT_Underscore, '_',
