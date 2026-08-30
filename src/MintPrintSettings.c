@@ -3854,6 +3854,41 @@ static void mp_fill_screen_palette32(struct ColorMap *cm, int pen_count,
     }
 }
 
+/* cm->Count only names a real palette size on a "V38 compatible" ColorMap
+ * (cm->Type != 0 - graphics/view.h's own comment on that field: Type == 0
+ * means the older, simpler V1.2/V1.3-compatible ColorMap layout). A Type
+ * == 0 ColorMap - still seen from some OS2.0/2.04-era graphics.library
+ * builds - predates the Count field's meaning, so trusting it there feeds
+ * mp_fill_screen_palette32() and every nearest-pen search a pen_count
+ * that does not match the screen's real, much smaller pen table -
+ * anything at or past the true end of that table is whatever memory
+ * happens to sit there, and a search that picks one of those phantom
+ * entries returns a pen index the hardware cannot actually display (a
+ * 4-bitplane screen only ever has 16 real pens; SetAPen() with a larger
+ * index does not fail, it just displays *some* real pen picked by
+ * whichever low bits survive). Falling back to the bitmap's own plane
+ * count sidesteps this entirely - BitMap->Depth has been a stable,
+ * always-valid field since Kickstart 1.0, unlike Count's meaning here. */
+static int mp_screen_pen_count(struct Screen *scr, struct ColorMap *cm) {
+    int count = (cm->Type != 0) ? (int)cm->Count : 0;
+
+    if (count <= 0) {
+        count = (scr && scr->RastPort.BitMap)
+                    ? (1 << scr->RastPort.BitMap->Depth) : 16;
+    }
+    if (count > 256) count = 256;
+    if (count < 1) count = 1;
+    return count;
+}
+
+/* A pixel counts as "near-neutral" (grey-ish rather than a real hue) when
+ * its RGB channels are all within this many levels (0-255 scale) of each
+ * other - loose enough for a slightly warm/cool grey, tight enough to
+ * exclude a genuinely saturated colour. Used below to decide, per pixel,
+ * whether to prefer mp_low_colour_gray_pen()'s neutral-biased pen search
+ * over the plain nearest-colour one. */
+#define MP_NEUTRAL_SAT_THRESHOLD 32
+
 /* A nearest-colour lookup is useful on a 32+ colour screen, but it produces
  * harsh, misleading colour blocks on a 16-colour Workbench palette. Use the
  * closest-luminance, least-saturated existing pen there instead. This keeps
@@ -3904,7 +3939,6 @@ static void mp_draw_sides_hint(void) {
     struct RastPort *rp;
     int index;
     int screen_pen_count;
-    int low_colour_mode;
     int draw_w, draw_h;
     int x, y;
     int left = MP_SIDES_HINT_LEFT;
@@ -3915,16 +3949,11 @@ static void mp_draw_sides_hint(void) {
 
     rp = window->RPort;
     cm = screen->ViewPort.ColorMap;
-    if (!cm || cm->Count == 0)
+    if (!cm)
         return;
 
-    screen_pen_count = (int)cm->Count;
-    if (screen_pen_count > 256)
-        screen_pen_count = 256;
+    screen_pen_count = mp_screen_pen_count(screen, cm);
     mp_fill_screen_palette32(cm, screen_pen_count, screen_palette);
-    low_colour_mode = screen_pen_count <= 16;
-    if (screen->RastPort.BitMap && screen->RastPort.BitMap->Depth <= 4)
-        low_colour_mode = TRUE;
     SetDrMd(rp, JAM1);
     SetAPen(rp, 0);
     RectFill(rp, left - 1, top - 1,
@@ -3956,13 +3985,28 @@ static void mp_draw_sides_hint(void) {
         LONG last_pen = -1;
         for (x = 0; x < draw_w; ++x) {
             int pixel = y * image->width + x;
+            UBYTE sr = image->rgb[pixel * 3 + 0];
+            UBYTE sg = image->rgb[pixel * 3 + 1];
+            UBYTE sb = image->rgb[pixel * 3 + 2];
+            UBYTE smax = (sr > sg) ? sr : sg;
+            UBYTE smin = (sr < sg) ? sr : sg;
             UBYTE pen = image->pens[pixel];
 
-            if (low_colour_mode)
+            if (sb > smax) smax = sb;
+            if (sb < smin) smin = sb;
+
+            /* Per source pixel, not per screen: a screen's own advertised
+             * colour count/depth turned out not to be a reliable signal
+             * for whether it actually offers a smooth grey ramp (see
+             * mp_screen_pen_count()'s comment on why Count itself can be
+             * unreliable) - so this only asks whether THIS pixel looks
+             * like it was meant to be grey, and if so, prefers a screen
+             * pen that is too, on any screen. A source pixel that is
+             * already a real colour still gets the plain nearest-colour
+             * match above unchanged. */
+            if ((int)smax - (int)smin <= MP_NEUTRAL_SAT_THRESHOLD)
                 pen = mp_low_colour_gray_pen(screen_palette, screen_pen_count,
-                                             image->rgb[pixel * 3 + 0],
-                                             image->rgb[pixel * 3 + 1],
-                                             image->rgb[pixel * 3 + 2]);
+                                             sr, sg, sb);
 
             if ((LONG)pen != last_pen) {
                 SetAPen(rp, pen);
@@ -6830,27 +6874,22 @@ static void mp_draw_printer_icon(void) {
     struct ColorMap *cm;
     struct RastPort *rp;
     int screen_pen_count;
-    int low_colour_mode;
     int left = MP_PRINTER_ICON_LEFT;
     int top = g_topborder + MP_PRINTER_ICON_TOP;
     int i;
     LONG last_pen = -1;
+    UBYTE bg_r, bg_g, bg_b;
 
     if (!window || !screen)
         return;
 
     rp = window->RPort;
     cm = screen->ViewPort.ColorMap;
-    if (!cm || cm->Count == 0)
+    if (!cm)
         return;
 
-    screen_pen_count = (int)cm->Count;
-    if (screen_pen_count > 256)
-        screen_pen_count = 256;
+    screen_pen_count = mp_screen_pen_count(screen, cm);
     mp_fill_screen_palette32(cm, screen_pen_count, screen_palette);
-    low_colour_mode = screen_pen_count <= 16;
-    if (screen->RastPort.BitMap && screen->RastPort.BitMap->Depth <= 4)
-        low_colour_mode = TRUE;
     SetDrMd(rp, JAM1);
     SetAPen(rp, 0);
     RectFill(rp, left - 1, top - 1,
@@ -6859,14 +6898,18 @@ static void mp_draw_printer_icon(void) {
     if (!mp_printer_icon_valid)
         return;
 
-    /* Convert RGBA to the current screen's pens once per downloaded icon,
-     * not on every refresh.  Partial alpha is composited against pen 0,
-     * which is exactly the background we just cleared the icon box with. */
-    if (!mp_printer_icon_pens_valid) {
-        UBYTE bg_r = (UBYTE)((screen_palette[0] >> 24) & 0xffUL);
-        UBYTE bg_g = (UBYTE)((screen_palette[1] >> 24) & 0xffUL);
-        UBYTE bg_b = (UBYTE)((screen_palette[2] >> 24) & 0xffUL);
+    /* Partial alpha is composited against pen 0, which is exactly the
+     * background we just cleared the icon box with - needed both to
+     * populate the cached base pens below and, every redraw, to decide
+     * per pixel whether the actual on-screen colour a viewer would see
+     * is itself near-neutral. */
+    bg_r = (UBYTE)((screen_palette[0] >> 24) & 0xffUL);
+    bg_g = (UBYTE)((screen_palette[1] >> 24) & 0xffUL);
+    bg_b = (UBYTE)((screen_palette[2] >> 24) & 0xffUL);
 
+    /* Convert RGBA to the current screen's pens once per downloaded icon,
+     * not on every refresh. */
+    if (!mp_printer_icon_pens_valid) {
         for (i = 0; i < MP_PRINTER_ICON_PIXELS; ++i) {
             const UBYTE *p = mp_printer_icon_rgba + i * 4;
             ULONG a = p[3];
@@ -6895,14 +6938,38 @@ static void mp_draw_printer_icon(void) {
         int x;
         int y;
         UBYTE pen;
+        const UBYTE *p;
+        ULONG a;
+        UBYTE r, g, b, smax, smin;
+
         if (!mp_printer_icon_mask[i])
             continue;
         pen = mp_printer_icon_pens[i];
-        if (low_colour_mode) {
-            const UBYTE *rgba = mp_printer_icon_rgba + i * 4;
+
+        /* Per pixel, not per screen: a screen's own advertised colour
+         * count/depth turned out not to be a reliable signal for whether
+         * it actually offers a smooth grey ramp (see
+         * mp_screen_pen_count()'s comment on why Count itself can be
+         * unreliable) - so this only asks whether the actual on-screen
+         * colour this pixel composites to (background-blended, same as
+         * the cached base pen above - not the raw un-composited RGBA)
+         * looks like it was meant to be grey, and if so, prefers a
+         * screen pen that is too, on any screen depth. A pixel that
+         * composites to a real colour still gets the plain nearest-colour
+         * cached pen unchanged. */
+        p = mp_printer_icon_rgba + i * 4;
+        a = p[3];
+        r = (UBYTE)(((ULONG)p[0] * a + (ULONG)bg_r * (255UL - a) + 127UL) / 255UL);
+        g = (UBYTE)(((ULONG)p[1] * a + (ULONG)bg_g * (255UL - a) + 127UL) / 255UL);
+        b = (UBYTE)(((ULONG)p[2] * a + (ULONG)bg_b * (255UL - a) + 127UL) / 255UL);
+        smax = (r > g) ? r : g;
+        smin = (r < g) ? r : g;
+        if (b > smax) smax = b;
+        if (b < smin) smin = b;
+        if ((int)smax - (int)smin <= MP_NEUTRAL_SAT_THRESHOLD)
             pen = mp_low_colour_gray_pen(screen_palette, screen_pen_count,
-                                         rgba[0], rgba[1], rgba[2]);
-        }
+                                         r, g, b);
+
         if ((LONG)pen != last_pen) {
             SetAPen(rp, pen);
             last_pen = (LONG)pen;
