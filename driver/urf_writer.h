@@ -67,26 +67,34 @@ typedef struct MPUrfEncoder {
 
 unsigned long mp_urf_scratch_size(unsigned long width);
 
+/* Translate MintPRINT's saved draft/normal/high (or 3/4/5) value to the
+ * Apple Raster page-header enum. Empty or unknown values become normal. */
+unsigned long mp_urf_quality_value(const char *quality);
+
 /* dpi is the capture resolution the raster was rendered at - written into
  * the page header's single HWResolution value (Apple Raster, unlike PWG,
  * declares only one resolution figure, used for both axes). Pass 0 to fall
- * back to 300dpi. Single page only - equivalent to
- * mp_urf_begin_page(enc, width, height, dpi, 1, 0, 0, ...). */
+ * back to 300dpi. print_quality is the IPP enum value (3 draft, 4 normal,
+ * 5 high); zero or any other value safely defaults to normal. Single page
+ * only - equivalent to
+ * mp_urf_begin_page(enc, width, height, dpi, quality, 1, 0, 0, ...). */
 int mp_urf_begin(MPUrfEncoder *enc, unsigned long width, unsigned long height,
-                 unsigned long dpi,
+                 unsigned long dpi, unsigned long print_quality,
                  unsigned char *scratch, unsigned long scratch_size,
                  MPUrfWriteFn write_fn, void *write_ctx);
 
 /* Starts another page in the same Apple Raster stream. write_file_header
  * must be true for the first page and false for every later page (see the
  * file comment above - the 12-byte file header, including the page count
- * placeholder, is written exactly once). duplex/tumble set the page
- * header's duplex byte: no duplex (both false, 0), duplex short side
- * (duplex && tumble, 1 - matches IPP sides=two-sided-short-edge), or
- * duplex long side (duplex && !tumble, 2 - two-sided-long-edge). */
+ * placeholder, is written exactly once). print_quality follows the same
+ * 3/4/5 contract as mp_urf_begin(). duplex/tumble set the CUPS-compatible
+ * page-header byte: no duplex (both false, 1), duplex short side
+ * (duplex && tumble, 2 - matches IPP sides=two-sided-short-edge), or
+ * duplex long side (duplex && !tumble, 3 - two-sided-long-edge). */
 int mp_urf_begin_page(MPUrfEncoder *enc,
                       unsigned long width, unsigned long height,
-                      unsigned long dpi, int write_file_header,
+                      unsigned long dpi, unsigned long print_quality,
+                      int write_file_header,
                       int duplex, int tumble,
                       unsigned char *scratch, unsigned long scratch_size,
                       MPUrfWriteFn write_fn, void *write_ctx);

@@ -43,15 +43,15 @@ static int test_single_page(void)
     if (scratch_size != width * 4UL + 16UL) return 2;
 
     /* Reject bad begin() arguments before touching a real sink. */
-    if (mp_urf_begin(NULL, width, height, 300, scratch, scratch_size,
+    if (mp_urf_begin(NULL, width, height, 300, 4, scratch, scratch_size,
                      sink_write, NULL)) return 3;
     {
         MPUrfEncoder bad;
-        if (mp_urf_begin(&bad, 0, height, 300, scratch, scratch_size,
+        if (mp_urf_begin(&bad, 0, height, 300, 4, scratch, scratch_size,
                          sink_write, NULL)) return 4;
-        if (mp_urf_begin(&bad, width, height, 300, scratch, 4UL,
+        if (mp_urf_begin(&bad, width, height, 300, 4, scratch, 4UL,
                          sink_write, NULL)) return 5;
-        if (mp_urf_begin(&bad, 70000UL, height, 300, scratch,
+        if (mp_urf_begin(&bad, 70000UL, height, 300, 4, scratch,
                          mp_urf_scratch_size(70000UL), sink_write, NULL))
             return 6;
     }
@@ -60,7 +60,7 @@ static int test_single_page(void)
     sink.size = 0;
     sink.cap = sizeof(out_buf);
 
-    if (!mp_urf_begin(&enc, width, height, 300, scratch, scratch_size,
+    if (!mp_urf_begin(&enc, width, height, 300, 4, scratch, scratch_size,
                       sink_write, &sink)) {
         free(scratch);
         return 10;
@@ -78,8 +78,8 @@ static int test_single_page(void)
     p = out_buf + 12; /* page header */
     if (p[0] != 24) { free(scratch); return 15; }  /* cupsBitsPerPixel */
     if (p[1] != 1) { free(scratch); return 16; }    /* colorspace: sRGB */
-    if (p[2] != 0) { free(scratch); return 17; }    /* duplex: no duplex */
-    if (p[3] != 0 || p[4] != 0 || p[5] != 0) { free(scratch); return 18; }
+    if (p[2] != 1) { free(scratch); return 17; }    /* simplex */
+    if (p[3] != 4 || p[4] != 0 || p[5] != 0) { free(scratch); return 18; }
     { /* bytes 6-11: reserved, zero */
         int i;
         for (i = 6; i <= 11; ++i)
@@ -176,8 +176,8 @@ static int test_duplex(void)
     row[3] = 5; row[4] = 6; row[5] = 7;
 
     /* Page 1 (front): write_file_header=1, duplex=1, tumble=0 -
-     * two-sided-long-edge -> duplex byte 2. */
-    if (!mp_urf_begin_page(&enc, width, height, 300, 1, 1, 0,
+     * two-sided-long-edge -> duplex byte 3. */
+    if (!mp_urf_begin_page(&enc, width, height, 300, 4, 1, 1, 0,
                            scratch, scratch_size, sink_write, &sink)) {
         free(scratch); return 10;
     }
@@ -188,21 +188,22 @@ static int test_duplex(void)
     if (be32(out_buf + MP_URF_PAGECOUNT_FIELD_OFFSET) != 0xffffffffUL) {
         free(scratch); return 13;
     }
-    if (out_buf[12 + 2] != 2) { free(scratch); return 14; } /* duplex, long side */
-    if (!mp_urf_write_scanline(&enc, row)) { free(scratch); return 15; }
-    if (!mp_urf_finish(&enc)) { free(scratch); return 16; }
+    if (out_buf[12 + 2] != 3) { free(scratch); return 14; } /* duplex, long side */
+    if (out_buf[12 + 3] != 4) { free(scratch); return 15; } /* normal quality */
+    if (!mp_urf_write_scanline(&enc, row)) { free(scratch); return 16; }
+    if (!mp_urf_finish(&enc)) { free(scratch); return 17; }
     page1_end = sink.size;
 
     /* Page 2 (back): write_file_header=0 - no second file header, and the
      * stream continues appending straight after page 1's rows. */
-    if (!mp_urf_begin_page(&enc, width, height, 300, 0, 1, 0,
+    if (!mp_urf_begin_page(&enc, width, height, 300, 4, 0, 1, 0,
                            scratch, scratch_size, sink_write, &sink)) {
         free(scratch); return 20;
     }
     page2_header_off = page1_end;
     if (sink.size != page1_end + 32UL) { free(scratch); return 21; }
     p = out_buf + page2_header_off;
-    if (p[2] != 2) { free(scratch); return 22; } /* duplex, long side, again */
+    if (p[2] != 3) { free(scratch); return 22; } /* duplex, long side, again */
     if (be32(p + 12) != width || be32(p + 16) != height) {
         free(scratch); return 23;
     }
@@ -225,8 +226,8 @@ static int test_duplex(void)
     return 0;
 }
 
-/* Tumble byte value: two-sided-short-edge -> duplex, short side (1), not
- * duplex, long side (2) - confirms tumble is wired through, not just
+/* Tumble byte value: two-sided-short-edge -> duplex, short side (2), not
+ * duplex, long side (3) - confirms tumble is wired through, not just
  * hardcoded to one value. */
 static int test_tumble_byte(void)
 {
@@ -243,11 +244,58 @@ static int test_tumble_byte(void)
     sink.size = 0;
     sink.cap = sizeof(out_buf);
 
-    if (!mp_urf_begin_page(&enc, width, height, 300, 1, 1, 1,
+    if (!mp_urf_begin_page(&enc, width, height, 300, 4, 1, 1, 1,
                            scratch, scratch_size, sink_write, &sink)) {
         free(scratch); return 10;
     }
-    if (out_buf[12 + 2] != 1) { free(scratch); return 11; }
+    if (out_buf[12 + 2] != 2) { free(scratch); return 11; }
+
+    free(scratch);
+    return 0;
+}
+
+/* The HP Color LaserJet M255/M256 advertises PQ3-4-5 and rejects the old
+ * unspecified value 0. Confirm both config translation and the exact byte
+ * written for every supported quality, including the normal fallback. */
+static int test_quality_byte(void)
+{
+    static const unsigned long inputs[] = { 3UL, 4UL, 5UL, 0UL, 99UL };
+    static const unsigned char expected[] = { 3, 4, 5, 4, 4 };
+    const unsigned long width = 1;
+    const unsigned long height = 1;
+    unsigned long scratch_size = mp_urf_scratch_size(width);
+    unsigned char *scratch = (unsigned char *)malloc(scratch_size);
+    unsigned char out_buf[128];
+    struct Sink sink;
+    MPUrfEncoder enc;
+    unsigned int i;
+
+    if (!scratch) return 1;
+    if (mp_urf_quality_value(NULL) != 4UL ||
+        mp_urf_quality_value("") != 4UL ||
+        mp_urf_quality_value("draft") != 3UL ||
+        mp_urf_quality_value("normal") != 4UL ||
+        mp_urf_quality_value("high") != 5UL ||
+        mp_urf_quality_value("3") != 3UL ||
+        mp_urf_quality_value("4") != 4UL ||
+        mp_urf_quality_value("5") != 5UL ||
+        mp_urf_quality_value("unknown") != 4UL) {
+        free(scratch); return 2;
+    }
+
+    for (i = 0; i < sizeof(inputs) / sizeof(inputs[0]); ++i) {
+        sink.buf = out_buf;
+        sink.size = 0;
+        sink.cap = sizeof(out_buf);
+        if (!mp_urf_begin(&enc, width, height, 600, inputs[i],
+                          scratch, scratch_size, sink_write, &sink)) {
+            free(scratch); return 10 + (int)i;
+        }
+        if (sink.size != 44UL || out_buf[12 + 2] != 1 ||
+            out_buf[12 + 3] != expected[i]) {
+            free(scratch); return 20 + (int)i;
+        }
+    }
 
     free(scratch);
     return 0;
@@ -279,7 +327,7 @@ static int test_grow_and_patch(void)
 
     /* First band: declares height 1, matching the first NOFORMFEED band's
      * own height - exactly like case 0's initial mp_job_begin() call. */
-    if (!mp_urf_begin_page(&enc, width, 1, 300, 1, 0, 0,
+    if (!mp_urf_begin_page(&enc, width, 1, 300, 4, 1, 0, 0,
                            scratch, scratch_size, sink_write, &sink)) {
         free(scratch); return 10;
     }
@@ -326,8 +374,11 @@ int main(void)
     rc = test_tumble_byte();
     if (rc) return 200 + rc;
 
-    rc = test_grow_and_patch();
+    rc = test_quality_byte();
     if (rc) return 300 + rc;
+
+    rc = test_grow_and_patch();
+    if (rc) return 400 + rc;
 
     return 0;
 }

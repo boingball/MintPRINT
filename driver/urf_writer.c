@@ -4,17 +4,11 @@
  * raster write mode (cups/raster.h, cups/raster-stream.c) rather than
  * from memory alone, for the same reason pwg_writer.c documents: a
  * byte-layout mistake here would only surface as garbled physical output
- * with no useful error message. That got every field's offset and size
- * right (independently confirmed field-by-field against a second,
- * unrelated real-world source below) but got the duplex/tumble enum
- * values at byte 2 wrong - see that field's comment.
- *
- * Cross-checked against a second, independent source: a published
- * from-scratch reverse-engineering of the on-the-wire format against a
- * real HP DesignJet T230, which confirms every offset and field size
- * below and gives the correct duplex/tumble enum (CUPS's own internal
- * representation apparently doesn't map 1:1 onto the values it writes on
- * the wire for this one field).
+ * with no useful error message. Driver revision 34 temporarily adopted a
+ * 0/1/2 simplex/short/long mapping from an unofficial reverse-engineering
+ * report, but a strict HP Color LaserJet rejected the resulting simplex
+ * value 0 in its URF parser. Re-checking CUPS's actual Apple-output path
+ * confirms that the on-wire values are 1/2/3; use the reference here.
  *
 
  * File layout:
@@ -36,10 +30,10 @@
  * Page header (32 bytes), all multi-byte fields big-endian:
  *   byte 0:      cupsBitsPerPixel (24 - 8-bit sRGB, chunked RGB)
  *   byte 1:      colorspace (1 - sRGB)
- *   byte 2:      duplex/tumble mode: 0 = no duplex (simplex), 1 = duplex,
- *                short side (two-sided-short-edge), 2 = duplex, long side
+ *   byte 2:      duplex/tumble mode: 1 = no duplex (simplex), 2 = duplex,
+ *                short side (two-sided-short-edge), 3 = duplex, long side
  *                (two-sided-long-edge)
- *   byte 3:      print quality (0 - unspecified)
+ *   byte 3:      print quality (3 = draft, 4 = normal, 5 = high)
  *   byte 4:      media type (0 - unspecified)
  *   byte 5:      media position/tray (0 - auto)
  *   bytes 6-11:  reserved, zero
@@ -105,14 +99,19 @@ static int mp_urf_write_file_header(MPUrfEncoder *e, int duplex)
     return mp_urf_u32(e, duplex ? 0xffffffffUL : 1UL);
 }
 
-static int mp_urf_write_page_header(MPUrfEncoder *e, int duplex, int tumble)
+static int mp_urf_write_page_header(MPUrfEncoder *e, int duplex, int tumble,
+                                    unsigned long print_quality)
 {
     unsigned char b[6];
 
     b[0] = 24;  /* cupsBitsPerPixel: 8-bit sRGB, chunked RGB */
     b[1] = 1;   /* colorspace: sRGB */
-    b[2] = duplex ? (tumble ? 1 : 2) : 0; /* duplex/tumble mode */
-    b[3] = 0;   /* print quality: unspecified */
+    b[2] = (unsigned char)(duplex ? (tumble ? 2 : 3) : 1);
+    /* RFC 8011 and CUPS use 3/4/5 for draft/normal/high. Do not emit the
+     * old unspecified value 0: strict URF parsers can reject values that
+     * are outside the printer's advertised PQ set. */
+    b[3] = (unsigned char)((print_quality >= 3UL && print_quality <= 5UL) ?
+                           print_quality : 4UL);
     b[4] = 0;   /* media type: unspecified */
     b[5] = 0;   /* media position: auto */
     if (!mp_urf_raw(e, b, 6)) return 0;
@@ -168,18 +167,31 @@ unsigned long mp_urf_scratch_size(unsigned long width)
     return width * 4UL + 16UL;
 }
 
+unsigned long mp_urf_quality_value(const char *quality)
+{
+    if (!quality || !quality[0]) return 4UL;
+    if (quality[0] == '3' && quality[1] == 0) return 3UL;
+    if (quality[0] == '4' && quality[1] == 0) return 4UL;
+    if (quality[0] == '5' && quality[1] == 0) return 5UL;
+    if (quality[0] == 'd' || quality[0] == 'D') return 3UL;
+    if (quality[0] == 'n' || quality[0] == 'N') return 4UL;
+    if (quality[0] == 'h' || quality[0] == 'H') return 5UL;
+    return 4UL;
+}
+
 int mp_urf_begin(MPUrfEncoder *e, unsigned long width, unsigned long height,
-                 unsigned long dpi,
+                 unsigned long dpi, unsigned long print_quality,
                  unsigned char *scratch, unsigned long scratch_size,
                  MPUrfWriteFn write_fn, void *write_ctx)
 {
-    return mp_urf_begin_page(e, width, height, dpi, 1, 0, 0,
+    return mp_urf_begin_page(e, width, height, dpi, print_quality, 1, 0, 0,
                              scratch, scratch_size, write_fn, write_ctx);
 }
 
 int mp_urf_begin_page(MPUrfEncoder *e,
                       unsigned long width, unsigned long height,
-                      unsigned long dpi, int write_file_header,
+                      unsigned long dpi, unsigned long print_quality,
+                      int write_file_header,
                       int duplex, int tumble,
                       unsigned char *scratch, unsigned long scratch_size,
                       MPUrfWriteFn write_fn, void *write_ctx)
@@ -202,7 +214,7 @@ int mp_urf_begin_page(MPUrfEncoder *e,
     e->failed = 0;
 
     if (write_file_header && !mp_urf_write_file_header(e, duplex)) return 0;
-    return mp_urf_write_page_header(e, duplex, tumble);
+    return mp_urf_write_page_header(e, duplex, tumble, print_quality);
 }
 
 int mp_urf_write_scanline(MPUrfEncoder *e, const unsigned char *rgb)
