@@ -209,6 +209,14 @@ LONG PRT_STDARGS ConvFunc(UBYTE *buf, UBYTE c, LONG crlf_flag)
     if (c == 0x1b || c == 0x9b || c == 0xff)
         return -1;
 
+    /* A processed FF is also a graphics-page boundary. Do this before the
+     * text-capture error guard: a failed text allocation must not prevent a
+     * pending graphics page from being closed. Keep the existing captured
+     * FF below for genuine text documents; graphics-only control traffic
+     * never sets g_text_seen and therefore creates no extra text job. */
+    if (c == '\f')
+        MintPRINTGraphicsFormFeed();
+
     if (g_text_capture_failed)
         return 0;
 
@@ -230,9 +238,6 @@ LONG PRT_STDARGS ConvFunc(UBYTE *buf, UBYTE c, LONG crlf_flag)
     }
 
     g_text_last_was_cr = FALSE;
-
-    if (c == '\f')
-        MintPRINTResetVerticalAdvances();
 
     if (c == '\f' || c == '\t' || (c >= 0x20 && c != 0x7f)) {
         if (mp_text_append(c) && c != '\f' && c != '\t' && c != ' ')

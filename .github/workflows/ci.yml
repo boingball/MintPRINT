@@ -9,9 +9,10 @@ jobs:
   host-tests:
     # Runs every host-testable suite (make check): DPI options, JPEG AAN
     # forward-DCT, Apple Raster (URF), media/page geometry, HTTP response
-    # parsing, IPP-enum decoding, and the Ghostscript-validated PostScript
-    # writer. This does not build the actual m68k driver or GUI - those
-    # need the m68k-amigaos cross toolchain, which isn't available here.
+    # parsing, IPP-enum decoding, graphics FF/reset callbacks, and the
+    # Ghostscript-validated PostScript writer. This does not build the actual
+    # m68k driver or GUI - those need the m68k-amigaos cross toolchain, which
+    # isn't available here.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

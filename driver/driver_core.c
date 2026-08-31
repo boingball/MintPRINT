@@ -55,7 +55,7 @@
  * MP_DRIVER_REV (the version half) only bumps for something that
  * warrants a new version number outright, not on every rebuild. */
 #define MP_DRIVER_REV 41
-#define MP_DRIVER_SUBREV 12
+#define MP_DRIVER_SUBREV 13
 
 struct ExecBase *SysBase = NULL;
 struct DosLibrary *DOSBase = NULL;
@@ -169,6 +169,9 @@ static ULONG g_page_height = 0;
 static ULONG g_rows_seen = 0;
 static ULONG g_tiny_page_streak = 0;
 static BOOL g_page_pending = FALSE;
+/* FF/DoSpecial cannot return a graphics I/O error. Preserve a failed
+ * explicit page boundary until Close/Open and reject subsequent dumps. */
+static BOOL g_graphics_boundary_failed = FALSE;
 /* Set when the PWG oversized-page-width clamp (below) actually rewrites
  * g_page_width away from printer.device's own reported width. When that
  * happens, printer.device's pi_xpos (observed ~839px for the same
@@ -1873,6 +1876,49 @@ static BOOL mp_page_finalize(void)
     return mp_page_submit_and_track(g_accum_height) == 0;
 }
 
+/* Form feed and aRIS may arrive between graphics dumps, with no printable
+ * text at all. Finish the pending physical page through the normal engine
+ * path (duplex queues a page, not a separate job). Never manufacture a page
+ * for a redundant FF, reset, or orphan leading control band.
+ *
+ * AmiAirPrint 1.2's graphics-only FF/reset handling highlighted this missing
+ * bridge. This implementation retains MintPRINT's existing encoders,
+ * Wordsworth boundary/margin rules and FinalWriter compatibility wrapper. */
+VOID MintPRINTGraphicsFormFeed(void)
+{
+    if (g_page_pending) {
+        mp_log_3("Explicit graphics page boundary rows/aux/target",
+                 (LONG)g_accum_height, (LONG)g_aux_height,
+                 (LONG)g_page_target_height);
+        if (!mp_page_finalize()) {
+            g_graphics_boundary_failed = TRUE;
+            if (mp_duplex_requested()) g_duplex_job_failed = TRUE;
+            mp_log_text("Explicit graphics page boundary failed; further dumps refused until Close/Open");
+        }
+    }
+
+    /* The wrapper can be holding a redundant blank tail. The finalizer
+     * above already pads known media, so discard that lookahead rather than
+     * replaying it into the NEXT page. Do not reset job-wide duplex state,
+     * FinalWriter canvas knowledge, or the application's margin settings. */
+    MintPRINTCompatEndPage();
+    g_leading_aux_height = 0;
+    g_aux_height = 0;
+    g_accum_width = 0;
+    g_accum_height = 0;
+    g_page_target_height = 0;
+    g_strip_nominal_band_height = 0;
+    g_strip_current_band_short = FALSE;
+    g_split_pending = FALSE;
+    g_split_at_row = 0;
+    g_discard_aux_band = FALSE;
+    g_discard_aux_band_has_ink = FALSE;
+    g_discard_leading_aux_band = FALSE;
+    g_page_had_noformfeed = FALSE;
+    g_text_vertical_units = 0;
+    g_text_vertical_advances = 0;
+}
+
 /* Starts the page that holds a split band's overshoot rows - the part of a
  * SPECIAL_NOFORMFEED band that didn't fit on the page mp_page_finalize()
  * just closed (see the case-1 split point in Render()). Mirrors case 0's
@@ -2013,6 +2059,7 @@ int PRT_STDARGS DriverOpen(struct IORequest *ior)
     g_tiny_page_streak = 0;
     g_runaway_tripped = FALSE;
     g_page_pending = FALSE;
+    g_graphics_boundary_failed = FALSE;
     g_recenter_clamped_page = FALSE;
     g_sizing_pass = FALSE;
     g_current_special = 0;
@@ -2123,6 +2170,11 @@ LONG PRT_STDARGS DoSpecial(UWORD *command, UBYTE output_buffer[],
                            BYTE *crlf_flag, STRPTR params)
 {
     (void)output_buffer;
+
+    if (command && *command == aRIS) {
+        MintPRINTGraphicsFormFeed();
+        return 0;
+    }
 
     /* Keep a complete trace of the page-layout command range. Several old
      * applications maintain document borders in their own UI but expose only
@@ -2290,6 +2342,11 @@ LONG PRT_STDARGS Render(LONG ct, LONG x, LONG y, LONG status, ...)
                 return PDERR_NOERR;
             }
             g_sizing_pass = FALSE;
+
+            if (g_graphics_boundary_failed) {
+                mp_log_text("Refusing page: an earlier explicit graphics page boundary failed");
+                return PDERR_CANCEL;
+            }
 
             if (g_runaway_tripped) {
                 mp_log_text("Refusing page: runaway tiny-page storm already tripped this print");

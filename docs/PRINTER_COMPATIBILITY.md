@@ -502,6 +502,16 @@ intentionally aimed at an unreachable printer IP so the generated PWG could be
 validated without using paper or ink; physical FinalWriter output is therefore
 not yet claimed in the table above. The retained PWG itself decodes cleanly.
 
+Unreleased driver revision **41.13** additionally recognizes processed
+form-feed and `aRIS` reset commands as explicit boundaries for a pending
+graphics page. Revision 41.12's captured document happened to reach its own
+short-tail/media delimiter, but a shorter page need not do so; without the
+explicit boundary it could remain open and absorb the next page. The 41.13
+host regression covers graphics-only FF/reset, redundant boundaries, duplex
+queuing, retained FinalWriter canvas width, held/tiny control cleanup,
+unaffected plain text, and failure latching. Real printer.device callback
+ordering still requires an Amiga capture; the host test does not claim that.
+
 ### Wordworth 7 Print Setup
 
 Use driver revision **40** or newer for the current diagnostic strip-printing

@@ -57,4 +57,9 @@ struct MPConfig {
 void mp_config_defaults(struct MPConfig *cfg);
 LONG mp_config_load(struct MPConfig *cfg);
 
+/* An explicit FF/reset ends the current graphics page, including any held
+ * tiny-tail lookahead. Keep cross-page FinalWriter canvas knowledge. */
+void MintPRINTCompatEndPage(void);
+VOID MintPRINTGraphicsFormFeed(void);
+
 #endif

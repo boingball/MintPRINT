@@ -122,6 +122,13 @@ static void mp_render_compat_reset(void)
     mp_render_compat_finish_page();
 }
 
+void MintPRINTCompatEndPage(void)
+{
+    mp_render_compat_finish_page();
+    g_render_compat_leading_rows = 0;
+    g_render_compat_special = 0;
+}
+
 static void mp_render_compat_capture_config(const struct MPConfig *cfg)
 {
     g_render_compat_media[0] = 0;
