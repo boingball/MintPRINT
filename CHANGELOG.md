@@ -12,7 +12,23 @@ Keep the full version-by-version history here. The front page and Aminet
 readme should carry only a short summary of the latest version, with a link
 to this page; replace that summary when preparing the next release.
 
-[1.3.0](#130) | [1.2.7](#127) | [1.2.6](#126) | [1.2.5](#125) | [1.2.4](#124) | [1.2.3](#123) | [1.2.2](#122) | [1.2.1](#121) | [1.2.0](#120) | [1.1.0](#110) | [1.0.3b](#103b) | [1.0.3](#103) | [1.0.2](#102) | [1.0.0](#100)
+[Unreleased](#unreleased) | [1.3.0](#130) | [1.2.7](#127) | [1.2.6](#126) | [1.2.5](#125) | [1.2.4](#124) | [1.2.3](#123) | [1.2.2](#122) | [1.2.1](#121) | [1.2.0](#120) | [1.1.0](#110) | [1.0.3b](#103b) | [1.0.3](#103) | [1.0.2](#102) | [1.0.0](#100)
+
+## Unreleased
+
+- **Test Print page placement with Media set to auto.** Removed redundant
+  printer.device centring from the full-page JPEG/PWG/PDF/URF test request.
+  An OS 2.04 capture showed it adding 809 blank columns before the image,
+  producing a 3287x3508 raster for an A4-sized request. Explicit destination
+  dimensions and aspect handling remain, as do saved media settings, the
+  separate PostScript test layout and application-driven printing. A fresh
+  OS 2.04 capture and physical print are still required to validate the fix.
+- **More accurate Test Print completion text.** Release the printer device
+  before reporting completion, allowing pending/duplex submission to finish.
+  Preserve reported I/O errors, but no longer claim successful delivery just
+  because printer.device returned zero: the OS 2.04 fake-IP capture returned
+  zero despite a driver-side IPP timeout. The message now directs users to
+  printer output, retained job status or the Debug driver log.
 
 ## 1.3.0
 
