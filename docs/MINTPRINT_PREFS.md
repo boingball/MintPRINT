@@ -85,13 +85,15 @@ printers under-report this list: the Canon TS8300 series advertises only 600
 DPI but has been physically confirmed to accept and correctly print 300-DPI
 PWG Raster jobs.
 
-When PWG Raster is selected and a printer reports resolutions but omits 300
-DPI, Settings adds **`300* dpi`** to the cycle. The asterisk means
+When PWG Raster or Apple Raster (URF) is selected and a printer reports
+resolutions but omits 300 DPI, Settings adds **`300* dpi`** to the cycle. The asterisk means
 "compatibility option not reported by the printer". It is deliberately not
 written into the capability cache and is not automatically selected for a new
 unsaved profile. A saved `RESOLUTION=300` remains selected, allowing a known
-working compatibility choice to survive Query and restart. Other document
-engines continue to show only their reported resolution choices.
+working compatibility choice to survive Query and restart. On a URF printer
+that advertises only `RS600`, 300 DPI is experimental and can still be rejected
+by the printer's raster parser. Other document engines continue to show only
+their reported resolution choices.
 
 ## LAN printer discovery
 

@@ -26,7 +26,10 @@ to this page; replace that summary when preparing the next release.
   advertises `PQ3-4-5` and returned `PARSER / Not Implemented` for the old
   one-sided header. Byte-exact host regressions cover all modes and quality
   values. The Windows probe also recognizes URF as a valid multi-page duplex
-  transport. Physical output on the reporting HP remains to be confirmed.
+  transport. Settings now offers its explicit, never-auto-selected `300* dpi`
+  compatibility override for URF as well as PWG Raster; the reporting HP says
+  `RS600`, so 300 DPI remains experimental rather than a claimed capability.
+  Physical output on the reporting HP remains to be confirmed.
 - **Graphics form-feed/reset page boundaries (driver 41.13).** A processed
   form-feed or `aRIS` reset now finalizes any pending
   `SPECIAL_NOFORMFEED` graphics page before the following page begins. This

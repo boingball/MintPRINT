@@ -1,10089 +1,2422 @@
-/* MintPrint Settings (formerly IPP-Test16.c / "MintPRINT Preferences").
-   Setup/test GUI for the DEVS:Printers/MintPRINT driver: LAN printer
-   discovery, IPP capability query, driver install/select helper, and
-   per-job defaults editing. */
-/* MintPRINT GUI stabilised: no live cycle-label frees; safe teardown. */
-/* MintPRINT prefs #9: compact address row and status-box fit. */
-/* MintPRINT prefs #8: capability cache and output-area layout polish. */
-/* Amiga IPP Print-Job Prototype with GUI
-   Configures and tests MintPRINT's IPP document engines
-   Compile with: m68k-amigaos-gcc -g -o IPP-test11 ipp-test11.c -lamiga -lsocket -lm
- PATCH INCOMING: Adds IFF -> RGB -> PWG -> IPP printing support to IPP-test15 */
-
-
-#include <proto/exec.h>
-#include <exec/execbase.h>
-#include <exec/libraries.h>
-#include <exec/memory.h> /* MEMF_ANY for OS-native response buffers */
-#include <ctype.h> // for tolower()
-#include <proto/dos.h>
-#include <dos/dos.h>
-#include <dos/dosextens.h> // for struct DosList/LDF_DEVICES (Spooler HDD detection)
-#include <exec/lists.h> // for struct List/struct Node (Spooler job LISTVIEW_KIND)
-#include <dos/dostags.h> // for SYS_Asynch (SystemTags)
-
-/* The H (hidden) protection bit - Protect's HSPARWED flags, present since
- * AmigaOS 2.04 (this project's own minimum) though not always defined by
- * an older NDK's <dos/dos.h>. Guarded rather than assumed. */
-#ifndef FIBF_HIDDEN
-#define FIBF_HIDDEN 0x00000080L
-#endif
-#include <proto/intuition.h>
-#include <proto/gadtools.h>
-#include <proto/graphics.h>
-typedef long ssize_t;
-#include <clib/alib_protos.h>
-#include <proto/bsdsocket.h>
-#include <intuition/intuition.h>
-#include <intuition/gadgetclass.h>
-#include <libraries/gadtools.h>
-#include <graphics/gfx.h>
-#include <graphics/rastport.h>
-#include <graphics/displayinfo.h>
-#include <devices/printer.h>
-#include <stdarg.h>
-#include <string.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <fcntl.h> // for O_NONBLOCK
-#include <sys/ioctl.h> // for FIONBIO (mp_connect_with_timeout)
-#include <errno.h> // for ETIMEDOUT (mp_connect_with_timeout) - EINPROGRESS
-                   // already resolved via bsdsocket.h before this include
-                   // existed, so ETIMEDOUT should too, but unconfirmed on
-                   // this specific NDK without a real build
-#include "iff-loader.h"
-#include "http_response.h"
-#include "dpi_options.h"
-#include "media_size.h"
-#include "config.h"
-#include "ipp_client.h"
-#include "ipp_enum.h"
-#include "lodepng.h"
-
-/* All status/progress output goes to the on-screen status box, never a
- * console - the end user may have launched this from Workbench, where
- * there is no console to see it in. custom_printf() itself is defined
- * further down (it draws into the on-screen output box); forward-declare
- * it and redirect printf() to it here, before any of this file's own
- * printf() calls, so every one of them lands in the box consistently. */
-void custom_printf(const char *format, ...);
-#define printf custom_printf
-
-extern struct GfxBase *GfxBase;
-extern struct ExecBase *SysBase;
-#define MAX_VALUES 32
-#define MAX_ATTR_LEN 64
-#define MAX_BUFFER 256000
-/* 8, not 10: the box's font is Topaz80 (see redraw_output_box()), giving
- * a line height of tf_YSize(8)+2=10px, i.e. 80px for the box's text area.
- * WA_InnerHeight (see main()) is derived from OUTPUT_TOP and this count
- * specifically so the box's bottom border always ends flush with the
- * window's own bottom edge - changing either one without the other
- * reintroduces either dead space below the box or a border pushed past
- * the window's edge. */
-#define MAX_OUTPUT_LINES 8
-/* The debug output box is OUTPUT_LEFT..OUTPUT_RIGHT wide - at the main
- * window's 520px width that's ~490px, or ~61 chars of Topaz80 (8px/char).
- * MAX_OUTPUT_LINE_LENGTH includes the terminating NUL, so 62 stores at
- * most 61 visible characters. Re-check this against OUTPUT_LEFT/
- * OUTPUT_RIGHT if the window width changes again. */
-#define MAX_OUTPUT_LINE_LENGTH 62
-#define MAX_PRINT_MODES 8
-#define MAX_QUALITIES 5
-#define MENU_ID_FILE       1
-#define MENU_ID_FILE_SAVE  2
-#define MENU_ID_FILE_QUIT  3
-
-// Gadget IDs
-#define GAD_IP_STRING 1
-#define GAD_FILE_STRING 2
-#define GAD_QUERY_BUTTON 3
-#define GAD_PRINT_BUTTON 4
-#define GAD_EXIT_BUTTON 5
-#define GAD_MEDIA_DROPDOWN 6
-#define GAD_PRINT_MODE 7
-#define GAD_SCALING_MODE 8
-#define GAD_QUALITY_MODE 9
-#define GAD_IPP_PATH 10
-#define GAD_DEBUG 11
-#define GAD_ENGINE 12
-#define GAD_SAVE_BUTTON 13
-#define GAD_DISCOVER_BUTTON 14
-#define GAD_UNIT_DROPDOWN 15
-#define GAD_SET_ACTIVE_BUTTON 16
-#define GAD_MODEL_DISPLAY 17
-#define GAD_RESOLUTION 18
-#define GAD_SIDES 19
-#define GAD_SPOOLER 20
-#define GAD_SPOOL_KEEP 21
-#define GAD_VIEW_SPOOL 22
-
-/* Spooler management window gadget IDs (separate window/gadget list, like
- * the discovery selection dialog's GAD_DISC_* above). */
-#define GAD_SPOOL_JOB_LIST 1
-#define GAD_SPOOL_REFRESH   2
-#define GAD_SPOOL_DELETE    3
-#define GAD_SPOOL_CLOSE     4
-#define GAD_SPOOL_RETRY     5
-#define GAD_SPOOL_COPIES    6
-#define GAD_SPOOL_UNIT      7
-
-/* Copies dialog gadget IDs (separate window/gadget list again). */
-#define GAD_SPOOL_COPIES_FIELD  1
-#define GAD_SPOOL_COPIES_OK     2
-#define GAD_SPOOL_COPIES_CANCEL 3
-
-// Discovery selection dialog gadget IDs (separate window/gadget list)
-#define GAD_DISC_CYCLE  1
-#define GAD_DISC_USE    2
-#define GAD_DISC_CANCEL 3
-
-#define MAX_DISCOVERY_RESULTS 16
-
-struct DiscoveredPrinter {
-    char ip[16];
-    char label[80];
-};
-
-/* Test Print must outlive the gadget callback that starts it. Keeping the
- * RastPort, bitmap and IO request here lets printer.device run asynchronously
- * while the normal GadTools event loop continues servicing the window. */
-struct MPTestPrintJob {
-    struct MsgPort *port;
-    struct IODRPReq *request;
-    struct BitMap *bitmap;
-    struct BitMap bitmap_storage;
-    struct ColorMap *colormap;
-    struct RastPort rastport;
-    BOOL bitmap_manual;
-    BOOL device_open;
-    BOOL active;
-};
-
-static struct MPTestPrintJob test_print_job;
-
-// Saved printer profiles: ENV:MintPRINT/Unit0 .. Unit(MAX_UNITS-1). Only
-// Unit0 is what the driver actually reads at print time; the others are
-// switchable GUI-side profiles (e.g. for a second/third network printer).
-#define MAX_UNITS 8
-
-/* A few pixels below the Test Print/Debug/Save/Exit row (216+12 tall,
- * itself 4px below Keep Spooled Jobs/View Spooler at 198) for even spacing - see
- * WA_InnerHeight in main() for why raising this also raises that: the
- * box's bottom border sits at OUTPUT_TOP + 81 (MAX_OUTPUT_LINES lines at
- * 10px, see below, plus the 2px border), and WA_InnerHeight is kept equal
- * to that so the box's border sits flush with the window's own bottom
- * edge instead of leaving dead space below it. */
-#define OUTPUT_TOP     232 // Below Test Print / Debug / Save / Exit row
-#define OUTPUT_LEFT    10
-#define OUTPUT_RIGHT   (window->Width - 20)
-
-// Define the USED macro for GCC
-#define USED __attribute__((used))
-#define MINTPRINT_SETTINGS_VERSION "1.3.0"
-#define MINTPRINT_DRIVER_DEST ((CONST_STRPTR)"DEVS:Printers/MintPRINT")
-
-/* MintPrint Settings now ships as a single drawer containing both bundled
- * driver builds under Drivers/, and picks the one matching this machine's
- * printer.device generation automatically - see mp_driver_src_path() near
- * the other driver-install helpers. The macro is function-like so every
- * use site (including ones earlier in this file than the function
- * definition itself) re-evaluates the detection rather than caching a
- * stale path. */
-#define MINTPRINT_DRIVER_SRC  (mp_driver_src_path())
-static CONST_STRPTR mp_driver_src_path(void);
-
-/* The driver's own build version, read out of its "$VER: MintPRINT
- * <version>.<revision>" string - see mp_read_driver_version() near the
- * other driver-install helpers for how. A plain struct (not just a
- * forward-declared opaque type) because callers like the test page below
- * need it as a value, not just a pointer. */
-struct MPDriverVersion {
-    UWORD version;
-    UWORD revision;
-};
-static BOOL mp_read_driver_version(CONST_STRPTR path, struct MPDriverVersion *out);
-
-/* Visible both to AmigaOS's Version command and in the About requester. */
-static const char USED mintprint_version[] =
-    "$VER: MintPrintSettings " MINTPRINT_SETTINGS_VERSION " (29.08.2026)";
-
-// Simple extension check
-BOOL has_extension(const char *filename, const char *ext) {
-    const char *dot = strrchr(filename, '.');
-    if (!dot) return FALSE;
-    return strcasecmp(dot, ext) == 0;
-}
-/*
- * Classic AmigaOS / libnix stack request.
- *
- * The "$STACK:" cookie is useful on newer AmigaOS startup code, but classic
- * m68k AmigaOS programs built with the GCC/libnix runtime use the __stack
- * variable. Keep a 256 KiB margin: discovery/add chains through
- * parsing, profile migration, cache/icon handling, and GadTools requesters;
- * reducing this to 128 KiB caused a delayed 81000005 memory-list failure on
- * classic OS 2.x testing. Exercise Query, Discover, Add and Test Print on
- * real AmigaOS hardware before reducing this again.
- *
- * 256 KiB = 262144 bytes.
- */
-unsigned long __stack = 262144UL;
-
-/* Keep the cookie as harmless metadata for newer startup code too. */
-static const char USED min_stack[] = "$STACK:262144";
-
-// Structure to map media sizes to trays (Updated to include tray name and medianame)
-struct MediaTrayMap {
-    char media[MAX_ATTR_LEN];      // e.g., "iso_a4_210x297mm"
-    char source[MAX_ATTR_LEN];     // e.g., "by-pass-tray"
-    char trayName[MAX_ATTR_LEN];   // e.g., "MP TRAY"
-    char medianame[MAX_ATTR_LEN];  // e.g., "INKJET"
-};
-
-// Globals for parsed capabilities
-char supported_formats[MAX_VALUES][MAX_ATTR_LEN];
-int num_supported_formats = 0;
-BOOL jpeg_constraints_queried = FALSE;
-BOOL jpeg_k_octets_reported = FALSE;
-BOOL jpeg_x_dimension_reported = FALSE;
-BOOL jpeg_y_dimension_reported = FALSE;
-
-char supported_media[MAX_VALUES][MAX_ATTR_LEN];
-int num_supported_media = 0;
-
-char supported_output_modes[MAX_VALUES][MAX_ATTR_LEN];
-int num_supported_output_modes = 0;
-
-char supported_sides[MAX_VALUES][MAX_ATTR_LEN];
-int num_supported_sides = 0;
-BOOL supports_create_job = FALSE;
-BOOL supports_send_document = FALSE;
-BOOL supports_multiple_document_jobs = FALSE;
-BOOL supports_single_document_handling = FALSE;
-char pwg_sheet_back_value[MAX_ATTR_LEN] = "normal";
-
-char supported_scaling[MAX_VALUES][MAX_ATTR_LEN];
-int num_supported_scaling = 0;
-
-int supported_orientations[MAX_VALUES];
-int num_supported_orientations = 0;
-
-char supported_print_modes[MAX_VALUES][MAX_ATTR_LEN];
-int num_supported_print_modes = 0;
-
-#define MP_MAX_DPI_OPTIONS MP_DPI_MAX_OPTIONS
-int supported_dpi[MP_MAX_DPI_OPTIONS];
-int num_supported_dpi = 0;
-static struct MPDpiOptions mp_dpi_options = {
-    { 300, 0 }, { 0, 0 }, 1, 0, 300
-};
-
-char *print_mode_options[MAX_PRINT_MODES];
-int num_print_modes = 0;
-static char initial_print_mode_value[MAX_ATTR_LEN] = "Not Detected";
-static STRPTR initial_print_mode[] = { initial_print_mode_value, NULL };
-char selected_print_mode[MAX_ATTR_LEN] = "monochrome"; // Default fallback
-char selected_scaling[MAX_ATTR_LEN] = "auto"; // Default
-static char initial_scaling_value[MAX_ATTR_LEN] = "Not Detected";
-static STRPTR initial_scaling_mode[] = { initial_scaling_value, NULL };
-/* MintPRINT stable Cycle gadget label storage (OS3.1-safe).
- *
- * Classic GadTools is much happier when GTCY_Labels keeps the same array
- * address for the complete lifetime of a live CYCLE_KIND gadget. Earlier
- * versions repeatedly AllocVec'd new arrays during Query/Save and retargeted
- * the live gadgets. That could leave V37 GadTools with stale bookkeeping,
- * producing delayed memory alerts or a hard lock during a later Query/Exit.
- *
- * Keep both the pointer arrays and their text backing in static storage.
- * Query rewrites the contents in-place and re-applies THE SAME pointer.
- */
-#define MP_MEDIA_LABEL_LEN   (MAX_ATTR_LEN + 32)
-#define MP_UNIT_LABEL_LEN    128
-
-static char mp_media_label_storage[MAX_VALUES + 1][MP_MEDIA_LABEL_LEN];
-static STRPTR mp_media_label_ptrs[MAX_VALUES + 2];
-
-static char mp_scaling_label_storage[MAX_VALUES + 1][MAX_ATTR_LEN];
-static STRPTR mp_scaling_label_ptrs[MAX_VALUES + 2];
-
-static char mp_print_mode_label_storage[MAX_VALUES + 1][MAX_ATTR_LEN];
-static STRPTR mp_print_mode_label_ptrs[MAX_VALUES + 2];
-
-static char mp_quality_label_storage[MAX_VALUES + 1][32];
-static STRPTR mp_quality_label_ptrs[MAX_VALUES + 2];
-
-static char mp_dpi_label_storage[MP_MAX_DPI_OPTIONS + 1][16];
-static STRPTR mp_dpi_label_ptrs[MP_MAX_DPI_OPTIONS + 2];
-
-#define MP_MAX_SIDES_OPTIONS 3
-static char mp_sides_label_storage[MP_MAX_SIDES_OPTIONS][24];
-static char mp_sides_value_storage[MP_MAX_SIDES_OPTIONS][MAX_ATTR_LEN];
-static STRPTR mp_sides_label_ptrs[MP_MAX_SIDES_OPTIONS + 1];
-static int mp_sides_option_count = 1;
-
-/* Spooler cycle gadget storage - same static-storage/fixed-array-address
- * discipline as mp_sides_* above (see driver_spool_buffer's own comment,
- * defined with the other persisted Unit0 buffers below, for why). Built
- * once at startup by mp_build_spool_options() from this machine's DOS
- * device list, never reallocated while the gadget is live. */
-#define MP_MAX_SPOOL_OPTIONS 9 /* RAM + up to 8 detected hard drive devices */
-static char mp_spool_label_storage[MP_MAX_SPOOL_OPTIONS][24];
-static char mp_spool_value_storage[MP_MAX_SPOOL_OPTIONS][MAX_ATTR_LEN];
-static STRPTR mp_spool_label_ptrs[MP_MAX_SPOOL_OPTIONS + 1];
-static int mp_spool_option_count = 1;
-
-static char mp_unit_label_storage[MAX_UNITS][MP_UNIT_LABEL_LEN];
-static STRPTR mp_unit_label_ptrs[MAX_UNITS + 1];
-
-STRPTR *scaling_mode_labels = mp_scaling_label_ptrs;
-char selected_quality[16] = "auto"; // Default
-char supported_quality[MAX_QUALITIES][16];
-int num_supported_quality = 0;
-STRPTR *quality_mode_labels = mp_quality_label_ptrs;
-static char initial_quality_value[32] = "Not Detected";
-static STRPTR initial_quality_mode[] = { initial_quality_value, NULL };
-// Media dropdown state
-char *selected_media = NULL;
-struct Gadget *media_dropdown = NULL;
-STRPTR *media_dropdown_items = mp_media_label_ptrs;
-BOOL has_media_ready = FALSE;
-struct Menu *menu = NULL;
-struct MediaTrayMap media_tray_map[MAX_VALUES];
-int num_media_tray_mappings = 0;
-
-// Radio button labels for print mode
-STRPTR *print_mode_labels = mp_print_mode_label_ptrs;
-
-static char initial_media_value[160] = "Not Detected";
-static STRPTR initial_media_labels[] = { initial_media_value, NULL };
-
-
-
-static struct NewMenu menu_template[] = {
-    { NM_TITLE, (STRPTR)"File", 0, 0, 0, 0 },
-    { NM_ITEM,  (STRPTR)"Save Driver Settings", 0, 0, 0, 0 },
-    { NM_ITEM,  (STRPTR)"Reload Driver Settings", 0, 0, 0, 0 },
-    { NM_ITEM,  NM_BARLABEL, 0, 0, 0, 0 },
-    { NM_ITEM,  (STRPTR)"About MintPRINT...", 0, 0, 0, 0 },
-    { NM_ITEM,  NM_BARLABEL, 0, 0, 0, 0 },
-    { NM_ITEM,  (STRPTR)"Quit", 0, 0, 0, 0 },
-    { NM_TITLE, (STRPTR)"Help", 0, 0, 0, 0 },
-    { NM_ITEM,  (STRPTR)"MintPrint Settings Help...", 0, 0, 0, 0 },
-    { NM_END,   NULL, 0, 0, 0, 0 }
-};
-// Global variable to store the print mode (0 = Black and White, 1 = Color)
-int print_mode = 0; // Default to Black and White
-
-// Helper to store values into lists
-void store_value(char dest[MAX_VALUES][MAX_ATTR_LEN], int *count, const char *value) {
-    if (*count >= MAX_VALUES) return;
-    strncpy(dest[*count], value, MAX_ATTR_LEN - 1);
-    dest[*count][MAX_ATTR_LEN - 1] = '\0';
-    (*count)++;
-}
-
-void store_int_value(int dest[MAX_VALUES], int *count, int val) {
-    if (*count >= MAX_VALUES) return;
-    dest[(*count)++] = val;
-}
-
-static void mp_add_supported_dpi(int dpi) {
-    int i;
-
-    if (dpi != 300 && dpi != 600) return;
-    for (i = 0; i < num_supported_dpi; ++i) {
-        if (supported_dpi[i] == dpi) return;
-    }
-    if (num_supported_dpi < MP_MAX_DPI_OPTIONS)
-        supported_dpi[num_supported_dpi++] = dpi;
-}
-
-static int mp_normalise_ipp_dpi(ULONG resolution, UBYTE units) {
-    ULONG dpi = resolution;
-
-    if (units == 4) {
-        /* IPP dpcm -> dpi. Tolerances below absorb the integer rounding
-         * used by printers for 118dpcm/236dpcm (roughly 300/600dpi). */
-        dpi = (resolution * 254UL + 50UL) / 100UL;
-    } else if (units != 3) {
-        return 0;
-    }
-
-    if (dpi >= 295UL && dpi <= 305UL) return 300;
-    if (dpi >= 595UL && dpi <= 605UL) return 600;
-    return 0;
-}
-
-static void mp_add_ipp_resolution(const UBYTE *raw, int value_len) {
-    ULONG xres;
-    ULONG yres;
-    int xdpi;
-    int ydpi;
-
-    if (!raw || value_len != 9) return;
-
-    xres = ((ULONG)raw[0] << 24) | ((ULONG)raw[1] << 16) |
-           ((ULONG)raw[2] << 8) | (ULONG)raw[3];
-    yres = ((ULONG)raw[4] << 24) | ((ULONG)raw[5] << 16) |
-           ((ULONG)raw[6] << 8) | (ULONG)raw[7];
-    xdpi = mp_normalise_ipp_dpi(xres, raw[8]);
-    ydpi = mp_normalise_ipp_dpi(yres, raw[8]);
-
-    /* The driver currently has one DPI setting for both axes, so do not
-     * advertise asymmetric printer resolutions it cannot represent. */
-    if (xdpi && xdpi == ydpi) {
-        mp_add_supported_dpi(xdpi);
-        printf("Printer supports %d DPI\n", xdpi);
-    }
-}
-
-static int mp_dpi_active_index(int dpi) {
-    int i;
-
-    for (i = 0; i < mp_dpi_options.count; ++i) {
-        if (mp_dpi_options.values[i] == dpi) return i;
-    }
-    return 0;
-}
-
-/* Defined with the other persisted Unit0 buffers below. */
-extern char driver_sides_buffer[MAX_ATTR_LEN];
-extern char driver_engine_buffer[32];
-extern char driver_spool_buffer[MAX_ATTR_LEN];
-extern BOOL driver_spool_keep;
-
-static BOOL mp_supported_side(const char *value) {
-    int i;
-
-    if (!value) return FALSE;
-    for (i = 0; i < num_supported_sides; ++i) {
-        if (strcmp(supported_sides[i], value) == 0) return TRUE;
-    }
-    return FALSE;
-}
-
-static BOOL mp_duplex_transport_supported(void) {
-    int i;
-    const char *format_mime;
-
-    /* MintPRINT duplex is one multi-page PWG Raster or Apple Raster (URF)
-     * document in one ordinary Print-Job. This works on printers such as
-     * the Brother MFC-J6930DW that advertise duplex but explicitly reject
-     * multi-document IPP Jobs. */
-    if (strcmp(driver_engine_buffer, "pwg-raster") == 0)
-        format_mime = "image/pwg-raster";
-    else if (strcmp(driver_engine_buffer, "urf") == 0)
-        format_mime = "image/urf";
-    else
-        return FALSE;
-    for (i = 0; i < num_supported_formats; ++i) {
-        if (strcmp(supported_formats[i], format_mime) == 0)
-            return TRUE;
-    }
-    return FALSE;
-}
-
-static ULONG mp_sides_active_index(void) {
-    int i;
-
-    for (i = 0; i < mp_sides_option_count; ++i) {
-        if (strcmp(driver_sides_buffer, mp_sides_value_storage[i]) == 0)
-            return (ULONG)i;
-    }
-    return 0;
-}
-
-static ULONG mp_spool_active_index(void) {
-    int i;
-
-    for (i = 0; i < mp_spool_option_count; ++i) {
-        if (strcmp(driver_spool_buffer, mp_spool_value_storage[i]) == 0)
-            return (ULONG)i;
-    }
-    return 0;
-}
-
-/* "Keep spooled jobs" only means anything once job files actually spool
- * to a real drive - RAM keeps MintPRINT's original flat, always-
- * overwritten behaviour regardless (see driver_core.c's mp_job_begin()),
- * so the tickbox is disabled and forced off whenever driver_spool_buffer
- * is empty or "RAM". */
-static BOOL mp_spool_keep_available(void) {
-    return driver_spool_buffer[0] && strcmp(driver_spool_buffer, "RAM") != 0;
-}
-
-/* Populates the Spooler cycle gadget's choices: "RAM" (index 0, always
- * present) plus one "HDD (DHn:)" entry per DHn hard drive device this
- * machine's DOS device list actually has mounted - the standard Amiga
- * IDE/SCSI partition naming convention (a name-based heuristic, not a
- * hardware check: a controller using some other naming scheme, e.g. a
- * vendor-specific CF/SD adapter, will not show up here). Called once at
- * startup, before the window/gadgets exist - see the static-storage
- * comment above driver_spool_buffer. LockDosList()/UnLockDosList() take
- * the DOS list's own internal semaphore, so no Forbid() is needed around
- * the walk. dol_Name is a BCPL BSTR (length-prefixed, not
- * NUL-terminated), hence BADDR() and an explicit length rather than a
- * plain string copy. */
-static void mp_build_spool_options(void) {
-    struct DosList *dl;
-    int count = 0;
-
-    mp_spool_label_ptrs[0] = mp_spool_label_storage[0];
-    strcpy(mp_spool_label_storage[0], "RAM");
-    strcpy(mp_spool_value_storage[0], "RAM");
-    count = 1;
-
-    dl = LockDosList(LDF_DEVICES | LDF_READ);
-    while (count < MP_MAX_SPOOL_OPTIONS &&
-           (dl = NextDosEntry(dl, LDF_DEVICES)) != NULL) {
-        UBYTE *bname = (UBYTE *)BADDR(dl->dol_Name);
-        UBYTE blen;
-        char name[32];
-        UBYTE i;
-
-        if (!bname) continue;
-        blen = bname[0];
-        if (blen > sizeof(name) - 1) blen = (UBYTE)(sizeof(name) - 1);
-        for (i = 0; i < blen; ++i) name[i] = (char)bname[i + 1];
-        name[blen] = '\0';
-
-        if (blen >= 2 && (name[0] == 'D' || name[0] == 'd') &&
-            (name[1] == 'H' || name[1] == 'h')) {
-            snprintf(mp_spool_label_storage[count],
-                     sizeof(mp_spool_label_storage[0]),
-                     "HDD (%s:)", name);
-            mp_spool_label_ptrs[count] = mp_spool_label_storage[count];
-            snprintf(mp_spool_value_storage[count],
-                     sizeof(mp_spool_value_storage[0]), "%s:", name);
-            ++count;
-        }
-    }
-    UnLockDosList(LDF_DEVICES | LDF_READ);
-
-    mp_spool_label_ptrs[count] = NULL;
-    mp_spool_option_count = count;
-}
-
-// Media Size Helper
-BOOL parse_media_dimensions(const char *media_str, int *x, int *y) {
-    const char *dim_part = strchr(media_str, '_');
-    if (!dim_part) return FALSE;
-
-    int w, h;
-    if (sscanf(dim_part + 1, "%dx%dmm", &w, &h) == 2) {
-        *x = w * 100; // Convert mm to hundredths of mm
-        *y = h * 100;
-        return TRUE;
-    }
-    return FALSE;
-}
-
-void ensure_quality_defaults() {
-    if (num_supported_quality == 0) {
-        /* Do not invent draft/high support when a printer omits this
-         * capability. The Samsung C480W only accepts normal, yet the old
-         * three-value fallback selected draft and made the IPP server
-         * return successful-ok-ignored-or-substituted-attributes. */
-        printf("No print-quality-supported returned; using safe normal quality.\n");
-        strcpy(supported_quality[0], "normal");
-        num_supported_quality = 1;
-    }
-}
-
-//Helper to parse IP and port from GUI
-int parse_ip_and_port(const char *input, char *ip_out, int ip_len, int *port_out) {
-    char *colon = strchr(input, ':');
-    if (colon) {
-        int len = colon - input;
-        if (len >= ip_len) return 0;
-        strncpy(ip_out, input, len);
-        ip_out[len] = '\0';
-        *port_out = atoi(colon + 1);
-    } else {
-        strncpy(ip_out, input, ip_len - 1);
-        ip_out[ip_len - 1] = '\0';
-        *port_out = -1;  // no port specified
-    }
-    return 1;
-}
-
-
-//Safe Send Data
-int safe_send(int sockfd, const void *vbuf, int len) {
-    const char *buf = (const char *)vbuf;
-    int total_sent = 0;
-    int attempt = 0;
-
-    while (total_sent < len) {
-        int chunk_size = (len - total_sent > 4096) ? 4096 : (len - total_sent);
-        int sent = send(sockfd, (char *)buf + total_sent, chunk_size, 0);
-        attempt++;
-
-        if (sent <= 0) {
-            printf("\n[!] send() failed at %d bytes (attempt %d)\n", total_sent, attempt);
-            perror("send");
-            return -1;
-        }
-
-        total_sent += sent;
-
-        // Progress bar (every 64KB or on finish)
-        if ((total_sent % 65536 == 0) || (total_sent == len)) {
-            printf("[+] Sent %d / %d bytes (%d%%)\n", total_sent, len, (total_sent * 100) / len);
-        }
-    }
-
-    printf("[OK] Finished sending %d bytes successfully\n", total_sent);
-    return total_sent;
-}
-
-// Global variables for GUI
-struct Window *window = NULL;
-struct Gadget *glist = NULL;
-struct Library *SocketBase = NULL;
-struct Library *GadToolsBase = NULL;
-struct IntuitionBase *IntuitionBase = NULL;
-struct GfxBase *GfxBase = NULL;
-char ip_buffer[256] = "";
-char driver_path_buffer[96] = "/ipp/print";
-BOOL driver_debug = FALSE;
-static STRPTR debug_labels[] = { "Debug Off", "Debug On", NULL };
-/* Capture resolution driver.device reports to the app and renders at.
- * 600dpi quadruples raster size/RAM use for a real quality gain; 300dpi
- * (index 0) stays the default so existing users see no behaviour change. */
-STRPTR *resolution_labels = mp_dpi_label_ptrs;
-static char initial_dpi_value[16] = "300 dpi";
-int driver_resolution = 300;
-/* Distinguishes a saved/user-selected 300 DPI value from the unsaved default.
- * An explicit value may select the marked compatibility entry; a fresh Query
- * otherwise keeps an actually reported resolution as the default. */
-static BOOL driver_resolution_explicit = FALSE;
-char driver_engine_buffer[32] = "jpeg";
-/* Same convention as driver_resolution_explicit above: distinguishes a
- * saved/user-selected engine from the unsaved "jpeg" compiled-in default.
- * Without this, a fresh printer that supports both JPEG and PWG Raster
- * silently stayed on JPEG forever - PWG Raster was only ever picked if
- * JPEG wasn't advertised at all (mp_rebuild_engine_options_from_query()
- * keeps whatever's already in driver_engine_buffer as long as it's still
- * supported). JPEG (and PDF, which reuses the same JPEG encoder - see
- * pdf_writer.c) costs real DCT/quantization work per pixel on top of
- * printer.device's DUMPRPORT scale-up; PWG Raster is a cheap PackBits-style
- * pack. Real 68k hardware (issue #30, HP OfficeJet 8014e on an '060) felt
- * that gap directly: it advertises both formats, defaulted to JPEG anyway,
- * and Test Print was slow enough to look hung. */
-static BOOL driver_engine_explicit = FALSE;
-/* An explicitly-pinned engine (see above) is deliberately never silently
- * overridden - but staying on JPEG once a printer is confirmed to support
- * PWG Raster is still very likely a mistake nobody meant to make (an old
- * saved config from before PWG Raster became the default, or a stray
- * click on the Engine cycle gadget), not a deliberate choice to keep
- * paying JPEG's per-pixel DCT cost. Ask once per printer per session,
- * right after a live Query confirms PWG Raster support, rather than
- * either nagging on every Query click or silently switching out from
- * under someone who really did mean to pick JPEG. Reset alongside
- * driver_engine_explicit whenever a Unit's config is (re)loaded. */
-static BOOL driver_engine_pwg_offer_shown = FALSE;
-#define MP_ENGINE_MAX 5
-
-static const char *mp_engine_all_labels[MP_ENGINE_MAX] = {
-    "JPEG", "PostScript", "PWG Raster", "PDF", "Apple Raster"
-};
-static const char *mp_engine_all_values[MP_ENGINE_MAX] = {
-    "jpeg", "postscript", "pwg-raster", "pdf", "urf"
-};
-static const char *mp_engine_all_mimes[MP_ENGINE_MAX] = {
-    "image/jpeg", "application/postscript", "image/pwg-raster", "application/pdf",
-    "image/urf"
-};
-
-/* This array address stays fixed for the lifetime of the GadTools Cycle. */
-static STRPTR engine_labels[MP_ENGINE_MAX + 1] = {
-    "JPEG", "PostScript", "PWG Raster", "PDF", "Apple Raster", NULL
-};
-
-/* Maps the currently-visible Cycle index to MintPRINT's internal value. */
-static const char *mp_engine_value_map[MP_ENGINE_MAX] = {
-    "jpeg", "postscript", "pwg-raster", "pdf", "urf"
-};
-static int mp_engine_count = MP_ENGINE_MAX;
-char driver_media_buffer[MAX_ATTR_LEN] = "";
-char driver_source_buffer[MAX_ATTR_LEN] = "";
-char driver_color_buffer[MAX_ATTR_LEN] = "";
-char driver_quality_buffer[MAX_ATTR_LEN] = "";
-char driver_scaling_buffer[MAX_ATTR_LEN] = "";
-char driver_sides_buffer[MAX_ATTR_LEN] = "";
-/* Where the driver spools job files: "RAM" (default - whatever T: is
- * assigned to, normally RAM: on a stock system) or a real hard drive
- * device such as "DH0:", for memory-tight systems where even T:'s usual
- * RAM: backing is scarce. See mp_build_spool_options()'s comment (above,
- * with the rest of the Spooler gadget's static storage) for how its
- * choices are populated. */
-char driver_spool_buffer[MAX_ATTR_LEN] = "RAM";
-/* Keeps every hard-drive-spooled job under a unique retained name (see
- * driver_core.c's mp_job_begin()) for the Spooler management window to
- * list. Only meaningful - and only enabled in the GUI - when
- * driver_spool_buffer names a real device; see mp_spool_keep_available()
- * and its GAD_SPOOL_KEEP gating below. */
-BOOL driver_spool_keep = FALSE;
-int current_unit_index = 0;
-char printer_make_model[128] = "";
-char printer_icon_uri[256] = "";
-
-#define MP_PRINTER_ICON_LEFT  400
-/* TOP/SIZE fill the full gap between the ink/toner panel above (its
- * bottom row is MP_MARKER_AREA_BOTTOM, 115) and the Sides/Quality row
- * below (TopEdge 162). The artwork is deliberately kept above that row
- * on the taller-font OS 2.x screens. */
-#define MP_PRINTER_ICON_TOP   119
-#define MP_PRINTER_ICON_SIZE   42
-#define MP_PRINTER_ICON_TEMP  "T:MintPRINT-printer-icon.img"
-#define MP_PRINTER_ICON_PIXELS (MP_PRINTER_ICON_SIZE * MP_PRINTER_ICON_SIZE)
-#define MP_PRINTER_ICON_MAX_SOURCE_DIM 1024
-static UBYTE mp_printer_icon_rgba[MP_PRINTER_ICON_PIXELS * 4];
-static UBYTE mp_printer_icon_pens[MP_PRINTER_ICON_PIXELS];
-static UBYTE mp_printer_icon_mask[MP_PRINTER_ICON_PIXELS];
-static BOOL mp_printer_icon_valid = FALSE;
-static BOOL mp_printer_icon_pens_valid = FALSE;
-
-/* Ink/toner status (RFC 3805 Printer MIB / PWG5100.13 "marker-*"
- * attributes). Each of marker-names/marker-colors/marker-types/
- * marker-levels/marker-low-levels/marker-high-levels is its own separate
- * 1setOf IPP attribute, arriving as a consecutive run of values (same
- * shape as supported_media/supported_sides/etc. above) rather than
- * interleaved - so they're kept as parallel arrays here, each with its
- * own count, and combined by index afterwards (see mp_marker_count()
- * near the drawing code) rather than as one array of structs. */
-#define MAX_MARKERS MAX_VALUES
-char marker_names[MAX_MARKERS][MAX_ATTR_LEN];
-int num_marker_names = 0;
-char marker_colors[MAX_MARKERS][MAX_ATTR_LEN];
-int num_marker_colors = 0;
-char marker_types[MAX_MARKERS][MAX_ATTR_LEN];
-int num_marker_types = 0;
-int marker_levels[MAX_MARKERS];
-int num_marker_levels = 0;
-int marker_low_levels[MAX_MARKERS];
-int num_marker_low_levels = 0;
-int marker_high_levels[MAX_MARKERS];
-int num_marker_high_levels = 0;
-
-/* Printer status (RFC 8011 5.4.11 printer-state / 5.4.12
- * printer-state-reasons), reduced to one short word/phrase shown next to
- * the ink/toner strips - see mp_printer_status_label() near the drawing
- * code. Live-only, same as the marker-* fields above: reset alongside them,
- * never written to the capability cache file. printer_state_value is the
- * raw IPP enum (3 idle, 4 processing, 5 stopped); 0 means "not queried
- * yet". printer-state-reasons is itself a 1setOf keyword, so it needs the
- * same parallel-array treatment as marker_names/marker_colors/etc. */
-int printer_state_value = 0;
-char printer_state_reasons[MAX_MARKERS][MAX_ATTR_LEN];
-int num_printer_state_reasons = 0;
-
-STRPTR *unit_dropdown_labels = mp_unit_label_ptrs;
-/* MintPRINT prefs #6: queried job defaults are saved into Unit0. */
-/* MintPRINT prefs #7: saved-state placeholders, ghosting, layout and engine selector. */
-char file_buffer[256] = "UHD:test.jpg";
-char output_buffer[MAX_OUTPUT_LINES][MAX_OUTPUT_LINE_LENGTH];
-char supported_media_sources[MAX_VALUES][MAX_ATTR_LEN];
-int num_supported_media_sources = 0;
-int output_line = 0;
-struct Screen *screen = NULL;
-void *vi = NULL;
-struct TextFont *font = NULL;
-/* Set once in main() from the same WBorTop/Font->ta_YSize calculation
- * createAllGadgets()'s "topborder" parameter uses, so the ink-strip panel
- * (drawn separately from GadTools, after the window already exists) lines
- * its rows up with the gadget rows instead of recomputing its own guess. */
-static UWORD g_topborder = 0;
-BOOL operation_in_progress = FALSE;
-
-// Font definition
-struct TextAttr Topaz80 = {
-    "topaz.font",
-    8,
-    0,
-    0
-};
-
-// Save print mode to ENV:
-void save_print_mode(void) {
-    BPTR file = Open("ENV:IPP_Printer_PrintMode", MODE_NEWFILE);
-    if (file) {
-        FPrintf(file, "%s\n", (ULONG)selected_print_mode);
-        Close(file);
-    }
-}
-
-// Load print mode from ENV:
-void load_print_mode(void) {
-    BPTR file = Open("ENV:IPP_Printer_PrintMode", MODE_OLDFILE);
-    if (file) {
-        char buffer[64];
-        if (FGets(file, buffer, sizeof(buffer))) {
-            buffer[strcspn(buffer, "\r\n")] = 0;  // Strip newline
-            strncpy(selected_print_mode, buffer, MAX_ATTR_LEN - 1);
-            selected_print_mode[MAX_ATTR_LEN - 1] = '\0';
-
-            // Match it back to the index
-            for (int i = 0; i < num_supported_print_modes; i++) {
-                if (strcmp(supported_print_modes[i], selected_print_mode) == 0) {
-                    print_mode = i;
-                    break;
-                }
-            }
-        }
-        Close(file);
-    }
-}
-
-
-static struct Gadget *find_gadget_by_id(UWORD id) {
-    struct Gadget *g = glist;
-    while (g && g->GadgetID != id) g = g->NextGadget;
-    return g;
-}
-
-/* V37 TEXT_KIND does not reliably erase the previous text when GTTX_Text
- * changes. Clear only the gadget's value rectangle first; the descriptive
- * "Printer Model:" label sits outside this box and is left untouched.
- * This is harmless on V39+ and keeps one shared executable. */
-static void mp_update_model_display(struct Window *win) {
-    struct Gadget *g;
-    struct RastPort *rp;
-    UBYTE old_apen;
-
-    if (!win || !win->RPort)
-        return;
-    g = find_gadget_by_id(GAD_MODEL_DISPLAY);
-    if (!g)
-        return;
-
-    rp = win->RPort;
-    old_apen = rp->FgPen;
-    SetAPen(rp, 0);
-    RectFill(rp, g->LeftEdge, g->TopEdge,
-             g->LeftEdge + g->Width - 1,
-             g->TopEdge + g->Height - 1);
-    SetAPen(rp, old_apen);
-
-    GT_SetGadgetAttrs(g, win, NULL,
-                      GTTX_Text, (ULONG)printer_make_model,
-                      TAG_DONE);
-}
-
-static void trim_config_line(char *s) {
-    size_t n;
-    if (!s) return;
-    n = strlen(s);
-    while (n && (s[n - 1] == '\r' || s[n - 1] == '\n' ||
-                 s[n - 1] == ' ' || s[n - 1] == '\t')) {
-        s[--n] = '\0';
-    }
-}
-
-static BOOL ensure_config_dir(CONST_STRPTR name) {
-    BPTR lock;
-
-    lock = Lock(name, ACCESS_READ);
-    if (lock) {
-        UnLock(lock);
-        return TRUE;
-    }
-
-    lock = CreateDir(name);
-    if (!lock) return FALSE;
-    UnLock(lock);
-    return TRUE;
-}
-
-/* Every hard-drive Spooler location keeps its job files in a dedicated
- * MPSPOOL drawer on that device rather than loose at the volume's root -
- * see mp_build_spool_path()/mp_build_text_spool_path() (driver_core.c/
- * command_table.c), which spool there instead of T: once SPOOL= names a
- * real device. Marked hidden (Protect's H bit - best-effort: an older
- * filesystem that ignores it just leaves the drawer visible, nothing
- * breaks) and given no .info icon, the same way the release build's own
- * driver binaries deliberately go without one - this is a working
- * directory, not something meant to be opened or double-clicked. Called
- * once per Save, from save_driver_config() below; a failure here doesn't
- * block saving the rest of Unit0 - the driver will simply fail to open
- * its job file at print time and log why, same as any other missing
- * destination. */
-static void mp_ensure_hidden_spool_dir(const char *device) {
-    char path[MAX_ATTR_LEN + 16];
-    BPTR lock;
-
-    if (!device || !device[0] || strcmp(device, "RAM") == 0) return;
-
-    snprintf(path, sizeof(path), "%sMPSPOOL", device);
-
-    lock = Lock((CONST_STRPTR)path, ACCESS_READ);
-    if (lock) {
-        UnLock(lock);
-    } else {
-        lock = CreateDir((CONST_STRPTR)path);
-        if (!lock) {
-            printf("Could not create spool directory %s\n", path);
-            return;
-        }
-        UnLock(lock);
-    }
-
-    SetProtection((CONST_STRPTR)path, FIBF_HIDDEN);
-}
-
-static void unit_config_path(int idx, BOOL envarc, char *out, int out_size) {
-    snprintf(out, out_size, "%s:MintPRINT/Unit%d", envarc ? "ENVARC" : "ENV", idx);
-}
-
-static void unit_cache_path(int idx, BOOL envarc, char *out, int out_size) {
-    snprintf(out, out_size, "%s:MintPRINT/Unit%d.cache", envarc ? "ENVARC" : "ENV", idx);
-}
-
-static void unit_icon_cache_path(int idx, BOOL envarc, char *out, int out_size) {
-    snprintf(out, out_size, "%s:MintPRINT/Art/Unit%d.mpic",
-             envarc ? "ENVARC" : "ENV", idx);
-}
-
-static BOOL unit_file_exists(int idx) {
-    BPTR lock;
-    char path[64];
-
-    unit_config_path(idx, FALSE, path, sizeof(path));
-    lock = Lock((CONST_STRPTR)path, ACCESS_READ);
-    if (!lock) {
-        unit_config_path(idx, TRUE, path, sizeof(path));
-        lock = Lock((CONST_STRPTR)path, ACCESS_READ);
-    }
-    if (lock) {
-        UnLock(lock);
-        return TRUE;
-    }
-    return FALSE;
-}
-
-/* Peeks just the MODEL= line out of a saved unit file, without disturbing
- * any of the live GUI/driver-config state. Used to label the Unit dropdown. */
-static void peek_unit_model(int idx, char *out, int out_size) {
-    BPTR file;
-    char path[64];
-    char line[192];
-
-    out[0] = '\0';
-
-    unit_config_path(idx, FALSE, path, sizeof(path));
-    file = Open((CONST_STRPTR)path, MODE_OLDFILE);
-    if (!file) {
-        unit_config_path(idx, TRUE, path, sizeof(path));
-        file = Open((CONST_STRPTR)path, MODE_OLDFILE);
-    }
-    if (!file) return;
-
-    while (FGets(file, line, sizeof(line))) {
-        trim_config_line(line);
-        if (strncmp(line, "MODEL=", 6) == 0 && line[6]) {
-            strncpy(out, line + 6, out_size - 1);
-            out[out_size - 1] = '\0';
-            break;
-        }
-    }
-    Close(file);
-}
-
-/* Rebuilds the Unit dropdown's labels from whatever is currently saved on
- * disk for each slot ("Unit0 - Brother HL-L2350DW", "Unit1 (empty)", ...).
- * Callable before the window exists (win == NULL) to seed the gadget's
- * initial GTCY_Labels, or afterwards to refresh a live gadget - e.g. after
- * Save, in case a freshly-queried make/model just got written out. Matches
- * this file's existing "leak the old label block rather than free it while
- * GadTools might still reference it" convention (see update_media_dropdown
- * and friends). */
-static void refresh_unit_dropdown(struct Window *win) {
-    int i;
-
-    for (i = 0; i < MAX_UNITS; i++) {
-        char model[96];
-
-        mp_unit_label_ptrs[i] = mp_unit_label_storage[i];
-        mp_unit_label_storage[i][0] = '\0';
-
-        if (i == current_unit_index && printer_make_model[0]) {
-            strncpy(model, printer_make_model, sizeof(model) - 1);
-            model[sizeof(model) - 1] = '\0';
-        } else {
-            peek_unit_model(i, model, sizeof(model));
-        }
-
-        /* The "Unit:" gadget label already says "Unit" - repeating it in
-         * every cycle entry ("Unit0 - Brother MFC-J6930DW") just wastes
-         * width that a real model name badly needs. */
-        if (model[0]) {
-            snprintf(mp_unit_label_storage[i], MP_UNIT_LABEL_LEN,
-                     "%d: %s", i, model);
-        } else if (unit_file_exists(i)) {
-            snprintf(mp_unit_label_storage[i], MP_UNIT_LABEL_LEN,
-                     "%d", i);
-        } else {
-            snprintf(mp_unit_label_storage[i], MP_UNIT_LABEL_LEN,
-                     "%d (empty)", i);
-        }
-    }
-    mp_unit_label_ptrs[MAX_UNITS] = NULL;
-    unit_dropdown_labels = mp_unit_label_ptrs;
-
-    if (win) {
-        struct Gadget *g = find_gadget_by_id(GAD_UNIT_DROPDOWN);
-        if (g) {
-            GT_SetGadgetAttrs(g, win, NULL,
-                              GTCY_Labels, (ULONG)unit_dropdown_labels,
-                              GTCY_Active, (ULONG)current_unit_index,
-                              TAG_DONE);
-            RefreshGList(g, win, NULL, 1);
-            GT_RefreshWindow(win, NULL);
-        }
-    }
-}
-
-static const char *engine_mime_type(const char *engine) {
-    if (strcmp(engine, "postscript") == 0) return "application/postscript";
-    if (strcmp(engine, "pwg-raster") == 0) return "image/pwg-raster";
-    if (strcmp(engine, "pdf") == 0) return "application/pdf";
-    if (strcmp(engine, "urf") == 0) return "image/urf";
-    return "image/jpeg";
-}
-
-/* The visible order may be filtered by a printer capability query. */
-static ULONG mp_engine_active_index(void) {
-    int i;
-
-    for (i = 0; i < mp_engine_count; ++i) {
-        if (mp_engine_value_map[i] &&
-            strcmp(driver_engine_buffer, mp_engine_value_map[i]) == 0)
-            return (ULONG)i;
-    }
-    return 0;
-}
-
-/* Every document-format this driver's engines can actually produce. Kept
- * in sync with engine_mime_type()'s cases. */
-static const char *mp_supported_engine_mimes[] = {
-    "image/jpeg", "application/postscript", "image/pwg-raster", "application/pdf",
-    "image/urf"
-};
-#define MP_SUPPORTED_ENGINE_MIME_COUNT \
-    (sizeof(mp_supported_engine_mimes) / sizeof(mp_supported_engine_mimes[0]))
-
-/* After a successful Query, checks whether the printer advertised ANY
- * document-format this driver can actually produce. Unlike
- * warn_if_engine_unsupported() (which only flags a mismatch with the
- * currently-selected engine and is purely informational), a printer that
- * supports none of them cannot be printed to at all - a hard "this
- * printer isn't supported" finding, worth a real requester rather than a
- * status-box line easily missed among the rest of the Query output. */
-static void mp_check_any_engine_supported(struct Window *win) {
-    int i, j;
-    BOOL any_match = FALSE;
-    struct EasyStruct es;
-
-    if (num_supported_formats == 0) return; /* printer didn't report - can't judge */
-
-    for (i = 0; i < num_supported_formats && !any_match; i++) {
-        for (j = 0; j < (int)MP_SUPPORTED_ENGINE_MIME_COUNT; j++) {
-            if (strcasecmp(supported_formats[i], mp_supported_engine_mimes[j]) == 0) {
-                any_match = TRUE;
-                break;
-            }
-        }
-    }
-
-    if (any_match) return;
-
-    es.es_StructSize = sizeof(struct EasyStruct);
-    es.es_Flags = 0;
-    es.es_Title = (UBYTE *)"MintPrint Settings";
-    es.es_TextFormat = (UBYTE *)
-        "This printer did not advertise any document format\n"
-        "MintPRINT can produce JPEG, PostScript, PWG Raster, PDF,\n"
-        "or Apple Raster (URF).\n\n"
-        "It is likely not supported yet. To help add support,\n"
-        "please log an issue at github.com/boingball/MintPRINT -\n"
-        "run windows_ipp_probe.py (from a Windows PC on the same\n"
-        "network) against this printer and attach its output.";
-    es.es_GadgetFormat = (UBYTE *)"OK";
-    EasyRequest(win, &es, NULL);
-}
-
-/* Cross-checks the chosen engine against the formats the printer actually
- * advertised in document-format-supported (populated by a prior Query).
- * Purely informational: it does not block Save, since a printer that has
- * never been queried yet has an empty list and should not be warned about. */
-static void warn_if_engine_unsupported(const char *engine) {
-    const char *mime;
-    int i;
-    BOOL found;
-
-    if (num_supported_formats == 0) return;
-
-    mime = engine_mime_type(engine);
-    found = FALSE;
-    for (i = 0; i < num_supported_formats; i++) {
-        if (strcasecmp(supported_formats[i], mime) == 0) {
-            found = TRUE;
-            break;
-        }
-    }
-    if (!found) {
-        custom_printf("Warning: printer did not advertise %s support for the '%s' engine\n", mime, engine);
-    }
-}
-
-/* GT_GetGadgetAttrsA() is V39. GadTools STRING_KIND wraps a standard
- * Intuition StringInfo whose Buffer field is available on v37, so use that
- * directly. Cycle values are retained from IDCMP_GADGETUP message codes in
- * process_window_events(), which is the documented pre-V39 mechanism. */
-static char *mp_string_gadget_value(struct Gadget *g) {
-    struct StringInfo *si;
-
-    if (!g || !g->SpecialInfo)
-        return NULL;
-    si = (struct StringInfo *)g->SpecialInfo;
-    return si->Buffer;
-}
-
-static void capture_driver_settings(struct Window *win) {
-    struct Gadget *g;
-    char *value;
-
-    if (!win) return;
-
-    g = find_gadget_by_id(GAD_IP_STRING);
-    value = mp_string_gadget_value(g);
-    if (value) {
-        strncpy(ip_buffer, value, sizeof(ip_buffer) - 1);
-        ip_buffer[sizeof(ip_buffer) - 1] = '\0';
-    }
-
-    g = find_gadget_by_id(GAD_IPP_PATH);
-    value = mp_string_gadget_value(g);
-    if (value) {
-        strncpy(driver_path_buffer, value, sizeof(driver_path_buffer) - 1);
-        driver_path_buffer[sizeof(driver_path_buffer) - 1] = '\0';
-    }
-
-    /* Every cycle gadget updates its persisted backing value from the
-     * IDCMP message code as the user changes it. */
-    warn_if_engine_unsupported(driver_engine_buffer);
-}
-
-static BOOL write_driver_config_file(CONST_STRPTR filename) {
-    BPTR file;
-    char host[64];
-    int port = -1;
-    char line[192];
-
-    if (!parse_ip_and_port(ip_buffer, host, sizeof(host), &port) || !host[0]) {
-        printf("Invalid printer IPv4 address: %s\n", ip_buffer);
-        return FALSE;
-    }
-    if (port <= 0) port = 80;
-    if (port > 65535) {
-        printf("Invalid printer port: %d\n", port);
-        return FALSE;
-    }
-    if (!driver_path_buffer[0] || driver_path_buffer[0] != '/') {
-        printf("IPP path must start with '/': %s\n", driver_path_buffer);
-        return FALSE;
-    }
-
-    file = Open(filename, MODE_NEWFILE);
-    if (!file) return FALSE;
-
-    snprintf(line, sizeof(line), "# MintPRINT Unit%d - written by MintPrint Settings\n", current_unit_index);
-    FPuts(file, line);
-    snprintf(line, sizeof(line), "HOST=%s\n", host);
-    FPuts(file, line);
-    snprintf(line, sizeof(line), "PORT=%d\n", port);
-    FPuts(file, line);
-    snprintf(line, sizeof(line), "PATH=%s\n", driver_path_buffer);
-    FPuts(file, line);
-    snprintf(line, sizeof(line), "ENGINE=%s\n", driver_engine_buffer);
-    FPuts(file, line);
-    snprintf(line, sizeof(line), "DEBUG=%d\n", driver_debug ? 1 : 0);
-    FPuts(file, line);
-    snprintf(line, sizeof(line), "RESOLUTION=%d\n", driver_resolution);
-    FPuts(file, line);
-    snprintf(line, sizeof(line), "MEDIA=%s\n", driver_media_buffer);
-    FPuts(file, line);
-    snprintf(line, sizeof(line), "SOURCE=%s\n", driver_source_buffer);
-    FPuts(file, line);
-    snprintf(line, sizeof(line), "COLOR=%s\n", driver_color_buffer);
-    FPuts(file, line);
-    snprintf(line, sizeof(line), "QUALITY=%s\n", driver_quality_buffer);
-    FPuts(file, line);
-    snprintf(line, sizeof(line), "SCALING=%s\n", driver_scaling_buffer);
-    FPuts(file, line);
-    snprintf(line, sizeof(line), "SIDES=%s\n", driver_sides_buffer);
-    FPuts(file, line);
-    snprintf(line, sizeof(line), "SPOOL=%s\n", driver_spool_buffer);
-    FPuts(file, line);
-    snprintf(line, sizeof(line), "SPOOL_KEEP=%d\n",
-             mp_spool_keep_available() && driver_spool_keep ? 1 : 0);
-    FPuts(file, line);
-    snprintf(line, sizeof(line), "PWG_SHEET_BACK=%s\n", pwg_sheet_back_value);
-    FPuts(file, line);
-    snprintf(line, sizeof(line), "MODEL=%s\n", printer_make_model);
-    FPuts(file, line);
-    Close(file);
-    return TRUE;
-}
-
-static BOOL save_driver_config(struct Window *win) {
-    BOOL env_ok;
-    BOOL envarc_ok;
-    char env_path[64];
-    char envarc_path[64];
-
-    capture_driver_settings(win);
-    mp_ensure_hidden_spool_dir(driver_spool_buffer);
-
-    if (!ensure_config_dir((CONST_STRPTR)"ENV:MintPRINT")) {
-        printf("Could not create/find ENV:MintPRINT\n");
-        return FALSE;
-    }
-    if (!ensure_config_dir((CONST_STRPTR)"ENVARC:MintPRINT")) {
-        printf("Could not create/find ENVARC:MintPRINT\n");
-        return FALSE;
-    }
-
-    unit_config_path(current_unit_index, FALSE, env_path, sizeof(env_path));
-    unit_config_path(current_unit_index, TRUE, envarc_path, sizeof(envarc_path));
-
-    env_ok = write_driver_config_file((CONST_STRPTR)env_path);
-    envarc_ok = write_driver_config_file((CONST_STRPTR)envarc_path);
-
-    /*
-     * Do NOT replace the live Unit cycle gadget's GTCY_Labels here.
-     *
-     * On classic GadTools (OS3.1/V37), repeatedly swapping a CYCLE_KIND
-     * label array while the gadget is live can leave internal gadget state
-     * pointing at the old label list.  The failure shows up later during
-     * GUI teardown (Save -> Exit can hard-lock the machine), not necessarily
-     * at the GT_SetGadgetAttrs() call itself.
-     *
-     * Saving does not actually require a Unit dropdown rebuild: the current
-     * Unit number is unchanged, and a freshly queried model is already
-     * previewed by the query path.  Leave the existing live labels alone.
-     * They will be rebuilt normally the next time Settings is launched.
-     */
-    (void)win;
-
-    return env_ok && envarc_ok;
-}
-
-static BOOL load_driver_config(void) {
-    BPTR file;
-    char line[192];
-    /* Empty, not a real address: a fresh install has no saved endpoint, and
-     * defaulting to some other user's LAN printer address would make the
-     * startup Query below (main()'s "if (ip_buffer[0])" refresh) probe a
-     * random device on this network instead of doing nothing. */
-    char host[64] = "";
-    char env_path[64];
-    char envarc_path[64];
-    int port = 80;
-    BOOL found = FALSE;
-
-    strcpy(driver_path_buffer, "/ipp/print");
-    strcpy(driver_engine_buffer, "jpeg");
-    driver_engine_explicit = FALSE;
-    driver_engine_pwg_offer_shown = FALSE;
-    driver_debug = FALSE;
-    driver_resolution = 300;
-    driver_resolution_explicit = FALSE;
-    driver_media_buffer[0] = '\0';
-    driver_source_buffer[0] = '\0';
-    driver_color_buffer[0] = '\0';
-    driver_quality_buffer[0] = '\0';
-    driver_scaling_buffer[0] = '\0';
-    driver_sides_buffer[0] = '\0';
-    strcpy(driver_spool_buffer, "RAM");
-    driver_spool_keep = FALSE;
-    strcpy(pwg_sheet_back_value, "normal");
-    printer_make_model[0] = '\0';
-
-    unit_config_path(current_unit_index, FALSE, env_path, sizeof(env_path));
-    unit_config_path(current_unit_index, TRUE, envarc_path, sizeof(envarc_path));
-
-    file = Open((CONST_STRPTR)env_path, MODE_OLDFILE);
-    if (!file)
-        file = Open((CONST_STRPTR)envarc_path, MODE_OLDFILE);
-
-    if (!file) {
-        ip_buffer[0] = '\0';
-        return FALSE;
-    }
-
-    found = TRUE;
-    while (FGets(file, line, sizeof(line))) {
-        char *value;
-        trim_config_line(line);
-        if (!line[0] || line[0] == '#' || line[0] == ';') continue;
-
-        if (strncmp(line, "HOST=", 5) == 0) {
-            value = line + 5;
-            if (*value) {
-                strncpy(host, value, sizeof(host) - 1);
-                host[sizeof(host) - 1] = '\0';
-            }
-        } else if (strncmp(line, "PORT=", 5) == 0) {
-            int parsed = atoi(line + 5);
-            if (parsed >= 1 && parsed <= 65535) port = parsed;
-        } else if (strncmp(line, "PATH=", 5) == 0) {
-            value = line + 5;
-            if (*value == '/') {
-                strncpy(driver_path_buffer, value, sizeof(driver_path_buffer) - 1);
-                driver_path_buffer[sizeof(driver_path_buffer) - 1] = '\0';
-            }
-        } else if (strncmp(line, "ENGINE=", 7) == 0) {
-            if (strcmp(line + 7, "pwg-raster") == 0)
-                strcpy(driver_engine_buffer, "pwg-raster");
-            else if (strcmp(line + 7, "pdf") == 0)
-                strcpy(driver_engine_buffer, "pdf");
-            else if (strcmp(line + 7, "postscript") == 0)
-                strcpy(driver_engine_buffer, "postscript");
-            else if (strcmp(line + 7, "urf") == 0)
-                strcpy(driver_engine_buffer, "urf");
-            else
-                strcpy(driver_engine_buffer, "jpeg");
-            /* Matches driver_resolution_explicit's own precedent just above:
-             * once a value has actually been saved, treat it as pinned
-             * rather than re-deriving it from capabilities on every load -
-             * consistent behaviour for both settings, and avoids silently
-             * flipping a printer that was deliberately kept on JPEG (e.g.
-             * a real PWG rendering bug on that model) back to PWG Raster
-             * behind the user's back on a later Query. */
-            driver_engine_explicit = TRUE;
-        } else if (strncmp(line, "DEBUG=", 6) == 0) {
-            driver_debug = (line[6] == '0') ? FALSE : TRUE;
-        } else if (strncmp(line, "KEEPJOB=", 8) == 0) {
-            /* Backward compatibility: the old diagnostic-artifact setting
-             * maps directly to the new, broader Debug switch. */
-            driver_debug = (line[8] == '0') ? FALSE : TRUE;
-        } else if (strncmp(line, "RESOLUTION=", 11) == 0) {
-            driver_resolution = (atoi(line + 11) == 600) ? 600 : 300;
-            driver_resolution_explicit = TRUE;
-        } else if (strncmp(line, "MEDIA=", 6) == 0) {
-            strncpy(driver_media_buffer, line + 6, sizeof(driver_media_buffer) - 1);
-            driver_media_buffer[sizeof(driver_media_buffer) - 1] = '\0';
-        } else if (strncmp(line, "SOURCE=", 7) == 0) {
-            strncpy(driver_source_buffer, line + 7, sizeof(driver_source_buffer) - 1);
-            driver_source_buffer[sizeof(driver_source_buffer) - 1] = '\0';
-        } else if (strncmp(line, "COLOR=", 6) == 0) {
-            strncpy(driver_color_buffer, line + 6, sizeof(driver_color_buffer) - 1);
-            driver_color_buffer[sizeof(driver_color_buffer) - 1] = '\0';
-        } else if (strncmp(line, "QUALITY=", 8) == 0) {
-            strncpy(driver_quality_buffer, line + 8, sizeof(driver_quality_buffer) - 1);
-            driver_quality_buffer[sizeof(driver_quality_buffer) - 1] = '\0';
-        } else if (strncmp(line, "SCALING=", 8) == 0) {
-            strncpy(driver_scaling_buffer, line + 8, sizeof(driver_scaling_buffer) - 1);
-            driver_scaling_buffer[sizeof(driver_scaling_buffer) - 1] = '\0';
-        } else if (strncmp(line, "SIDES=", 6) == 0) {
-            const char *sides = line + 6;
-            if (strcmp(sides, "one-sided") == 0 ||
-                strcmp(sides, "two-sided-long-edge") == 0 ||
-                strcmp(sides, "two-sided-short-edge") == 0) {
-                strncpy(driver_sides_buffer, sides,
-                        sizeof(driver_sides_buffer) - 1);
-                driver_sides_buffer[sizeof(driver_sides_buffer) - 1] = '\0';
-            }
-        } else if (strncmp(line, "SPOOL=", 6) == 0) {
-            const char *spool = line + 6;
-            if (spool[0]) {
-                strncpy(driver_spool_buffer, spool,
-                        sizeof(driver_spool_buffer) - 1);
-                driver_spool_buffer[sizeof(driver_spool_buffer) - 1] = '\0';
-            }
-        } else if (strncmp(line, "SPOOL_KEEP=", 11) == 0) {
-            driver_spool_keep = (line[11] == '0') ? FALSE : TRUE;
-        } else if (strncmp(line, "PWG_SHEET_BACK=", 15) == 0) {
-            const char *sheet_back = line + 15;
-            if (strcmp(sheet_back, "normal") == 0 ||
-                strcmp(sheet_back, "rotated") == 0 ||
-                strcmp(sheet_back, "flipped") == 0 ||
-                strcmp(sheet_back, "manual-tumble") == 0) {
-                strncpy(pwg_sheet_back_value, sheet_back,
-                        sizeof(pwg_sheet_back_value) - 1);
-                pwg_sheet_back_value[sizeof(pwg_sheet_back_value) - 1] = '\0';
-            }
-        } else if (strncmp(line, "MODEL=", 6) == 0) {
-            strncpy(printer_make_model, line + 6, sizeof(printer_make_model) - 1);
-            printer_make_model[sizeof(printer_make_model) - 1] = '\0';
-        }
-    }
-
-    Close(file);
-    if (host[0])
-        snprintf(ip_buffer, sizeof(ip_buffer), "%s:%d", host, port);
-    else
-        ip_buffer[0] = '\0';
-    return found;
-}
-
-/* TRUE for a raw IPP/PWG5100.3 self-describing keyword: lowercase letters,
- * digits, '-', '.' and '_' only. Real keywords are always shaped like this
- * ("iso_a4_210x297mm", "by-pass-tray", "tray-1"); anything with a space
- * or an uppercase letter is already a human-readable name - either
- * printer-supplied (trayname=/medianame= from a vendor's media-col
- * response) or one of this program's own "AUTO"/"Unknown" fallbacks -
- * and mp_pretty_media_size()/mp_pretty_tray_name() below leave it alone
- * rather than risk mangling it. */
-static BOOL mp_looks_like_raw_ipp_keyword(const char *s) {
-    int i;
-    if (!s || !s[0]) return FALSE;
-    for (i = 0; s[i]; i++) {
-        char c = s[i];
-        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
-              c == '-' || c == '.' || c == '_'))
-            return FALSE;
-    }
-    return TRUE;
-}
-
-/* Capitalises each hyphen-separated word of a raw keyword's middle
- * segment, turning hyphens into spaces - shared by
- * mp_pretty_media_size() and mp_pretty_tray_name() below. Caller
- * guarantees len < out_size. */
-static void mp_pretty_words(const char *start, size_t len, char *out) {
-    size_t i, oi = 0;
-    BOOL cap_next = TRUE;
-    for (i = 0; i < len; i++) {
-        char c = start[i];
-        if (c == '-') {
-            out[oi++] = ' ';
-            cap_next = TRUE;
-        } else if (cap_next) {
-            out[oi++] = (char)toupper((unsigned char)c);
-            cap_next = FALSE;
-        } else {
-            out[oi++] = c;
-        }
-    }
-    out[oi] = '\0';
-}
-
-/* PWG5100.3 self-describing media names look like
- * "<region>_<name>_<dims><unit>", e.g. "iso_a4_210x297mm" or
- * "na_number-10-envelope_4.125x9.5in" - keep just the <name> segment,
- * the part a person actually recognises, and drop the region prefix and
- * exact millimetre/inch dimensions, which are just noise in a dropdown
- * ("A4" instead of "iso_a4_210x297mm"). Falls back to the raw string
- * unchanged if it doesn't look like a raw keyword, or doesn't have the
- * expected two-underscore shape, so nothing already friendly gets
- * mangled. */
-static void mp_pretty_media_size(const char *raw, char *out, size_t out_size) {
-    const char *first_us, *last_us, *name_start;
-    size_t name_len;
-    char buf[MAX_ATTR_LEN];
-
-    if (!mp_looks_like_raw_ipp_keyword(raw)) {
-        snprintf(out, out_size, "%s", raw ? raw : "");
-        return;
-    }
-
-    first_us = strchr(raw, '_');
-    last_us = strrchr(raw, '_');
-    if (!first_us || !last_us || first_us == last_us) {
-        snprintf(out, out_size, "%s", raw);
-        return;
-    }
-
-    name_start = first_us + 1;
-    name_len = (size_t)(last_us - name_start);
-    if (name_len == 0 || name_len >= sizeof(buf)) {
-        snprintf(out, out_size, "%s", raw);
-        return;
-    }
-
-    mp_pretty_words(name_start, name_len, buf);
-    snprintf(out, out_size, "%s", buf);
-}
-
-/* PWG5100.3 media-source keywords, prettified for the dropdown. Only two
- * need a special case - the rest ("tray-1", "roll-2", "envelope-manual",
- * "large-capacity", ...) already read fine from the same hyphen-to-space,
- * capitalise-each-word transform mp_pretty_media_size() uses above.
- * Falls back to the raw string unchanged if it doesn't look like a raw
- * keyword - see mp_looks_like_raw_ipp_keyword(). */
-static void mp_pretty_tray_name(const char *raw, char *out, size_t out_size) {
-    char buf[MAX_ATTR_LEN];
-    size_t len;
-
-    if (!mp_looks_like_raw_ipp_keyword(raw)) {
-        snprintf(out, out_size, "%s", raw ? raw : "");
-        return;
-    }
-    if (strcmp(raw, "auto") == 0) {
-        snprintf(out, out_size, "AUTO");
-        return;
-    }
-    if (strcmp(raw, "by-pass-tray") == 0 || strcmp(raw, "bypass-tray") == 0) {
-        snprintf(out, out_size, "Bypass Tray");
-        return;
-    }
-
-    len = strlen(raw);
-    if (len >= sizeof(buf)) len = sizeof(buf) - 1;
-    mp_pretty_words(raw, len, buf);
-    snprintf(out, out_size, "%s", buf);
-}
-
-static void seed_saved_option_labels(void) {
-    if (driver_media_buffer[0]) {
-        char media_pretty[MAX_ATTR_LEN];
-
-        mp_pretty_media_size(driver_media_buffer, media_pretty, sizeof(media_pretty));
-        if (driver_source_buffer[0]) {
-            char tray_pretty[MAX_ATTR_LEN];
-
-            mp_pretty_tray_name(driver_source_buffer, tray_pretty, sizeof(tray_pretty));
-            snprintf(initial_media_value, sizeof(initial_media_value), "%s (%s)",
-                     media_pretty, tray_pretty);
-        } else {
-            snprintf(initial_media_value, sizeof(initial_media_value), "%s",
-                     media_pretty);
-        }
-    } else {
-        strcpy(initial_media_value, "Not Detected");
-    }
-
-    if (driver_color_buffer[0])
-        snprintf(initial_print_mode_value, sizeof(initial_print_mode_value), "%s",
-                 driver_color_buffer);
-    else
-        strcpy(initial_print_mode_value, "Not Detected");
-
-    if (driver_scaling_buffer[0])
-        snprintf(initial_scaling_value, sizeof(initial_scaling_value), "%s",
-                 driver_scaling_buffer);
-    else
-        strcpy(initial_scaling_value, "Not Detected");
-
-    if (driver_quality_buffer[0])
-        snprintf(initial_quality_value, sizeof(initial_quality_value), "%s",
-                 driver_quality_buffer);
-    else
-        strcpy(initial_quality_value, "Not Detected");
-
-    snprintf(initial_dpi_value, sizeof(initial_dpi_value), "%d dpi",
-             driver_resolution);
-    mp_dpi_options.values[0] = driver_resolution;
-    mp_dpi_options.compatibility[0] = 0;
-    mp_dpi_options.count = 1;
-    mp_dpi_options.active = 0;
-    mp_dpi_options.selected = driver_resolution;
-
-    mp_media_label_ptrs[0] = mp_media_label_storage[0];
-    strncpy(mp_media_label_storage[0], initial_media_value,
-            sizeof(mp_media_label_storage[0]) - 1);
-    mp_media_label_storage[0][sizeof(mp_media_label_storage[0]) - 1] = '\0';
-    mp_media_label_ptrs[1] = NULL;
-
-    mp_print_mode_label_ptrs[0] = mp_print_mode_label_storage[0];
-    strncpy(mp_print_mode_label_storage[0], initial_print_mode_value,
-            sizeof(mp_print_mode_label_storage[0]) - 1);
-    mp_print_mode_label_storage[0][sizeof(mp_print_mode_label_storage[0]) - 1] = '\0';
-    mp_print_mode_label_ptrs[1] = NULL;
-
-    mp_scaling_label_ptrs[0] = mp_scaling_label_storage[0];
-    strncpy(mp_scaling_label_storage[0], initial_scaling_value,
-            sizeof(mp_scaling_label_storage[0]) - 1);
-    mp_scaling_label_storage[0][sizeof(mp_scaling_label_storage[0]) - 1] = '\0';
-    mp_scaling_label_ptrs[1] = NULL;
-
-    mp_quality_label_ptrs[0] = mp_quality_label_storage[0];
-    strncpy(mp_quality_label_storage[0], initial_quality_value,
-            sizeof(mp_quality_label_storage[0]) - 1);
-    mp_quality_label_storage[0][sizeof(mp_quality_label_storage[0]) - 1] = '\0';
-    mp_quality_label_ptrs[1] = NULL;
-
-    mp_dpi_label_ptrs[0] = mp_dpi_label_storage[0];
-    strncpy(mp_dpi_label_storage[0], initial_dpi_value,
-            sizeof(mp_dpi_label_storage[0]) - 1);
-    mp_dpi_label_storage[0][sizeof(mp_dpi_label_storage[0]) - 1] = '\0';
-    mp_dpi_label_ptrs[1] = NULL;
-
-    mp_sides_label_ptrs[0] = mp_sides_label_storage[0];
-    strcpy(mp_sides_label_storage[0], "One-sided");
-    strcpy(mp_sides_value_storage[0], "one-sided");
-    mp_sides_label_ptrs[1] = NULL;
-    mp_sides_option_count = 1;
-
-    media_dropdown_items = mp_media_label_ptrs;
-    print_mode_labels = mp_print_mode_label_ptrs;
-    scaling_mode_labels = mp_scaling_label_ptrs;
-    quality_mode_labels = mp_quality_label_ptrs;
-    resolution_labels = mp_dpi_label_ptrs;
-}
-
-static void apply_saved_option_state(struct Window *win) {
-    struct Gadget *g;
-
-    if (!win) return;
-    seed_saved_option_labels();
-
-    if (num_media_tray_mappings == 0) {
-        g = find_gadget_by_id(GAD_MEDIA_DROPDOWN);
-        if (g)
-            GT_SetGadgetAttrs(g, win, NULL,
-                              GTCY_Labels, (ULONG)media_dropdown_items,
-                              GTCY_Active, 0,
-                              GA_Disabled, driver_media_buffer[0] ? FALSE : TRUE,
-                              TAG_DONE);
-    }
-
-    if (num_supported_scaling == 0) {
-        g = find_gadget_by_id(GAD_SCALING_MODE);
-        if (g)
-            GT_SetGadgetAttrs(g, win, NULL,
-                              GTCY_Labels, (ULONG)scaling_mode_labels,
-                              GTCY_Active, 0,
-                              GA_Disabled, driver_scaling_buffer[0] ? FALSE : TRUE,
-                              TAG_DONE);
-    }
-
-    if (num_supported_quality == 0) {
-        g = find_gadget_by_id(GAD_QUALITY_MODE);
-        if (g)
-            GT_SetGadgetAttrs(g, win, NULL,
-                              GTCY_Labels, (ULONG)quality_mode_labels,
-                              GTCY_Active, 0,
-                              GA_Disabled, driver_quality_buffer[0] ? FALSE : TRUE,
-                              TAG_DONE);
-    }
-
-    if (num_supported_dpi == 0) {
-        g = find_gadget_by_id(GAD_RESOLUTION);
-        if (g)
-            GT_SetGadgetAttrs(g, win, NULL,
-                              GTCY_Labels, (ULONG)resolution_labels,
-                              GTCY_Active, 0,
-                              GA_Disabled, TRUE,
-                              TAG_DONE);
-    }
-
-    if (num_supported_print_modes == 0) {
-        g = find_gadget_by_id(GAD_PRINT_MODE);
-        if (g)
-            GT_SetGadgetAttrs(g, win, NULL,
-                              GTCY_Labels, (ULONG)print_mode_labels,
-                              GTCY_Active, 0,
-                              GA_Disabled, driver_color_buffer[0] ? FALSE : TRUE,
-                              TAG_DONE);
-    }
-
-    g = find_gadget_by_id(GAD_SIDES);
-    if (g)
-        GT_SetGadgetAttrs(g, win, NULL,
-                          GTCY_Labels, (ULONG)mp_sides_label_ptrs,
-                          GTCY_Active, 0,
-                          GA_Disabled, TRUE,
-                          TAG_DONE);
-
-    GT_RefreshWindow(win, NULL);
-}
-
-static void apply_job_defaults_to_gadgets(struct Window *win) {
-    struct Gadget *g;
-    int i;
-
-    if (!win) return;
-
-    if (media_dropdown && num_media_tray_mappings > 0 && driver_media_buffer[0]) {
-        for (i = 0; i < num_media_tray_mappings; ++i) {
-            if (strcmp(media_tray_map[i].media, driver_media_buffer) == 0 &&
-                (!driver_source_buffer[0] ||
-                 strcmp(media_tray_map[i].source, driver_source_buffer) == 0)) {
-                GT_SetGadgetAttrs(media_dropdown, win, NULL,
-                                  GTCY_Active, (ULONG)i,
-                                  TAG_DONE);
-                break;
-            }
-        }
-    }
-
-    g = find_gadget_by_id(GAD_PRINT_MODE);
-    if (g && driver_color_buffer[0]) {
-        for (i = 0; i < num_supported_print_modes; ++i) {
-            if (strcmp(supported_print_modes[i], driver_color_buffer) == 0) {
-                GT_SetGadgetAttrs(g, win, NULL, GTCY_Active, (ULONG)i, TAG_DONE);
-                strncpy(selected_print_mode, supported_print_modes[i],
-                        sizeof(selected_print_mode) - 1);
-                selected_print_mode[sizeof(selected_print_mode) - 1] = '\0';
-                break;
-            }
-        }
-    }
-
-    g = find_gadget_by_id(GAD_SCALING_MODE);
-    if (g && driver_scaling_buffer[0]) {
-        for (i = 0; i < num_supported_scaling; ++i) {
-            if (strcmp(supported_scaling[i], driver_scaling_buffer) == 0) {
-                GT_SetGadgetAttrs(g, win, NULL, GTCY_Active, (ULONG)i, TAG_DONE);
-                strncpy(selected_scaling, supported_scaling[i], sizeof(selected_scaling) - 1);
-                selected_scaling[sizeof(selected_scaling) - 1] = '\0';
-                break;
-            }
-        }
-    }
-
-    g = find_gadget_by_id(GAD_QUALITY_MODE);
-    if (g && driver_quality_buffer[0]) {
-        for (i = 0; i < num_supported_quality; ++i) {
-            if (strcmp(supported_quality[i], driver_quality_buffer) == 0) {
-                GT_SetGadgetAttrs(g, win, NULL, GTCY_Active, (ULONG)i, TAG_DONE);
-                strncpy(selected_quality, supported_quality[i], sizeof(selected_quality) - 1);
-                selected_quality[sizeof(selected_quality) - 1] = '\0';
-                break;
-            }
-        }
-    }
-
-    g = find_gadget_by_id(GAD_SIDES);
-    if (g)
-        GT_SetGadgetAttrs(g, win, NULL,
-                          GTCY_Active, mp_sides_active_index(),
-                          TAG_DONE);
-
-    GT_RefreshWindow(win, NULL);
-}
-
-static void mp_set_test_print_enabled(struct Window *win, BOOL enabled)
-{
-    struct Gadget *g = find_gadget_by_id(GAD_PRINT_BUTTON);
-    if (g && win) {
-        GT_SetGadgetAttrs(g, win, NULL,
-                          GA_Disabled, enabled ? FALSE : TRUE,
-                          TAG_DONE);
-    }
-}
-
-/* Keeps the Keep Spooled Jobs checkbox's enabled/ticked state in step
- * with the Spooler cycle - called right after driver_spool_buffer
- * changes (GAD_SPOOLER's handler below) and once at startup
- * (apply_driver_config_to_gadgets()). Forces driver_spool_keep off the
- * moment Spooler no longer names a real device, rather than leaving a
- * stale tick nobody can see or clear on a disabled gadget - see
- * mp_spool_keep_available(). */
-static void mp_update_spool_keep_gadget(struct Window *win)
-{
-    struct Gadget *g = find_gadget_by_id(GAD_SPOOL_KEEP);
-    BOOL available = mp_spool_keep_available();
-
-    if (!available) driver_spool_keep = FALSE;
-
-    if (g && win) {
-        GT_SetGadgetAttrs(g, win, NULL,
-                          GA_Disabled, (ULONG)(available ? FALSE : TRUE),
-                          GTCB_Checked, (ULONG)(available && driver_spool_keep),
-                          TAG_DONE);
-    }
-}
-
-static void mp_test_print_release(struct Window *win)
-{
-    if (test_print_job.request && test_print_job.device_open) {
-        CloseDevice((struct IORequest *)test_print_job.request);
-        test_print_job.device_open = FALSE;
-    }
-    if (test_print_job.request) {
-        DeleteIORequest((struct IORequest *)test_print_job.request);
-        test_print_job.request = NULL;
-    }
-    if (test_print_job.port) {
-        DeleteMsgPort(test_print_job.port);
-        test_print_job.port = NULL;
-    }
-    if (test_print_job.bitmap) {
-        if (test_print_job.bitmap_manual) {
-            int plane;
-            for (plane = 0;
-                 plane < (int)test_print_job.bitmap_storage.Depth;
-                 ++plane) {
-                if (test_print_job.bitmap_storage.Planes[plane]) {
-                    FreeRaster(test_print_job.bitmap_storage.Planes[plane],
-                               (ULONG)test_print_job.bitmap_storage.BytesPerRow * 8UL,
-                               (ULONG)test_print_job.bitmap_storage.Rows);
-                    test_print_job.bitmap_storage.Planes[plane] = NULL;
-                }
-            }
-        } else {
-            FreeBitMap(test_print_job.bitmap);
-        }
-        test_print_job.bitmap = NULL;
-        test_print_job.bitmap_manual = FALSE;
-    }
-    if (test_print_job.colormap) {
-        FreeColorMap(test_print_job.colormap);
-        test_print_job.colormap = NULL;
-    }
-    test_print_job.active = FALSE;
-    mp_set_test_print_enabled(win, TRUE);
-}
-
-static void mp_test_print_complete(struct Window *win)
-{
-    LONG ioerr;
-    LONG request_error;
-
-    if (!test_print_job.active || !test_print_job.request) return;
-    ioerr = WaitIO((struct IORequest *)test_print_job.request);
-    request_error = (LONG)test_print_job.request->io_Error;
-    /* CloseDevice may still submit a pending/duplex page. Finish that
-     * before reporting completion, saving the request errors before the
-     * release helper deletes the IORequest. */
-    mp_test_print_release(win);
-    if (ioerr != 0 || request_error != 0) {
-        printf("Test Print failed: WaitIO=%ld io_Error=%ld\n",
-               ioerr, request_error);
-    } else {
-        /* A real OS 2.04 capture returned no I/O error despite the driver
-         * logging an IPP connection timeout during Render(4). A completed
-         * raster request therefore cannot confirm delivery, and even IPP
-         * acceptance would not prove that paper has physically printed. */
-        printf("Test Print request finished; delivery is not confirmed\n");
-        printf("Check printer output, retained job status or Debug driver log\n");
-    }
-}
-
-static void mp_test_print_cancel(struct Window *win)
-{
-    if (!test_print_job.active || !test_print_job.request) return;
-    printf("Cancelling Test Print...\n");
-    if (!CheckIO((struct IORequest *)test_print_job.request))
-        AbortIO((struct IORequest *)test_print_job.request);
-    WaitIO((struct IORequest *)test_print_job.request);
-    mp_test_print_release(win);
-}
-
-/* Portrait, A4-proportioned (210x297mm) test canvas, drawn into its own
- * private bitmap and 8-colour ColorMap rather than the live Workbench
- * screen's.
- *
- * This is the original pre-PR38 320x453 layout, restored: real testing of
- * PR38's smaller 240x320 live-palette canvas showed the same left-margin/
- * positioning regression on both PWG Raster and JPEG Test Print, which
- * means it's an upstream printer.device DUMPRPORT geometry quirk tied to
- * that canvas's own dimensions/aspect - not something specific to any one
- * MintPRINT encoder. Going back to the previously-proven 320x453 source
- * (kept identical for JPEG, PWG Raster and PDF - same bitmap, same source
- * dimensions, same configured-media DestCols/DestRows) preserves the
- * intended page aspect. Do not add SPECIAL_CENTER: the OS 2.04 capture
- * below shows that it pads even this full-page canvas against the driver's
- * much larger maximum width.
- *
- * The private ColorMap exists because pen 0 on a live Workbench screen is
- * whatever grey the user's background happens to be, not white - dumping
- * the screen's own pens printed a full page of grey ink. Pen 0 here is
- * fixed to true white and pen 1 to true black, independent of the user's
- * screen/theme, and pens 2-7 are fixed primaries for the colour test.
- *
- * printer.device still runs the DUMPRPORT request asynchronously
- * (test_print_job, above) so the GUI stays responsive; mp_test_print_complete()
- * (called from the main event loop) and mp_test_print_cancel() (called on
- * window close) finish the job and release its resources, including the
- * ColorMap allocated here. */
-#define MP_TESTPAGE_WIDTH  320
-#define MP_TESTPAGE_HEIGHT 453
-#define MP_TESTPAGE_DEPTH  3   /* 8 pens: 2^3 */
-#define MP_TESTPAGE_COLORS 8
-
-/* PostScript alone still gets an exact small physical target
- * (SPECIAL_MILCOLS/MILROWS, no SPECIAL_CENTER) since the PostScript writer
- * centres the image on /PageSize itself; asking printer.device to also
- * centre it left 983 blank raster columns on a real Samsung capture, and
- * the smaller target keeps the 300 DPI encoder input down. The target
- * keeps the restored 320:453 source's own aspect ratio (320/453 =
- * 0.7064) rather than the previous 240:320 canvas's 3:4 (0.75) - printing
- * to a mismatched aspect would itself reintroduce cropping/positioning
- * error independent of the printer.device quirk above. */
-#define MP_TEST_PS_WIDTH_MILS  4200
-#define MP_TEST_PS_HEIGHT_MILS 5940
-
-static const char *mp_test_print_engine_name(void)
-{
-    int i;
-
-    for (i = 0; i < MP_ENGINE_MAX; ++i) {
-        if (strcmp(driver_engine_buffer, mp_engine_all_values[i]) == 0)
-            return mp_engine_all_labels[i];
-    }
-    return driver_engine_buffer[0] ? driver_engine_buffer : "unknown";
-}
-
-static BOOL mintprint_test_page(struct Window *win) {
-    ULONG mode_id = 0;
-    LONG left = 16, right = MP_TESTPAGE_WIDTH - 17;
-    LONG swatch_area, swatch_w, i;
-    unsigned long media_w_100mm, media_h_100mm;
-    struct MPDriverVersion installed_ver = {0, 0};
-    BOOL have_installed_ver;
-    UWORD tw;
-    const char *title = "MintPRINT";
-    const char *tagline = "Network Printer Test Page";
-    const char *colour_label = "Colour Test";
-    const char *settings_label = "Version & Settings";
-    const char *footer1 = "printer.device -> MintPRINT -> IPP";
-    const char *footer2 = "github.com/boingball/MintPRINT";
-    static const char *swatch_names[MP_TESTPAGE_COLORS] =
-        { "Wht", "Blk", "Red", "Grn", "Blu", "Cyn", "Mag", "Yel" };
-    char info_lines[9][80];
-    int num_info_lines = 0;
-    BOOL is_postscript;
-
-    if (test_print_job.active) {
-        printf("Test Print is already running\n");
-        return FALSE;
-    }
-
-    if (!screen) {
-        printf("Test Print: public screen is not available\n");
-        return FALSE;
-    }
-
-    /* Test the settings the user is looking at, and make them the live Unit0. */
-    if (!save_driver_config(win)) {
-        printf("Test Print: could not save Unit0 settings\n");
-        return FALSE;
-    }
-
-    have_installed_ver = mp_read_driver_version(MINTPRINT_DRIVER_DEST, &installed_ver);
-
-    snprintf(info_lines[num_info_lines++], sizeof(info_lines[0]),
-             "Unit%d  |  Settings v%s", current_unit_index, MINTPRINT_SETTINGS_VERSION);
-    if (have_installed_ver)
-        snprintf(info_lines[num_info_lines++], sizeof(info_lines[0]),
-                 "Driver: v%u.%u installed",
-                 (unsigned)installed_ver.version, (unsigned)installed_ver.revision);
-    else
-        snprintf(info_lines[num_info_lines++], sizeof(info_lines[0]),
-                 "Driver: not installed");
-    snprintf(info_lines[num_info_lines++], sizeof(info_lines[0]),
-             "Printer: %s", printer_make_model[0] ? printer_make_model : "(unknown model)");
-    snprintf(info_lines[num_info_lines++], sizeof(info_lines[0]),
-             "Host: %s%s", ip_buffer, driver_path_buffer);
-    snprintf(info_lines[num_info_lines++], sizeof(info_lines[0]),
-             "Format: %s   DPI: %d", driver_engine_buffer, driver_resolution);
-    snprintf(info_lines[num_info_lines++], sizeof(info_lines[0]),
-             "Media: %s   Source: %s",
-             driver_media_buffer[0] ? driver_media_buffer : "auto",
-             driver_source_buffer[0] ? driver_source_buffer : "auto");
-    snprintf(info_lines[num_info_lines++], sizeof(info_lines[0]),
-             "Colour: %s   Quality: %s",
-             driver_color_buffer[0] ? driver_color_buffer : "auto",
-             driver_quality_buffer[0] ? driver_quality_buffer : "auto");
-    snprintf(info_lines[num_info_lines++], sizeof(info_lines[0]),
-             "Sides: %s   Scaling: %s",
-             driver_sides_buffer[0] ? driver_sides_buffer : "one-sided",
-             driver_scaling_buffer[0] ? driver_scaling_buffer : "auto");
-    snprintf(info_lines[num_info_lines++], sizeof(info_lines[0]),
-             "Debug: %s", driver_debug ? "on" : "off");
-
-    test_print_job.colormap = GetColorMap(MP_TESTPAGE_COLORS);
-    if (!test_print_job.colormap) {
-        printf("Test Print: could not allocate colour map\n");
-        return FALSE;
-    }
-    SetRGB4CM(test_print_job.colormap, 0, 15, 15, 15); /* white - paper/background */
-    SetRGB4CM(test_print_job.colormap, 1, 0, 0, 0);    /* black - ink/text/border */
-    SetRGB4CM(test_print_job.colormap, 2, 15, 0, 0);   /* red */
-    SetRGB4CM(test_print_job.colormap, 3, 0, 15, 0);   /* green */
-    SetRGB4CM(test_print_job.colormap, 4, 0, 0, 15);   /* blue */
-    SetRGB4CM(test_print_job.colormap, 5, 0, 15, 15);  /* cyan */
-    SetRGB4CM(test_print_job.colormap, 6, 15, 0, 15);  /* magenta */
-    SetRGB4CM(test_print_job.colormap, 7, 15, 15, 0);  /* yellow */
-
-    /* AllocBitMap()/FreeBitMap() were added in graphics.library V39.
-     * On V37 build the same ordinary planar bitmap from the original
-     * InitBitMap()/AllocRaster() API. Keep AllocBitMap on V39+ so newer
-     * systems retain their normal graphics.library allocation path. */
-    test_print_job.bitmap_manual = FALSE;
-    if (GfxBase->LibNode.lib_Version >= 39) {
-        test_print_job.bitmap = AllocBitMap(MP_TESTPAGE_WIDTH,
-                                            MP_TESTPAGE_HEIGHT,
-                                            MP_TESTPAGE_DEPTH,
-                                            BMF_CLEAR, NULL);
-    } else {
-        int plane;
-
-        memset(&test_print_job.bitmap_storage, 0,
-               sizeof(test_print_job.bitmap_storage));
-        InitBitMap(&test_print_job.bitmap_storage, MP_TESTPAGE_DEPTH,
-                   MP_TESTPAGE_WIDTH, MP_TESTPAGE_HEIGHT);
-        test_print_job.bitmap = &test_print_job.bitmap_storage;
-        test_print_job.bitmap_manual = TRUE;
-
-        for (plane = 0; plane < MP_TESTPAGE_DEPTH; ++plane) {
-            PLANEPTR raster = AllocRaster(MP_TESTPAGE_WIDTH,
-                                          MP_TESTPAGE_HEIGHT);
-            if (!raster)
-                break;
-            memset(raster, 0, RASSIZE(MP_TESTPAGE_WIDTH,
-                                     MP_TESTPAGE_HEIGHT));
-            test_print_job.bitmap_storage.Planes[plane] = raster;
-        }
-        if (plane != MP_TESTPAGE_DEPTH) {
-            printf("Test Print: could not allocate V37 bitmap plane %d\n",
-                   plane);
-            mp_test_print_release(win);
-            return FALSE;
-        }
-        printf("Test Print: using V37 planar bitmap allocation\n");
-    }
-    if (!test_print_job.bitmap) {
-        printf("Test Print: could not allocate test bitmap\n");
-        mp_test_print_release(win);
-        return FALSE;
-    }
-
-    InitRastPort(&test_print_job.rastport);
-    test_print_job.rastport.BitMap = test_print_job.bitmap;
-    if (screen->RastPort.Font) SetFont(&test_print_job.rastport, screen->RastPort.Font);
-
-    /* Page border. */
-    SetAPen(&test_print_job.rastport, 1);
-    RectFill(&test_print_job.rastport, 4, 4, MP_TESTPAGE_WIDTH - 5, 5);
-    RectFill(&test_print_job.rastport, 4, MP_TESTPAGE_HEIGHT - 6, MP_TESTPAGE_WIDTH - 5, MP_TESTPAGE_HEIGHT - 5);
-    RectFill(&test_print_job.rastport, 4, 4, 5, MP_TESTPAGE_HEIGHT - 5);
-    RectFill(&test_print_job.rastport, MP_TESTPAGE_WIDTH - 6, 4, MP_TESTPAGE_WIDTH - 5, MP_TESTPAGE_HEIGHT - 5);
-
-    /* Header - a faux-bold double-strike stands in for a real logo bitmap. */
-    Move(&test_print_job.rastport, left, 24);
-    Text(&test_print_job.rastport, (STRPTR)title, strlen(title));
-    Move(&test_print_job.rastport, left + 1, 24);
-    Text(&test_print_job.rastport, (STRPTR)title, strlen(title));
-    Move(&test_print_job.rastport, left, 40);
-    Text(&test_print_job.rastport, (STRPTR)tagline, strlen(tagline));
-    RectFill(&test_print_job.rastport, left, 52, right, 53);
-
-    Move(&test_print_job.rastport, left, 70);
-    Text(&test_print_job.rastport, (STRPTR)colour_label, strlen(colour_label));
-
-    swatch_area = right - left + 1;
-    swatch_w = swatch_area / MP_TESTPAGE_COLORS;
-    for (i = 0; i < MP_TESTPAGE_COLORS; i++) {
-        LONG x0 = left + i * swatch_w;
-        LONG x1 = (i == MP_TESTPAGE_COLORS - 1) ? right : (x0 + swatch_w - 3);
-        if (x1 < x0) x1 = x0;
-
-        /* A 1px black frame drawn slightly larger than the fill keeps the
-         * white swatch visible against the equally white page background. */
-        SetAPen(&test_print_job.rastport, 1);
-        RectFill(&test_print_job.rastport, x0 - 1, 79, x1 + 1, 171);
-        SetAPen(&test_print_job.rastport, (UBYTE)i);
-        RectFill(&test_print_job.rastport, x0, 80, x1, 170);
-
-        SetAPen(&test_print_job.rastport, 1);
-        tw = TextLength(&test_print_job.rastport, (STRPTR)swatch_names[i], strlen(swatch_names[i]));
-        Move(&test_print_job.rastport, x0 + ((x1 - x0 + 1 - tw) / 2), 182);
-        Text(&test_print_job.rastport, (STRPTR)swatch_names[i], strlen(swatch_names[i]));
-    }
-
-    SetAPen(&test_print_job.rastport, 1);
-    RectFill(&test_print_job.rastport, left, 196, right, 197);
-
-    Move(&test_print_job.rastport, left, 214);
-    Text(&test_print_job.rastport, (STRPTR)settings_label, strlen(settings_label));
-    for (i = 0; i < num_info_lines; i++) {
-        Move(&test_print_job.rastport, left, 232 + i * 20);
-        Text(&test_print_job.rastport, (STRPTR)info_lines[i], strlen(info_lines[i]));
-    }
-
-    RectFill(&test_print_job.rastport, left, 404, right, 405);
-    Move(&test_print_job.rastport, left, 420);
-    Text(&test_print_job.rastport, (STRPTR)footer1, strlen(footer1));
-    Move(&test_print_job.rastport, left, 434);
-    Text(&test_print_job.rastport, (STRPTR)footer2, strlen(footer2));
-
-    test_print_job.port = CreateMsgPort();
-    if (!test_print_job.port) {
-        printf("Test Print: CreateMsgPort failed\n");
-        mp_test_print_release(win);
-        return FALSE;
-    }
-
-    test_print_job.request = (struct IODRPReq *)CreateIORequest(
-        test_print_job.port, sizeof(struct IODRPReq));
-    if (!test_print_job.request) {
-        printf("Test Print: CreateIORequest failed\n");
-        mp_test_print_release(win);
-        return FALSE;
-    }
-
-    if (OpenDevice((CONST_STRPTR)"printer.device", 0,
-                   (struct IORequest *)test_print_job.request, 0) != 0) {
-        printf("Test Print: could not open printer.device\n");
-        mp_test_print_release(win);
-        return FALSE;
-    }
-    test_print_job.device_open = TRUE;
-
-    mode_id = GetVPModeID(&screen->ViewPort);
-    if (mode_id == INVALID_ID) mode_id = 0;
-
-    test_print_job.request->io_Command = PRD_DUMPRPORT;
-    test_print_job.request->io_RastPort = &test_print_job.rastport;
-    test_print_job.request->io_ColorMap = test_print_job.colormap;
-    test_print_job.request->io_Modes = mode_id;
-    test_print_job.request->io_SrcX = 0;
-    test_print_job.request->io_SrcY = 0;
-    test_print_job.request->io_SrcWidth = MP_TESTPAGE_WIDTH;
-    test_print_job.request->io_SrcHeight = MP_TESTPAGE_HEIGHT;
-
-    is_postscript = strcmp(driver_engine_buffer, "postscript") == 0;
-    if (is_postscript) {
-        /* Give printer.device an exact portrait size and do not ask it to
-         * centre the dump - see the MP_TEST_PS_WIDTH_MILS comment above. */
-        test_print_job.request->io_DestCols = MP_TEST_PS_WIDTH_MILS;
-        test_print_job.request->io_DestRows = MP_TEST_PS_HEIGHT_MILS;
-        test_print_job.request->io_Special =
-            SPECIAL_MILCOLS | SPECIAL_MILROWS;
-    } else {
-        /* JPEG, PWG Raster, PDF and Apple Raster (URF) all reach this
-         * branch identically: same source bitmap, same source dimensions,
-         * same configured-media-derived destination, same SPECIAL_ASPECT.
-         * printer.device does not derive the destination from the
-         * configured media when DestCols/DestRows are left at 0 - a real
-         * test print showed ~3113x3015px, unrelated to iso_a4_210x297mm -
-         * so compute it explicitly instead. */
-        ULONG dpi = (driver_resolution > 0) ? (ULONG)driver_resolution : 300UL;
-        if (!driver_media_buffer[0] ||
-            !mp_media_dimensions_100mm(driver_media_buffer,
-                                       &media_w_100mm, &media_h_100mm)) {
-            media_w_100mm = 21000UL; /* A4 210mm fallback */
-            media_h_100mm = 29700UL; /* A4 297mm fallback */
-        }
-        test_print_job.request->io_DestCols =
-            (LONG)((media_w_100mm * dpi + 1270UL) / 2540UL);
-        test_print_job.request->io_DestRows =
-            (LONG)((media_h_100mm * dpi + 1270UL) / 2540UL);
-        /* This bitmap already represents the whole page. SPECIAL_CENTER
-         * centres it against printer.device's legacy maximum width rather
-         * than the requested paper: the OS 2.04 capture at 300 DPI had
-         * MaxXDots=4096, scaledWidth=2478 and pi_xpos=(4096-2478)/2=809,
-         * producing a 3287x3508 raster instead of the A4-sized image.
-         * With Media=auto the driver's known-media clamp cannot remove
-         * that padding. Leave the full-page image left-aligned instead;
-         * retain aspect handling, explicit dimensions and the user's
-         * saved media choice. Application-driven centring is unchanged. */
-        test_print_job.request->io_Special = SPECIAL_ASPECT;
-    }
-
-    printf("Test Print: sending page through printer.device (dest %ld x %ld)...\n",
-           (long)test_print_job.request->io_DestCols,
-           (long)test_print_job.request->io_DestRows);
-
-    test_print_job.active = TRUE;
-    mp_set_test_print_enabled(win, FALSE);
-    printf("Test Print started; MintPRINT remains responsive\n");
-    SendIO((struct IORequest *)test_print_job.request);
-    return TRUE;
-}
-
-static void apply_driver_config_to_gadgets(struct Window *win) {
-    struct Gadget *g;
-
-    if (!win) return;
-
-    g = find_gadget_by_id(GAD_IP_STRING);
-    if (g)
-        GT_SetGadgetAttrs(g, win, NULL,
-                          GTST_String, (ULONG)ip_buffer,
-                          TAG_DONE);
-
-    g = find_gadget_by_id(GAD_IPP_PATH);
-    if (g)
-        GT_SetGadgetAttrs(g, win, NULL,
-                          GTST_String, (ULONG)driver_path_buffer,
-                          TAG_DONE);
-
-    g = find_gadget_by_id(GAD_DEBUG);
-    if (g)
-        GT_SetGadgetAttrs(g, win, NULL,
-                          GTCY_Active, driver_debug ? 1 : 0,
-                          TAG_DONE);
-
-    g = find_gadget_by_id(GAD_ENGINE);
-    if (g)
-        GT_SetGadgetAttrs(g, win, NULL,
-                          GTCY_Active, mp_engine_active_index(),
-                          TAG_DONE);
-
-    g = find_gadget_by_id(GAD_RESOLUTION);
-    if (g)
-        GT_SetGadgetAttrs(g, win, NULL,
-                          GTCY_Active, (ULONG)mp_dpi_active_index(driver_resolution),
-                          TAG_DONE);
-
-    g = find_gadget_by_id(GAD_SIDES);
-    if (g)
-        GT_SetGadgetAttrs(g, win, NULL,
-                          GTCY_Active, mp_sides_active_index(),
-                          TAG_DONE);
-
-    g = find_gadget_by_id(GAD_SPOOLER);
-    if (g)
-        GT_SetGadgetAttrs(g, win, NULL,
-                          GTCY_Active, mp_spool_active_index(),
-                          TAG_DONE);
-
-    mp_update_spool_keep_gadget(win);
-
-    mp_update_model_display(win);
-
-    GT_RefreshWindow(win, NULL);
-}
-
-// Add after successful query to rebuild media dropdown (Updated to show media (tray))
-void update_media_dropdown(struct Window *win) {
-    int i;
-    int count = num_media_tray_mappings;
-
-    printf("Updating media dropdown, num_mappings=%d\n", num_media_tray_mappings);
-
-    if (count <= 0) {
-        count = 1;
-        mp_media_label_ptrs[0] = mp_media_label_storage[0];
-        strcpy(mp_media_label_storage[0], "No Media Available");
-    } else {
-        if (count > MAX_VALUES) count = MAX_VALUES;
-        for (i = 0; i < count; i++) {
-            const char *media = media_tray_map[i].media[0]
-                              ? media_tray_map[i].media : "Unknown";
-            const char *tray = media_tray_map[i].trayName[0]
-                             ? media_tray_map[i].trayName : "Unknown";
-            char media_pretty[MAX_ATTR_LEN];
-            char tray_pretty[MAX_ATTR_LEN];
-
-            mp_pretty_media_size(media, media_pretty, sizeof(media_pretty));
-            mp_pretty_tray_name(tray, tray_pretty, sizeof(tray_pretty));
-
-            mp_media_label_ptrs[i] = mp_media_label_storage[i];
-            snprintf(mp_media_label_storage[i],
-                     sizeof(mp_media_label_storage[i]),
-                     "%s (%s)", media_pretty, tray_pretty);
-            printf("Dropdown item %d: %s\n",
-                   i, mp_media_label_storage[i]);
-        }
-    }
-
-    mp_media_label_ptrs[count] = NULL;
-    media_dropdown_items = mp_media_label_ptrs;
-
-    if (media_dropdown && win) {
-        GT_SetGadgetAttrs(media_dropdown, win, NULL,
-                          GTCY_Labels, (ULONG)media_dropdown_items,
-                          GTCY_Active, 0,
-                          GA_Disabled, num_media_tray_mappings > 0 ? FALSE : TRUE,
-                          TAG_DONE);
-        RefreshGList(media_dropdown, win, NULL, 1);
-        GT_RefreshWindow(win, NULL);
-    }
-}
-
-void update_scaling_dropdown(struct Window *win) {
-    struct Gadget *g;
-    int i;
-    int count = num_supported_scaling;
-
-    if (count <= 0) {
-        count = 1;
-        mp_scaling_label_ptrs[0] = mp_scaling_label_storage[0];
-        strncpy(mp_scaling_label_storage[0], initial_scaling_value,
-                sizeof(mp_scaling_label_storage[0]) - 1);
-        mp_scaling_label_storage[0][sizeof(mp_scaling_label_storage[0]) - 1] = '\0';
-    } else {
-        if (count > MAX_VALUES) count = MAX_VALUES;
-        for (i = 0; i < count; i++) {
-            mp_scaling_label_ptrs[i] = mp_scaling_label_storage[i];
-            strncpy(mp_scaling_label_storage[i], supported_scaling[i],
-                    sizeof(mp_scaling_label_storage[i]) - 1);
-            mp_scaling_label_storage[i][sizeof(mp_scaling_label_storage[i]) - 1] = '\0';
-        }
-    }
-    mp_scaling_label_ptrs[count] = NULL;
-    scaling_mode_labels = mp_scaling_label_ptrs;
-
-    /* Prefer "auto" when the printer offers it, rather than whichever
-     * value the printer happened to list first. Confirmed on real
-     * hardware: "auto-fit" got a job rejected outright as malformed on
-     * one printer and mis-paginated a single page across multiple
-     * physical sheets on another, while "auto" printed correctly both
-     * times - "auto" is the safer default across printers generally,
-     * not just a preference for this one. */
-    {
-        int preferred = 0;
-        for (i = 0; i < count; i++) {
-            if (strcmp(mp_scaling_label_storage[i], "auto") == 0) {
-                preferred = i;
-                break;
-            }
-        }
-
-        g = find_gadget_by_id(GAD_SCALING_MODE);
-        if (g && win) {
-            GT_SetGadgetAttrs(g, win, NULL,
-                              GTCY_Labels, (ULONG)scaling_mode_labels,
-                              GTCY_Active, (ULONG)preferred,
-                              GA_Disabled, num_supported_scaling > 0 ? FALSE : TRUE,
-                              TAG_DONE);
-            RefreshGList(g, win, NULL, 1);
-            GT_RefreshWindow(win, NULL);
-        }
-    }
-}
-
-void update_print_mode_dropdown(struct Window *win) {
-    struct Gadget *g;
-    int i;
-    int count = num_supported_print_modes;
-
-    if (count <= 0) {
-        count = 1;
-        mp_print_mode_label_ptrs[0] = mp_print_mode_label_storage[0];
-        strncpy(mp_print_mode_label_storage[0], initial_print_mode_value,
-                sizeof(mp_print_mode_label_storage[0]) - 1);
-        mp_print_mode_label_storage[0][sizeof(mp_print_mode_label_storage[0]) - 1] = '\0';
-    } else {
-        if (count > MAX_VALUES) count = MAX_VALUES;
-        for (i = 0; i < count; i++) {
-            mp_print_mode_label_ptrs[i] = mp_print_mode_label_storage[i];
-            strncpy(mp_print_mode_label_storage[i], supported_print_modes[i],
-                    sizeof(mp_print_mode_label_storage[i]) - 1);
-            mp_print_mode_label_storage[i][sizeof(mp_print_mode_label_storage[i]) - 1] = '\0';
-        }
-    }
-    mp_print_mode_label_ptrs[count] = NULL;
-    print_mode_labels = mp_print_mode_label_ptrs;
-
-    g = find_gadget_by_id(GAD_PRINT_MODE);
-    if (g && win) {
-        GT_SetGadgetAttrs(g, win, NULL,
-                          GTCY_Labels, (ULONG)print_mode_labels,
-                          GTCY_Active, 0,
-                          GA_Disabled, num_supported_print_modes > 0 ? FALSE : TRUE,
-                          TAG_DONE);
-        RefreshGList(g, win, NULL, 1);
-        GT_RefreshWindow(win, NULL);
-    }
-}
-
-void update_dpi_dropdown(struct Window *win) {
-    struct Gadget *g;
-    int i;
-    int count;
-    BOOL has_compat = FALSE;
-
-    mp_dpi_build_options(supported_dpi, num_supported_dpi,
-                         strcmp(driver_engine_buffer, "pwg-raster") == 0,
-                         driver_resolution,
-                         driver_resolution_explicit ? 1 : 0,
-                         &mp_dpi_options);
-    count = mp_dpi_options.count;
-    driver_resolution = mp_dpi_options.selected;
-
-    for (i = 0; i < count; ++i) {
-        mp_dpi_label_ptrs[i] = mp_dpi_label_storage[i];
-        if (mp_dpi_options.compatibility[i]) {
-            snprintf(mp_dpi_label_storage[i],
-                     sizeof(mp_dpi_label_storage[i]),
-                     "%d* dpi", mp_dpi_options.values[i]);
-            has_compat = TRUE;
-        } else {
-            snprintf(mp_dpi_label_storage[i],
-                     sizeof(mp_dpi_label_storage[i]),
-                     "%d dpi", mp_dpi_options.values[i]);
-        }
-    }
-
-    mp_dpi_label_ptrs[count] = NULL;
-    resolution_labels = mp_dpi_label_ptrs;
-
-    if (has_compat)
-        printf("DPI: 300* dpi = compatibility (not printer-reported)\n");
-
-    g = find_gadget_by_id(GAD_RESOLUTION);
-    if (g && win) {
-        GT_SetGadgetAttrs(g, win, NULL,
-                          GTCY_Labels, (ULONG)resolution_labels,
-                          GTCY_Active, (ULONG)mp_dpi_options.active,
-                          GA_Disabled, num_supported_dpi > 0 ? FALSE : TRUE,
-                          TAG_DONE);
-        RefreshGList(g, win, NULL, 1);
-        GT_RefreshWindow(win, NULL);
-    }
-}
-
-void update_quality_dropdown(struct Window *win) {
-    struct Gadget *g;
-    int i;
-    int count = num_supported_quality;
-
-    if (count <= 0) {
-        count = 1;
-        mp_quality_label_ptrs[0] = mp_quality_label_storage[0];
-        strncpy(mp_quality_label_storage[0], initial_quality_value,
-                sizeof(mp_quality_label_storage[0]) - 1);
-        mp_quality_label_storage[0][sizeof(mp_quality_label_storage[0]) - 1] = '\0';
-    } else {
-        if (count > MAX_VALUES) count = MAX_VALUES;
-        for (i = 0; i < count; i++) {
-            mp_quality_label_ptrs[i] = mp_quality_label_storage[i];
-            strncpy(mp_quality_label_storage[i], supported_quality[i],
-                    sizeof(mp_quality_label_storage[i]) - 1);
-            mp_quality_label_storage[i][sizeof(mp_quality_label_storage[i]) - 1] = '\0';
-        }
-    }
-    mp_quality_label_ptrs[count] = NULL;
-    quality_mode_labels = mp_quality_label_ptrs;
-
-    g = find_gadget_by_id(GAD_QUALITY_MODE);
-    if (g && win) {
-        GT_SetGadgetAttrs(g, win, NULL,
-                          GTCY_Labels, (ULONG)quality_mode_labels,
-                          GTCY_Active, 0,
-                          GA_Disabled, num_supported_quality > 0 ? FALSE : TRUE,
-                          TAG_DONE);
-        RefreshGList(g, win, NULL, 1);
-        GT_RefreshWindow(win, NULL);
-    }
-}
-
-static void update_sides_dropdown(struct Window *win) {
-    struct Gadget *g;
-    BOOL transport_ok = mp_duplex_transport_supported();
-    int count = 0;
-
-    mp_sides_label_ptrs[count] = mp_sides_label_storage[count];
-    strcpy(mp_sides_label_storage[count], "One-sided");
-    strcpy(mp_sides_value_storage[count], "one-sided");
-    ++count;
-
-    if (transport_ok && mp_supported_side("two-sided-long-edge")) {
-        mp_sides_label_ptrs[count] = mp_sides_label_storage[count];
-        strcpy(mp_sides_label_storage[count], "Long edge");
-        strcpy(mp_sides_value_storage[count], "two-sided-long-edge");
-        ++count;
-    }
-    if (transport_ok && mp_supported_side("two-sided-short-edge")) {
-        mp_sides_label_ptrs[count] = mp_sides_label_storage[count];
-        strcpy(mp_sides_label_storage[count], "Short edge");
-        strcpy(mp_sides_value_storage[count], "two-sided-short-edge");
-        ++count;
-    }
-
-    mp_sides_label_ptrs[count] = NULL;
-    mp_sides_option_count = count;
-
-    if (count <= 1) {
-        if (driver_sides_buffer[0] == 't')
-            printf("Duplex is unavailable for this printer; using one-sided.\n");
-        driver_sides_buffer[0] = '\0';
-    } else if (mp_sides_active_index() == 0 &&
-               strcmp(driver_sides_buffer, "one-sided") != 0) {
-        strcpy(driver_sides_buffer, "one-sided");
-    }
-
-    g = find_gadget_by_id(GAD_SIDES);
-    if (g && win) {
-        GT_SetGadgetAttrs(g, win, NULL,
-                          GTCY_Labels, (ULONG)mp_sides_label_ptrs,
-                          GTCY_Active, mp_sides_active_index(),
-                          GA_Disabled, count > 1 ? FALSE : TRUE,
-                          TAG_DONE);
-        RefreshGList(g, win, NULL, 1);
-        GT_RefreshWindow(win, NULL);
-    }
-
-    if (!transport_ok &&
-        (mp_supported_side("two-sided-long-edge") ||
-         mp_supported_side("two-sided-short-edge"))) {
-        printf("Duplex requires the PWG Raster or Apple Raster engine.\n");
-    }
-}
-
-static BOOL mp_printer_advertises_format(const char *mime) {
-    int i;
-
-    if (!mime) return FALSE;
-    for (i = 0; i < num_supported_formats; ++i) {
-        if (strcasecmp(supported_formats[i], mime) == 0)
-            return TRUE;
-    }
-    return FALSE;
-}
-
-/* Some printers, including a Samsung C480W seen in the field, advertise
- * image/jpeg and accept the IPP job while silently discarding its contents.
- * PWG 5100.13's JPEG size/dimension attributes are not mandatory proof of a
- * working decoder, so their absence is only a warning and JPEG stays
- * selectable.  jpeg_constraints_queried distinguishes a fresh negative
- * answer from an old cache created before MintPRINT requested these fields. */
-static void mp_warn_if_jpeg_nominal(void) {
-    if (!jpeg_constraints_queried ||
-        !mp_printer_advertises_format("image/jpeg") ||
-        jpeg_k_octets_reported || jpeg_x_dimension_reported ||
-        jpeg_y_dimension_reported)
-        return;
-
-    printf("Warning: JPEG is advertised without JPEG limits.\n");
-    if (mp_printer_advertises_format("application/postscript"))
-        printf("JPEG may be unreliable; prefer PostScript if it fails.\n");
-    else
-        printf("JPEG may be unreliable and can silently discard jobs.\n");
-}
-
-/*
- * Rebuild the Engine Cycle from document-format-supported.
- *
- * With no Query/cache yet, all MintPRINT engines remain visible.
- * After a Query, only engines the printer actually advertised are shown.
- * If it advertised none of MintPRINT's formats, leave all four visible;
- * the existing unsupported-printer requester handles that exceptional case
- * and an empty GadTools Cycle would be undesirable.
- */
-static void mp_rebuild_engine_options_from_query(void) {
-    int i;
-    int out = 0;
-    BOOL use_query = num_supported_formats > 0;
-    BOOL current_found = FALSE;
-
-    for (i = 0; i < MP_ENGINE_MAX; ++i) {
-        if (!use_query ||
-            mp_printer_advertises_format(mp_engine_all_mimes[i])) {
-            engine_labels[out] = (STRPTR)mp_engine_all_labels[i];
-            mp_engine_value_map[out] = mp_engine_all_values[i];
-            if (strcmp(driver_engine_buffer, mp_engine_all_values[i]) == 0)
-                current_found = TRUE;
-            ++out;
-        }
-    }
-
-    if (out == 0) {
-        for (i = 0; i < MP_ENGINE_MAX; ++i) {
-            engine_labels[i] = (STRPTR)mp_engine_all_labels[i];
-            mp_engine_value_map[i] = mp_engine_all_values[i];
-        }
-        out = MP_ENGINE_MAX;
-        current_found = TRUE;
-    }
-
-    /* Prefer PWG Raster over JPEG/PDF whenever the printer actually
-     * advertised it and the engine hasn't been explicitly pinned (see
-     * driver_engine_explicit above): PWG Raster is a cheap PackBits-style
-     * pack, while JPEG and PDF (which reuses the JPEG encoder - see
-     * pdf_writer.c) both cost real per-pixel DCT/quantization work on top
-     * of printer.device's DUMPRPORT scale-up. Without this, JPEG being
-     * first in mp_engine_all_values kept it as the default for any printer
-     * that also advertises JPEG (nearly all of them), even when PWG Raster
-     * was available and objectively cheaper (issue #30). Only meaningful
-     * with real capability data (use_query) - nothing to prefer yet from
-     * an unqueried printer's "all three visible" list. */
-    if (use_query && !driver_engine_explicit) {
-        BOOL preferred = FALSE;
-        for (i = 0; i < out; ++i) {
-            if (strcmp(mp_engine_value_map[i], "pwg-raster") == 0) {
-                if (strcmp(driver_engine_buffer, "pwg-raster") != 0) {
-                    strcpy(driver_engine_buffer, "pwg-raster");
-                }
-                current_found = TRUE;
-                preferred = TRUE;
-                break;
-            }
-        }
-        /* No PWG Raster on this printer (the common case for a
-         * URF-only device like the OKI B412 - issue #60): Apple Raster
-         * uses the same cheap PackBits-style row compression PWG Raster
-         * does, so prefer it over JPEG/PDF's per-pixel DCT cost for the
-         * same reason, whenever it's actually advertised. */
-        if (!preferred) {
-            for (i = 0; i < out; ++i) {
-                if (strcmp(mp_engine_value_map[i], "urf") == 0) {
-                    if (strcmp(driver_engine_buffer, "urf") != 0) {
-                        strcpy(driver_engine_buffer, "urf");
-                    }
-                    current_found = TRUE;
-                    break;
-                }
-            }
-        }
-    }
-
-    engine_labels[out] = NULL;
-    mp_engine_count = out;
-
-    if (!current_found && mp_engine_count > 0) {
-        strncpy(driver_engine_buffer, mp_engine_value_map[0],
-                sizeof(driver_engine_buffer) - 1);
-        driver_engine_buffer[sizeof(driver_engine_buffer) - 1] = '\0';
-    }
-}
-
-/* Forward declaration: mp_offer_pwg_raster_switch() calls back into
- * update_engine_dropdown() (defined right after it) to refresh the Engine
- * gadget and dependent dropdowns once it applies a switch. */
-static void update_engine_dropdown(struct Window *win, BOOL live_query);
-
-/* Offers to switch away from an explicitly-pinned (see
- * driver_engine_explicit) non-PWG-Raster engine when PWG Raster is
- * available - the auto-preference in mp_rebuild_engine_options_from_query()
- * deliberately leaves a pinned choice alone, so this is the active nudge
- * for the case that logic can't fix silently: an old saved config, or a
- * stray gadget click, that predates PWG Raster being worth preferring.
- * Only called for a live Query (see call sites) and only once per printer
- * per session (driver_engine_pwg_offer_shown). */
-static void mp_offer_pwg_raster_switch(struct Window *win) {
-    struct EasyStruct es;
-    int i;
-    BOOL pwg_available = FALSE;
-
-    if (!win || driver_engine_pwg_offer_shown) return;
-    if (!driver_engine_explicit) return; /* already auto-preferred if unpinned */
-    /* Only JPEG/PDF - not PostScript, which may have been deliberately
-     * selected as a compatibility workaround (e.g. a printer that accepts
-     * IPP JPEG but silently discards the job - see PostScript issue #15)
-     * rather than left on by accident the way JPEG/PDF usually are. */
-    if (strcmp(driver_engine_buffer, "jpeg") != 0 &&
-        strcmp(driver_engine_buffer, "pdf") != 0) return;
-
-    for (i = 0; i < mp_engine_count; ++i) {
-        if (mp_engine_value_map[i] &&
-            strcmp(mp_engine_value_map[i], "pwg-raster") == 0) {
-            pwg_available = TRUE;
-            break;
-        }
-    }
-    if (!pwg_available) return;
-
-    driver_engine_pwg_offer_shown = TRUE;
-
-    es.es_StructSize = sizeof(struct EasyStruct);
-    es.es_Flags = 0;
-    es.es_Title = (UBYTE *)"MintPrint Settings";
-    es.es_TextFormat = (UBYTE *)
-        "This printer supports PWG Raster, which usually uses much less\n"
-        "CPU than JPEG or PDF and is recommended for faster printing on\n"
-        "classic Amigas. Switch this printer to PWG Raster now?";
-    es.es_GadgetFormat = (UBYTE *)"Use PWG Raster|Keep current engine";
-    if (!EasyRequest(win, &es, NULL)) return;
-
-    printf("Switched to PWG Raster at the user's request (was %s).\n",
-           mp_test_print_engine_name());
-    strcpy(driver_engine_buffer, "pwg-raster");
-    update_engine_dropdown(win, FALSE);
-    update_sides_dropdown(win);
-    update_dpi_dropdown(win);
-}
-
-static void update_engine_dropdown(struct Window *win, BOOL live_query) {
-    struct Gadget *g;
-    char previous[sizeof(driver_engine_buffer)];
-
-    strncpy(previous, driver_engine_buffer, sizeof(previous) - 1);
-    previous[sizeof(previous) - 1] = '\0';
-
-    mp_rebuild_engine_options_from_query();
-
-    if (!win) return;
-
-    g = find_gadget_by_id(GAD_ENGINE);
-    if (g) {
-        GT_SetGadgetAttrs(g, win, NULL,
-                          GTCY_Labels, (ULONG)engine_labels,
-                          GTCY_Active, mp_engine_active_index(),
-                          TAG_DONE);
-        RefreshGList(g, win, NULL, 1);
-        GT_RefreshWindow(win, NULL);
-    }
-
-    if (strcmp(previous, driver_engine_buffer) != 0) {
-        if (strcmp(driver_engine_buffer, "pwg-raster") == 0)
-            printf("Selected %s: cheaper than JPEG/PDF and this printer advertises it.\n",
-                   engine_labels[mp_engine_active_index()]);
-        else
-            printf("Selected %s because the previous engine was not advertised by this printer.\n",
-                   engine_labels[mp_engine_active_index()]);
-    }
-
-    if (live_query) mp_offer_pwg_raster_switch(win);
-}
-
-void cleanup_dropdown_labels() {
-    /*
-     * All CYCLE_KIND label arrays and strings are static process-lifetime
-     * storage. FreeGadgets() has already detached GadTools from them, and
-     * there is intentionally nothing to FreeVec here.
-     */
-}
-
-/* MintPRINT prefs #8: capability cache.
- *
- * Unit0 contains selected defaults.
- * Unit0.cache contains printer-discovered capabilities.
- * ENV: is preferred for the current session; ENVARC: makes the cache survive
- * reboot. A cache is only used when HOST/PORT/PATH match the current Unit0.
- */
-#define MP_CAP_CACHE_LINE_MAX 384
-static char mp_cap_cache_line[MP_CAP_CACHE_LINE_MAX];
-
-static void mp_cache_copy(char *dst, int dst_size, const char *src) {
-    if (!dst || dst_size <= 0) return;
-    if (!src) src = "";
-    strncpy(dst, src, dst_size - 1);
-    dst[dst_size - 1] = '\0';
-}
-
-static void mp_cache_clear_capabilities(void) {
-    num_supported_formats = 0;
-    num_supported_media = 0;
-    num_supported_output_modes = 0;
-    num_supported_sides = 0;
-    num_supported_scaling = 0;
-    num_supported_orientations = 0;
-    num_supported_media_sources = 0;
-    num_supported_print_modes = 0;
-    num_supported_quality = 0;
-    num_supported_dpi = 0;
-    num_media_tray_mappings = 0;
-    has_media_ready = FALSE;
-    jpeg_constraints_queried = FALSE;
-    jpeg_k_octets_reported = FALSE;
-    jpeg_x_dimension_reported = FALSE;
-    jpeg_y_dimension_reported = FALSE;
-    supports_create_job = FALSE;
-    supports_send_document = FALSE;
-    supports_multiple_document_jobs = FALSE;
-    supports_single_document_handling = FALSE;
-    strcpy(pwg_sheet_back_value, "normal");
-    /* Ink/toner status is live-only (not persisted to the capability cache
-     * file - see mp_cache_write_file() - since levels are a snapshot, not
-     * a capability), so switching units must clear it here rather than
-     * leaving the previous printer's ink levels on screen until the next
-     * Query. */
-    num_marker_names = 0;
-    num_marker_colors = 0;
-    num_marker_types = 0;
-    num_marker_levels = 0;
-    num_marker_low_levels = 0;
-    num_marker_high_levels = 0;
-    printer_state_value = 0;
-    num_printer_state_reasons = 0;
-}
-
-static BOOL mp_cache_write_file(CONST_STRPTR filename,
-                                CONST_STRPTR host,
-                                int port,
-                                CONST_STRPTR path) {
-    BPTR fh;
-    char line[384];
-    int i;
-
-    fh = Open(filename, MODE_NEWFILE);
-    if (!fh) return FALSE;
-
-    FPuts(fh, "# MintPRINT printer capability cache\n");
-    FPuts(fh, "CACHE_VERSION=1\n");
-
-    snprintf(line, sizeof(line), "HOST=%s\n", host);
-    FPuts(fh, line);
-    snprintf(line, sizeof(line), "PORT=%d\n", port);
-    FPuts(fh, line);
-    snprintf(line, sizeof(line), "PATH=%s\n", path);
-    FPuts(fh, line);
-
-    for (i = 0; i < num_supported_formats; ++i) {
-        snprintf(line, sizeof(line), "FORMAT=%s\n", supported_formats[i]);
-        FPuts(fh, line);
-    }
-
-    if (jpeg_constraints_queried)
-        FPuts(fh, "JPEG_CONSTRAINTS_QUERIED=1\n");
-    if (jpeg_k_octets_reported)
-        FPuts(fh, "JPEG_K_OCTETS_REPORTED=1\n");
-    if (jpeg_x_dimension_reported)
-        FPuts(fh, "JPEG_X_DIMENSION_REPORTED=1\n");
-    if (jpeg_y_dimension_reported)
-        FPuts(fh, "JPEG_Y_DIMENSION_REPORTED=1\n");
-
-    for (i = 0; i < num_supported_media; ++i) {
-        snprintf(line, sizeof(line), "MEDIA_SUPPORTED=%s\n", supported_media[i]);
-        FPuts(fh, line);
-    }
-
-    for (i = 0; i < num_supported_media_sources; ++i) {
-        snprintf(line, sizeof(line), "SOURCE=%s\n", supported_media_sources[i]);
-        FPuts(fh, line);
-    }
-
-    for (i = 0; i < num_media_tray_mappings; ++i) {
-        snprintf(line, sizeof(line), "MEDIA=%s|%s|%s|%s\n",
-                 media_tray_map[i].media,
-                 media_tray_map[i].source,
-                 media_tray_map[i].trayName,
-                 media_tray_map[i].medianame);
-        FPuts(fh, line);
-    }
-
-    for (i = 0; i < num_supported_output_modes; ++i) {
-        snprintf(line, sizeof(line), "OUTPUTMODE=%s\n", supported_output_modes[i]);
-        FPuts(fh, line);
-    }
-
-    for (i = 0; i < num_supported_sides; ++i) {
-        snprintf(line, sizeof(line), "SIDE=%s\n", supported_sides[i]);
-        FPuts(fh, line);
-    }
-
-    if (supports_create_job) FPuts(fh, "CREATE_JOB=1\n");
-    if (supports_send_document) FPuts(fh, "SEND_DOCUMENT=1\n");
-    if (supports_multiple_document_jobs)
-        FPuts(fh, "MULTIPLE_DOCUMENT_JOBS=1\n");
-    if (supports_single_document_handling)
-        FPuts(fh, "SINGLE_DOCUMENT_HANDLING=1\n");
-    snprintf(line, sizeof(line), "PWG_SHEET_BACK=%s\n", pwg_sheet_back_value);
-    FPuts(fh, line);
-
-    for (i = 0; i < num_supported_scaling; ++i) {
-        snprintf(line, sizeof(line), "SCALING=%s\n", supported_scaling[i]);
-        FPuts(fh, line);
-    }
-
-    for (i = 0; i < num_supported_orientations; ++i) {
-        snprintf(line, sizeof(line), "ORIENTATION=%d\n", supported_orientations[i]);
-        FPuts(fh, line);
-    }
-
-    for (i = 0; i < num_supported_print_modes; ++i) {
-        snprintf(line, sizeof(line), "PRINTMODE=%s\n", supported_print_modes[i]);
-        FPuts(fh, line);
-    }
-
-    for (i = 0; i < num_supported_quality; ++i) {
-        snprintf(line, sizeof(line), "QUALITY=%s\n", supported_quality[i]);
-        FPuts(fh, line);
-    }
-
-    for (i = 0; i < num_supported_dpi; ++i) {
-        snprintf(line, sizeof(line), "DPI=%d\n", supported_dpi[i]);
-        FPuts(fh, line);
-    }
-
-    Close(fh);
-    return TRUE;
-}
-
-static BOOL save_capability_cache(CONST_STRPTR host, int port, CONST_STRPTR path) {
-    BOOL env_ok;
-    BOOL envarc_ok;
-    char env_cache[64];
-    char envarc_cache[64];
-
-    if (!host || !host[0] || port <= 0 || port > 65535 ||
-        !path || path[0] != '/') {
-        return FALSE;
-    }
-
-    if (!ensure_config_dir((CONST_STRPTR)"ENV:MintPRINT"))
-        return FALSE;
-    if (!ensure_config_dir((CONST_STRPTR)"ENVARC:MintPRINT"))
-        return FALSE;
-
-    unit_cache_path(current_unit_index, FALSE, env_cache, sizeof(env_cache));
-    unit_cache_path(current_unit_index, TRUE, envarc_cache, sizeof(envarc_cache));
-
-    env_ok = mp_cache_write_file((CONST_STRPTR)env_cache, host, port, path);
-    envarc_ok = mp_cache_write_file((CONST_STRPTR)envarc_cache, host, port, path);
-
-    return env_ok && envarc_ok;
-}
-
-static BOOL mp_cache_endpoint_matches(CONST_STRPTR filename,
-                                      CONST_STRPTR expected_host,
-                                      int expected_port,
-                                      CONST_STRPTR expected_path) {
-    BPTR fh;
-    char host[64] = "";
-    char path[96] = "";
-    int port = -1;
-
-    fh = Open(filename, MODE_OLDFILE);
-    if (!fh) return FALSE;
-
-    while (FGets(fh, (STRPTR)mp_cap_cache_line, sizeof(mp_cap_cache_line))) {
-        trim_config_line(mp_cap_cache_line);
-
-        if (strncmp(mp_cap_cache_line, "HOST=", 5) == 0) {
-            mp_cache_copy(host, sizeof(host), mp_cap_cache_line + 5);
-        } else if (strncmp(mp_cap_cache_line, "PORT=", 5) == 0) {
-            port = atoi(mp_cap_cache_line + 5);
-        } else if (strncmp(mp_cap_cache_line, "PATH=", 5) == 0) {
-            mp_cache_copy(path, sizeof(path), mp_cap_cache_line + 5);
-        }
-    }
-
-    Close(fh);
-
-    return strcmp(host, expected_host) == 0 &&
-           port == expected_port &&
-           strcmp(path, expected_path) == 0;
-}
-
-static void mp_cache_parse_media(char *value) {
-    char *p1;
-    char *p2;
-    char *p3;
-    int i;
-
-    if (num_media_tray_mappings >= MAX_VALUES) return;
-
-    p1 = strchr(value, '|');
-    if (!p1) return;
-    *p1++ = '\0';
-
-    p2 = strchr(p1, '|');
-    if (!p2) return;
-    *p2++ = '\0';
-
-    p3 = strchr(p2, '|');
-    if (!p3) return;
-    *p3++ = '\0';
-
-    i = num_media_tray_mappings;
-    mp_cache_copy(media_tray_map[i].media,
-                  sizeof(media_tray_map[i].media), value);
-    mp_cache_copy(media_tray_map[i].source,
-                  sizeof(media_tray_map[i].source), p1);
-    mp_cache_copy(media_tray_map[i].trayName,
-                  sizeof(media_tray_map[i].trayName), p2);
-    mp_cache_copy(media_tray_map[i].medianame,
-                  sizeof(media_tray_map[i].medianame), p3);
-    num_media_tray_mappings++;
-}
-
-static BOOL mp_cache_load_file(CONST_STRPTR filename) {
-    BPTR fh;
-
-    fh = Open(filename, MODE_OLDFILE);
-    if (!fh) return FALSE;
-
-    mp_cache_clear_capabilities();
-
-    while (FGets(fh, (STRPTR)mp_cap_cache_line, sizeof(mp_cap_cache_line))) {
-        char *value;
-
-        trim_config_line(mp_cap_cache_line);
-        if (!mp_cap_cache_line[0] ||
-            mp_cap_cache_line[0] == '#' ||
-            mp_cap_cache_line[0] == ';') {
-            continue;
-        }
-
-        if (strncmp(mp_cap_cache_line, "FORMAT=", 7) == 0) {
-            store_value(supported_formats, &num_supported_formats,
-                        mp_cap_cache_line + 7);
-        } else if (strcmp(mp_cap_cache_line, "JPEG_CONSTRAINTS_QUERIED=1") == 0) {
-            jpeg_constraints_queried = TRUE;
-        } else if (strcmp(mp_cap_cache_line, "JPEG_K_OCTETS_REPORTED=1") == 0) {
-            jpeg_k_octets_reported = TRUE;
-        } else if (strcmp(mp_cap_cache_line, "JPEG_X_DIMENSION_REPORTED=1") == 0) {
-            jpeg_x_dimension_reported = TRUE;
-        } else if (strcmp(mp_cap_cache_line, "JPEG_Y_DIMENSION_REPORTED=1") == 0) {
-            jpeg_y_dimension_reported = TRUE;
-        } else if (strncmp(mp_cap_cache_line, "MEDIA_SUPPORTED=", 16) == 0) {
-            store_value(supported_media, &num_supported_media,
-                        mp_cap_cache_line + 16);
-        } else if (strncmp(mp_cap_cache_line, "SOURCE=", 7) == 0) {
-            store_value(supported_media_sources, &num_supported_media_sources,
-                        mp_cap_cache_line + 7);
-        } else if (strncmp(mp_cap_cache_line, "MEDIA=", 6) == 0) {
-            value = mp_cap_cache_line + 6;
-            mp_cache_parse_media(value);
-        } else if (strncmp(mp_cap_cache_line, "OUTPUTMODE=", 11) == 0) {
-            store_value(supported_output_modes, &num_supported_output_modes,
-                        mp_cap_cache_line + 11);
-        } else if (strncmp(mp_cap_cache_line, "SIDE=", 5) == 0) {
-            store_value(supported_sides, &num_supported_sides,
-                        mp_cap_cache_line + 5);
-        } else if (strcmp(mp_cap_cache_line, "CREATE_JOB=1") == 0) {
-            supports_create_job = TRUE;
-        } else if (strcmp(mp_cap_cache_line, "SEND_DOCUMENT=1") == 0) {
-            supports_send_document = TRUE;
-        } else if (strcmp(mp_cap_cache_line,
-                          "MULTIPLE_DOCUMENT_JOBS=1") == 0) {
-            supports_multiple_document_jobs = TRUE;
-        } else if (strcmp(mp_cap_cache_line,
-                          "SINGLE_DOCUMENT_HANDLING=1") == 0) {
-            supports_single_document_handling = TRUE;
-        } else if (strncmp(mp_cap_cache_line, "PWG_SHEET_BACK=", 15) == 0) {
-            const char *sheet_back = mp_cap_cache_line + 15;
-            if (strcmp(sheet_back, "normal") == 0 ||
-                strcmp(sheet_back, "rotated") == 0 ||
-                strcmp(sheet_back, "flipped") == 0 ||
-                strcmp(sheet_back, "manual-tumble") == 0) {
-                mp_cache_copy(pwg_sheet_back_value,
-                              sizeof(pwg_sheet_back_value), sheet_back);
-            }
-        } else if (strncmp(mp_cap_cache_line, "SCALING=", 8) == 0) {
-            store_value(supported_scaling, &num_supported_scaling,
-                        mp_cap_cache_line + 8);
-        } else if (strncmp(mp_cap_cache_line, "ORIENTATION=", 12) == 0) {
-            if (num_supported_orientations < MAX_VALUES)
-                supported_orientations[num_supported_orientations++] =
-                    atoi(mp_cap_cache_line + 12);
-        } else if (strncmp(mp_cap_cache_line, "PRINTMODE=", 10) == 0) {
-            store_value(supported_print_modes, &num_supported_print_modes,
-                        mp_cap_cache_line + 10);
-        } else if (strncmp(mp_cap_cache_line, "QUALITY=", 8) == 0) {
-            if (num_supported_quality < MAX_QUALITIES) {
-                mp_cache_copy(supported_quality[num_supported_quality],
-                              sizeof(supported_quality[num_supported_quality]),
-                              mp_cap_cache_line + 8);
-                num_supported_quality++;
-            }
-        } else if (strncmp(mp_cap_cache_line, "DPI=", 4) == 0) {
-            mp_add_supported_dpi(atoi(mp_cap_cache_line + 4));
-        }
-    }
-
-    Close(fh);
-    has_media_ready = num_media_tray_mappings > 0 ? TRUE : FALSE;
-    return TRUE;
-}
-
-static BOOL load_capability_cache_for_current_endpoint(void) {
-    char host[64];
-    int port = -1;
-    char env_cache[64];
-    char envarc_cache[64];
-
-    if (!parse_ip_and_port(ip_buffer, host, sizeof(host), &port))
-        return FALSE;
-    if (port <= 0) port = 80;
-
-    unit_cache_path(current_unit_index, FALSE, env_cache, sizeof(env_cache));
-    unit_cache_path(current_unit_index, TRUE, envarc_cache, sizeof(envarc_cache));
-
-    if (mp_cache_endpoint_matches((CONST_STRPTR)env_cache, host, port, driver_path_buffer))
-        return mp_cache_load_file((CONST_STRPTR)env_cache);
-
-    if (mp_cache_endpoint_matches((CONST_STRPTR)envarc_cache, host, port, driver_path_buffer))
-        return mp_cache_load_file((CONST_STRPTR)envarc_cache);
-
-    return FALSE;
-}
-
-static void apply_cached_capabilities(struct Window *win) {
-    if (!win) return;
-
-    update_engine_dropdown(win, FALSE);
-    update_media_dropdown(win);
-    update_print_mode_dropdown(win);
-    update_scaling_dropdown(win);
-    update_quality_dropdown(win);
-    update_dpi_dropdown(win);
-    update_sides_dropdown(win);
-
-    /* Put the user's saved Unit0 choices back on top of the available lists. */
-    apply_job_defaults_to_gadgets(win);
-    mp_warn_if_jpeg_nominal();
-}
-
-/* Reloads everything for current_unit_index: saved Unit%d config, its
- * cached capabilities (or "Not Detected" ghosting if there is none yet),
- * and the print-mode radio state. Used both when switching the Unit
- * dropdown and by File > Reload Driver Settings. */
-/* Defined further down, alongside the rest of the ink-status panel's
- * drawing code - forward-declared here since reload_current_unit() (a
- * unit switch clears any previously-queried printer's ink levels via
- * mp_cache_clear_capabilities() above) needs to repaint the now-empty
- * panel before that code appears in the file. */
-static void mp_draw_marker_strips(void);
-static void mp_draw_sides_hint(void);
-static void mp_draw_printer_icon(void);
-static void mp_clear_printer_icon(void);
-static BOOL mp_load_printer_icon_cache(BOOL require_uri_match);
-
-static void reload_current_unit(struct Window *win) {
-    mp_cache_clear_capabilities();
-    mp_clear_printer_icon();
-    /* Show the per-Unit processed artwork immediately. The normal startup
-     * Query will validate its URI and fetch a replacement only if needed. */
-    if (unit_file_exists(current_unit_index))
-        mp_load_printer_icon_cache(FALSE);
-
-    if (load_driver_config())
-        custom_printf("MintPRINT Unit%d loaded\n", current_unit_index);
-    else
-        custom_printf("No Unit%d found; using MintPRINT defaults\n", current_unit_index);
-
-    seed_saved_option_labels();
-    load_print_mode();
-
-    if (!win) return;
-
-    apply_driver_config_to_gadgets(win);
-
-    if (load_capability_cache_for_current_endpoint()) {
-        apply_cached_capabilities(win);
-        custom_printf("Loaded cached printer capabilities\n");
-    } else {
-        apply_saved_option_state(win);
-    }
-
-    apply_job_defaults_to_gadgets(win);
-
-    {
-        struct Gadget *print_mode_gadget = find_gadget_by_id(GAD_PRINT_MODE);
-        if (print_mode_gadget) {
-            GT_SetGadgetAttrs(print_mode_gadget, win, NULL,
-                              GTCY_Active, print_mode,
-                              TAG_DONE);
-            RefreshGList(print_mode_gadget, win, NULL, 1);
-        }
-    }
-
-    GT_RefreshWindow(win, NULL);
-    mp_draw_marker_strips();
-    mp_draw_sides_hint();
-    mp_draw_printer_icon();
-}
-
-
-
-// Redirect printf to buffer
-/* Draws the status box border and whatever lines output_buffer/output_line
- * currently hold. This is the box's ENTIRE on-screen paint, and it is only
- * ever a side effect of custom_printf() being called - the window is
- * WA_SimpleRefresh, so nothing repaints this non-gadget area automatically.
- * That includes IDCMP_REFRESHWINDOW: GT_BeginRefresh/GT_EndRefresh there
- * only repaints GadTools gadgets, never this hand-drawn area, so without
- * this being called from that handler too, anything that forces a refresh
- * (another window opening on top and closing again, dragging this window
- * partly offscreen, etc.) leaves the box LOOKING empty - output_buffer's
- * data is untouched throughout, only the paint was lost. */
-static void redraw_output_box(void) {
-    struct RastPort *rp;
-    int line_height, output_area_top, output_area_bottom, start_line, i;
-
-    if (!window) return;
-
-    rp = window->RPort;
-    if (font) SetFont(rp, font);
-    SetAPen(rp, 1); // Text color
-    SetBPen(rp, 0); // Background color
-    SetDrMd(rp, JAM2);
-
-    // Calculate the output area dimensions
-    line_height = font->tf_YSize + 2;
-    output_area_top = OUTPUT_TOP;
-    output_area_bottom = output_area_top + (MAX_OUTPUT_LINES * line_height) - 1;
-
-    // Draw the border
-    SetAPen(rp, 1); // Border color
-    RectFill(rp, OUTPUT_LEFT - 2, output_area_top - 2, OUTPUT_RIGHT + 2, output_area_top - 1); // Top
-    RectFill(rp, OUTPUT_LEFT - 2, output_area_bottom + 1, OUTPUT_RIGHT + 2, output_area_bottom + 2); // Bottom
-    RectFill(rp, OUTPUT_LEFT - 2, output_area_top - 2, OUTPUT_LEFT - 1, output_area_bottom + 2); // Left
-    RectFill(rp, OUTPUT_RIGHT + 1, output_area_top - 2, OUTPUT_RIGHT + 2, output_area_bottom + 2); // Right
-
-    // Clear the output area
-    SetAPen(rp, 0); // Background color
-    RectFill(rp, OUTPUT_LEFT, output_area_top, OUTPUT_RIGHT, output_area_bottom);
-
-    // Draw the most recent lines (scrolling effect)
-    start_line = (output_line > MAX_OUTPUT_LINES) ? (output_line - MAX_OUTPUT_LINES) : 0;
-    for (i = 0; i < MAX_OUTPUT_LINES && (start_line + i) < output_line; i++) {
-        int y = output_area_top + (i * line_height) + font->tf_Baseline;
-        Move(rp, OUTPUT_LEFT, y);
-        SetAPen(rp, 1); // Text color
-        Text(rp, output_buffer[start_line + i], strlen(output_buffer[start_line + i]));
-    }
-}
-
-void custom_printf(const char *format, ...) {
-    // Special case: clear the output area if the format string is "CLEAR"
-    if (strcmp(format, "CLEAR") == 0) {
-        output_line = 0;
-        redraw_output_box();
-        return;
-    }
-
-    va_list args;
-    va_start(args, format);
-
-    // Dynamically allocate temp buffer
-    char *temp = malloc(256);
-    if (!temp) {
-        va_end(args);
-        return; // Fail silently if allocation fails
-    }
-
-    vsnprintf(temp, 256, format, args);
-    va_end(args);
-
-    /* In Debug mode also append to T:MintPRINT-gui.log, best-effort.
-     * custom_printf() is
-     * this program's ONLY status output (see the file comment above its
-     * forward declaration) - when the on-screen box itself is the thing
-     * that's broken, there is otherwise no way to see what actually
-     * happened, unlike the driver's own T:MintPRINT-driver.log. */
-    if (driver_debug) {
-        BPTR log_fh = Open((CONST_STRPTR)"T:MintPRINT-gui.log", MODE_READWRITE);
-        if (!log_fh) log_fh = Open((CONST_STRPTR)"T:MintPRINT-gui.log", MODE_NEWFILE);
-        if (log_fh) {
-            LONG len = (LONG)strlen(temp);
-            Seek(log_fh, 0, OFFSET_END);
-            if (len) Write(log_fh, (APTR)temp, len);
-            Write(log_fh, (APTR)"\n", 1);
-            Close(log_fh);
-        }
-    }
-
-    // Strip trailing newline
-    size_t len = strlen(temp);
-    if (len > 0 && temp[len - 1] == '\n') {
-        temp[len - 1] = '\0';
-        len--;
-    }
-
-    // Shift buffer if full
-    if (output_line >= MAX_OUTPUT_LINES) {
-        for (int i = 0; i < MAX_OUTPUT_LINES - 1; i++) {
-            strncpy(output_buffer[i], output_buffer[i + 1], MAX_OUTPUT_LINE_LENGTH);
-        }
-        output_line = MAX_OUTPUT_LINES - 1;
-    }
-
-    // Store new line
-    strncpy(output_buffer[output_line], temp, MAX_OUTPUT_LINE_LENGTH - 1);
-    output_buffer[output_line][MAX_OUTPUT_LINE_LENGTH - 1] = '\0';
-    output_line++;
-
-    // Free the temp buffer
-    free(temp);
-
-    redraw_output_box();
-}
-
-/* Ink/toner status strip panel - a plain RastPort drawing in the compact
- * spare area to the right of IPP Path/Engine/Debug and above Media, not
- * GadTools gadgets: GadTools has no gauge/progress
- * widget, and the fill colour needs to come from whatever RGB the printer
- * itself reports (marker-colors), which a fixed screen pen can't do -
- * hence ObtainBestPenA() per strip below rather than one of the four
- * pens (SetAPen 0-3) everything else in this window already uses. */
-#define MP_MARKER_AREA_LEFT     320
-#define MP_MARKER_AREA_TOP       57
-#define MP_MARKER_AREA_BOTTOM   115
-#define MP_MARKER_COLS            2
-#define MP_MARKER_COL_GAP          6
-#define MP_MARKER_ROW_H           14
-#define MP_MARKER_BAR_H            7
-#define MP_MARKER_MAX_STRIPS       6
-
-/* marker-colors (RFC 3805 / PWG5100.13) is either "#RRGGBB" or one of a
- * small set of keyword names - resolved to RGB here, not at parse time in
- * query_printer_attributes(), since what to do with an unrecognised name
- * is a drawing concern (fall back to no fill), not a parsing one. */
-/* One hex digit -> 0-15, or -1 if not a hex digit - used instead of
- * sscanf("%x") below, since the lightweight clib some Amiga toolchains
- * link against doesn't reliably support %x, and there's no cross-compiler
- * in this environment to find that out the hard way. */
-static int mp_hex_nibble(char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
-}
-
-static BOOL mp_marker_rgb(const char *color, UBYTE *r, UBYTE *g, UBYTE *b) {
-    if (!color || !color[0]) return FALSE;
-
-    if (color[0] == '#' && strlen(color) >= 7) {
-        int hi, lo, i;
-        UBYTE comp[3];
-        for (i = 0; i < 3; i++) {
-            hi = mp_hex_nibble(color[1 + i * 2]);
-            lo = mp_hex_nibble(color[2 + i * 2]);
-            if (hi < 0 || lo < 0) return FALSE;
-            comp[i] = (UBYTE)((hi << 4) | lo);
-        }
-        *r = comp[0]; *g = comp[1]; *b = comp[2];
-        return TRUE;
-    }
-
-    if (strcasecmp(color, "cyan") == 0)            { *r = 0;   *g = 255; *b = 255; return TRUE; }
-    if (strcasecmp(color, "light-cyan") == 0)      { *r = 170; *g = 255; *b = 255; return TRUE; }
-    if (strcasecmp(color, "magenta") == 0)         { *r = 255; *g = 0;   *b = 255; return TRUE; }
-    if (strcasecmp(color, "light-magenta") == 0)   { *r = 255; *g = 170; *b = 255; return TRUE; }
-    if (strcasecmp(color, "yellow") == 0)          { *r = 255; *g = 255; *b = 0;   return TRUE; }
-    if (strcasecmp(color, "black") == 0)           { *r = 0;   *g = 0;   *b = 0;   return TRUE; }
-    if (strcasecmp(color, "photo-black") == 0 ||
-        strcasecmp(color, "matte-black") == 0)     { *r = 40;  *g = 40;  *b = 40;  return TRUE; }
-    if (strcasecmp(color, "gray") == 0 ||
-        strcasecmp(color, "grey") == 0)            { *r = 160; *g = 160; *b = 160; return TRUE; }
-    if (strcasecmp(color, "red") == 0)             { *r = 255; *g = 0;   *b = 0;   return TRUE; }
-    if (strcasecmp(color, "green") == 0)           { *r = 0;   *g = 200; *b = 0;   return TRUE; }
-    if (strcasecmp(color, "blue") == 0)            { *r = 0;   *g = 0;   *b = 255; return TRUE; }
-    if (strcasecmp(color, "white") == 0)           { *r = 255; *g = 255; *b = 255; return TRUE; }
-    return FALSE; /* "multi-color", "unknown", "none", or anything else */
-}
-
-/* Bounded by marker-names/marker-colors, not marker-levels: a strip with
- * no level yet (index >= num_marker_levels) still draws as "unknown"
- * rather than being dropped, so a printer that's slow to report levels
- * doesn't make the whole panel disappear. */
-static int mp_marker_count(void) {
-    int n = num_marker_names;
-    if (num_marker_colors < n) n = num_marker_colors;
-    if (n > MP_MARKER_MAX_STRIPS) n = MP_MARKER_MAX_STRIPS;
-    return n;
-}
-
-static void mp_marker_short_name(int index, char out[3]) {
-    const char *name;
-    const char *color;
-
-    out[0] = '\0';
-
-    if (index < 0 || index >= MAX_MARKERS)
-        return;
-
-    name = marker_names[index];
-    color = marker_colors[index];
-
-    /* Keep already-compact printer names such as C/M/Y/K. */
-    if (name && name[0] && strlen(name) <= 2) {
-        out[0] = name[0];
-        out[1] = name[1] ? name[1] : '\0';
-        out[2] = '\0';
-        return;
-    }
-
-    /* Otherwise derive a predictable short label from marker colour. */
-    if (color && color[0]) {
-        if (strcasecmp(color, "cyan") == 0)          { strcpy(out, "C");  return; }
-        if (strcasecmp(color, "magenta") == 0)       { strcpy(out, "M");  return; }
-        if (strcasecmp(color, "yellow") == 0)        { strcpy(out, "Y");  return; }
-        if (strcasecmp(color, "black") == 0)         { strcpy(out, "BK"); return; }
-        if (strcasecmp(color, "light-cyan") == 0)    { strcpy(out, "LC"); return; }
-        if (strcasecmp(color, "light-magenta") == 0) { strcpy(out, "LM"); return; }
-        if (strcasecmp(color, "photo-black") == 0)   { strcpy(out, "PK"); return; }
-        if (strcasecmp(color, "matte-black") == 0)   { strcpy(out, "MK"); return; }
-    }
-
-    /* Last resort: first two characters of the reported marker name. */
-    if (name && name[0]) {
-        out[0] = (char)toupper((unsigned char)name[0]);
-        out[1] = name[1] ? (char)toupper((unsigned char)name[1]) : '\0';
-        out[2] = '\0';
-    }
-}
-
-/* Pens obtained for the ink/toner bars must stay allocated for as long as
- * their colour needs to remain visible, not just for the RectFill() call
- * that used them: a pen number is only ever an index into the screen's
- * shared colour-map, and RectFill() writes that index into the bitplanes
- * rather than an RGB value. Releasing a pen right after drawing lets
- * ANYTHING else - including the very next marker in the same redraw loop
- * - reclaim that register and repaint it, which instantly recolours every
- * pixel already drawn with that same index, not just newly drawn ones.
- * That was the "flashes the right colours, then they all end up on
- * whichever colour was requested last" bug from obtaining and releasing a
- * pen per marker. Pens are now held here across redraws and only released
- * right before the next redraw, or at shutdown via
- * mp_release_marker_pens(). */
-static LONG mp_marker_pens[MP_MARKER_MAX_STRIPS] = {
-    -1, -1, -1, -1, -1, -1
-};
-
-static void mp_release_marker_pens(void) {
-    int i;
-    if (!screen) return;
-    for (i = 0; i < MP_MARKER_MAX_STRIPS; i++) {
-        if (mp_marker_pens[i] >= 0) {
-            ReleasePen(screen->ViewPort.ColorMap, (ULONG)mp_marker_pens[i]);
-            mp_marker_pens[i] = -1;
-        }
-    }
-}
-
-/* Reduces printer-state/printer-state-reasons to one short word/phrase
- * shown to the right of the "Ink/Toner:" header, on the same line - see
- * mp_draw_marker_strips(). That row is only ~12 characters wide after
- * "Ink/Toner:" itself at the window's minimum size, so every label here
- * is deliberately kept at or under that (checked against the longest,
- * "Out of Paper", 12 chars) rather than spelled out in full - there is no
- * spare row to give this its own line without either overlapping the
- * printer icon just below (MP_PRINTER_ICON_TOP) or the Sides/DPI cycle
- * gadgets below that.
- *
- * Matching is substring-based against the handful of reasons someone
- * actually needs to act on, most severe first, rather than enumerating
- * the full PWG reason-keyword registry (RFC 8011 5.4.12) - real printers
- * commonly suffix these with "-error"/"-warning"/"-report" (e.g.
- * "media-jam-error"), which a substring match still catches. An
- * unrecognised reason falls back to the bare printer-state enum (RFC
- * 8011 5.4.11) rather than being shown raw and risking a much longer,
- * unbounded string on this same tight row. Blank before the first
- * Query. */
-static void mp_printer_status_label(char *buf, size_t bufsize) {
-    static const struct { const char *needle; const char *label; } known_reasons[] = {
-        { "jam",                 "Jam"          },
-        { "door-open",           "Door Open"    },
-        { "cover-open",          "Door Open"    },
-        { "interlock-open",      "Door Open"    },
-        { "marker-supply-empty", "Toner Empty"  },
-        { "toner-empty",         "Toner Empty"  },
-        { "media-empty",         "Out of Paper" },
-        { "marker-supply-low",   "Supply Low"   },
-        { "toner-low",           "Supply Low"   },
-    };
-    size_t k;
-    int i;
-
-    if (!buf || !bufsize) return;
-    buf[0] = '\0';
-
-    for (k = 0; k < sizeof(known_reasons) / sizeof(known_reasons[0]); k++) {
-        for (i = 0; i < num_printer_state_reasons; i++) {
-            if (strstr(printer_state_reasons[i], known_reasons[k].needle)) {
-                snprintf(buf, bufsize, "%s", known_reasons[k].label);
-                return;
-            }
-        }
-    }
-
-    switch (printer_state_value) {
-        case 3: snprintf(buf, bufsize, "Ready");    break;
-        case 4: snprintf(buf, bufsize, "Busy");     break;
-        case 5: snprintf(buf, bufsize, "Stopped");  break;
-        default: break; /* not yet queried - leave blank */
-    }
-}
-
-static void mp_draw_marker_strips(void) {
-    struct RastPort *rp;
-    int area_left, area_right, area_top, area_bottom;
-    int grid_top, cell_width, count, i;
-    char status_label[24];
-
-    if (!window || !screen || !font) return;
-
-    /* Release whatever the previous redraw held before drawing new
-     * content - see the comment above mp_marker_pens[] for why these
-     * can't just be released at the end of the loop below. */
-    mp_release_marker_pens();
-
-    rp = window->RPort;
-    SetFont(rp, font);
-    SetDrMd(rp, JAM2);
-
-    area_left = MP_MARKER_AREA_LEFT;
-    area_right = window->Width - 20;
-    area_top = g_topborder + MP_MARKER_AREA_TOP;
-    area_bottom = g_topborder + MP_MARKER_AREA_BOTTOM;
-    if (area_right <= area_left || area_bottom <= area_top) return;
-
-    /* Clear only the compact panel; this rectangle contains no gadgets. */
-    SetAPen(rp, 0);
-    RectFill(rp, area_left, area_top, area_right, area_bottom);
-
-    SetAPen(rp, 1);
-    Move(rp, area_left, area_top + font->tf_Baseline);
-    Text(rp, "Ink/Toner:", 10);
-
-    /* Printer status shares this header row, right-aligned - there is no
-     * spare row below the grid to give it its own line without reaching
-     * into the printer icon just below (MP_PRINTER_ICON_TOP) or the
-     * Sides/DPI cycle gadgets below that. See mp_printer_status_label()
-     * for why every possible label is kept short enough to fit here. */
-    mp_printer_status_label(status_label, sizeof(status_label));
-    if (status_label[0]) {
-        int len = (int)strlen(status_label);
-        SetAPen(rp, 1);
-        Move(rp, area_right - len * 8, area_top + font->tf_Baseline);
-        Text(rp, status_label, len);
-    }
-
-    count = mp_marker_count();
-    if (count <= 0) {
-        Move(rp,
-             area_left,
-             area_top + font->tf_YSize + 3 + font->tf_Baseline);
-        Text(rp, "(Query for levels)", 18);
-        return;
-    }
-
-    grid_top = area_top + font->tf_YSize + 3;
-    cell_width =
-        (area_right - area_left - MP_MARKER_COL_GAP) / MP_MARKER_COLS;
-
-    for (i = 0; i < count; i++) {
-        int col = i % MP_MARKER_COLS;
-        int row = i / MP_MARKER_COLS;
-        int cell_left = area_left +
-            col * (cell_width + MP_MARKER_COL_GAP);
-        int cell_right = cell_left + cell_width - 1;
-        int row_top = grid_top + row * MP_MARKER_ROW_H;
-        int text_y = row_top + font->tf_Baseline;
-        int level = (i < num_marker_levels) ? marker_levels[i] : -1;
-        int display_level;
-        char namebuf[3];
-        char pct[8];
-        int pct_len, pct_x;
-        int bar_left, bar_right, bar_top, bar_bottom;
-        UBYTE r, g, b;
-        BOOL have_rgb;
-        LONG pen;
-
-        if (row_top + MP_MARKER_ROW_H > area_bottom)
-            break;
-
-        mp_marker_short_name(i, namebuf);
-
-        SetAPen(rp, 1);
-        Move(rp, cell_left, text_y);
-        Text(rp, namebuf, strlen(namebuf));
-
-        if (level >= 0) {
-            display_level = level;
-            if (display_level > 100) display_level = 100;
-            snprintf(pct, sizeof(pct), "%d%%", display_level);
-        } else {
-            strcpy(pct, "--");
-        }
-
-        pct_len = strlen(pct);
-        pct_x = cell_right - (pct_len * 8);
-        Move(rp, pct_x, text_y);
-        Text(rp, pct, pct_len);
-
-        /* Thin level bar between the short marker name and percentage. */
-        bar_left = cell_left + 20;
-        bar_right = pct_x - 4;
-        bar_top = row_top + 1;
-        bar_bottom = bar_top + MP_MARKER_BAR_H;
-        if (bar_right <= bar_left)
-            continue;
-
-        SetAPen(rp, 1);
-        RectFill(rp, bar_left, bar_top, bar_right, bar_top);
-        RectFill(rp, bar_left, bar_bottom, bar_right, bar_bottom);
-        RectFill(rp, bar_left, bar_top, bar_left, bar_bottom);
-        RectFill(rp, bar_right, bar_top, bar_right, bar_bottom);
-
-        have_rgb = mp_marker_rgb(marker_colors[i], &r, &g, &b);
-        pen = -1;
-        /* ObtainPen()/ObtainBestPenA()/ReleasePen() are graphics.library v39
-         * (AmigaOS 3.0) additions - this file now opens graphics.library at
-         * v37 (see main()) to try running on AmigaOS 2.04, which has no such
-         * shared-pen-allocation API at all. Skip straight to "no marker
-         * fill" there rather than calling an entry point that doesn't exist
-         * in a v37 graphics.library - mp_marker_pens[i] staying -1 already
-         * means mp_release_marker_pens() never calls ReleasePen() either. */
-        if (have_rgb && GfxBase->LibNode.lib_Version >= 39) {
-            /* This is a shared PUBLIC screen (LockPubScreen(NULL) below),
-             * so on a constrained low-colour Workbench (e.g. 32 colours)
-             * most pens are usually already in use by Workbench or other
-             * apps. ObtainBestPenA() only ever reuses an EXISTING pen's
-             * colour, and with no true cyan/magenta already on screen it
-             * silently snapped several different requested marker colours
-             * onto whichever single existing pen happened to be closest
-             * (observed: cyan and magenta both landing on the same
-             * yellow-ish pen). Try ObtainPen() first - it only succeeds
-             * when it can set a genuinely free pen to this exact RGB - and
-             * fall back to the old best-match behaviour only if the
-             * screen really has no free pens left. Both allocators are
-             * released the same way, via mp_release_marker_pens(). */
-            pen = ObtainPen(screen->ViewPort.ColorMap, -1,
-                             (ULONG)r << 24, (ULONG)g << 24,
-                             (ULONG)b << 24, 0);
-            if (pen < 0) {
-                pen = (LONG)ObtainBestPenA(screen->ViewPort.ColorMap,
-                                          (ULONG)r << 24, (ULONG)g << 24,
-                                          (ULONG)b << 24, NULL);
-            }
-        }
-        /* Stored, not released here - see the comment above
-         * mp_marker_pens[] for why releasing per-marker recolours
-         * already-drawn bars sharing a reclaimed pen index. */
-        mp_marker_pens[i] = pen;
-
-        if (level >= 0) {
-            int inside_width;
-            int fill_width;
-            int fill_right;
-
-            display_level = level;
-            if (display_level > 100) display_level = 100;
-            if (display_level < 0) display_level = 0;
-
-            inside_width = bar_right - bar_left - 1;
-            fill_width = (inside_width * display_level) / 100;
-            fill_right = bar_left + fill_width;
-
-            if (fill_width > 0) {
-                SetAPen(rp, pen >= 0 ? (UBYTE)pen : 1);
-                RectFill(rp,
-                         bar_left + 1, bar_top + 1,
-                         fill_right, bar_bottom - 1);
-            }
-
-            if (fill_right < bar_right - 1) {
-                SetAPen(rp, 0);
-                RectFill(rp,
-                         fill_right + 1, bar_top + 1,
-                         bar_right - 1, bar_bottom - 1);
-            }
-        }
-    }
-}
-
-int load_ilbm_to_rgb(const char *filename, unsigned char **rgb_out, int *width_out, int *height_out) {
-    struct jpeg_data data;
-    memset(&data, 0, sizeof(data));
-    printf("Attempting to load IFF: %s\n", filename);
-
-    if (load_iff_direct(filename, &data) != 0) {
-        printf("load_iff_direct failed\n");
-        return -1;
-    }
-
-    int num_pixels = data.width * data.height;
-    printf("Loaded: %d x %d padded = %d px\n", data.width, data.height, num_pixels);
-
-    *rgb_out = AllocVec(num_pixels * 3, MEMF_ANY);
-    if (!*rgb_out) {
-        printf("AllocVec failed\n");
-        free_jpeg_data(&data);
-        return -1;
-    }
-
-    for (int i = 0; i < num_pixels; i++) {
-        (*rgb_out)[i * 3 + 0] = data.red[i];
-        (*rgb_out)[i * 3 + 1] = data.green[i];
-        (*rgb_out)[i * 3 + 2] = data.blue[i];
-    }
-
-    *width_out = data.width;
-    *height_out = data.height;
-    free_jpeg_data(&data);
-    return 0;
-}
-
-/* ---------------------------------------------------------------------
- * Duplex visual hint.
- *
- * The 32x32 ILBM files live next to the application in PROGDIR:Art/ and
- * are staged there by the release targets in the Makefile. Keeping them
- * external makes them easy to replace without rebuilding MintPrintSettings
- * and reuses the ILBM decoder already linked into this program.
- *
- * This is intentionally hand-drawn into spare space rather than another
- * GadTools gadget: it is purely an explanatory picture for the Sides cycle.
- * ------------------------------------------------------------------ */
-#define MP_SIDES_HINT_LEFT       460
-#define MP_SIDES_HINT_TOP        126
-#define MP_SIDES_HINT_SIZE        32
-#define MP_SIDES_HINT_MAX_PENS    32
-#define MP_SIDES_HINT_COUNT        3
-
-struct MPSidesHintImage {
-    unsigned char *rgb;
-    int width;
-    int height;
-    BOOL attempted;
-    /* Cached nearest-screen-pen index per pixel (width*height entries) -
-     * see mp_sides_hint_ensure_pens(). Rebuilt only when the screen
-     * palette actually changes, not on every redraw. */
-    UBYTE *pens;
-    BOOL pens_valid;
-    ULONG cached_palette[3 * 256];
-    int cached_pen_count;
-};
-
-struct MPSidesHintPen {
-    UBYTE r, g, b;
-    LONG pen;
-};
-
-static struct MPSidesHintImage mp_sides_hint_images[MP_SIDES_HINT_COUNT];
-static const char *mp_sides_hint_paths[MP_SIDES_HINT_COUNT] = {
-    "PROGDIR:Art/single.iff",
-    "PROGDIR:Art/longside.iff",
-    "PROGDIR:Art/shortside.iff"
-};
-
-static int mp_sides_hint_index(void) {
-    if (strcmp(driver_sides_buffer, "two-sided-long-edge") == 0)
-        return 1;
-    if (strcmp(driver_sides_buffer, "two-sided-short-edge") == 0)
-        return 2;
-    return 0;
-}
-
-static BOOL mp_load_sides_hint_image(int index) {
-    struct MPSidesHintImage *image;
-    struct jpeg_data data;
-    int pixels;
-    int i;
-
-    if (index < 0 || index >= MP_SIDES_HINT_COUNT)
-        return FALSE;
-
-    image = &mp_sides_hint_images[index];
-    if (image->attempted)
-        return image->rgb != NULL;
-
-    image->attempted = TRUE;
-    memset(&data, 0, sizeof(data));
-
-    /* Avoid load_ilbm_to_rgb() here because it logs to the GUI status box. */
-    if (load_iff_direct(mp_sides_hint_paths[index], &data) != 0)
-        return FALSE;
-
-    if (data.width <= 0 || data.height <= 0 ||
-        data.width > 64 || data.height > 64) {
-        free_jpeg_data(&data);
-        return FALSE;
-    }
-
-    pixels = data.width * data.height;
-    image->rgb = AllocVec((ULONG)pixels * 3UL, MEMF_ANY);
-    if (!image->rgb) {
-        free_jpeg_data(&data);
-        return FALSE;
-    }
-
-    for (i = 0; i < pixels; ++i) {
-        image->rgb[i * 3 + 0] = data.red[i];
-        image->rgb[i * 3 + 1] = data.green[i];
-        image->rgb[i * 3 + 2] = data.blue[i];
-    }
-    image->width = data.width;
-    image->height = data.height;
-    free_jpeg_data(&data);
-    return TRUE;
-}
-
-static UBYTE mp_sides_hint_nearest_pen(const ULONG *palette,
-                                         int pen_count,
-                                         UBYTE r, UBYTE g, UBYTE b) {
-    int i;
-    int best = 0;
-    ULONG best_distance = 0xffffffffUL;
-
-    for (i = 0; i < pen_count; ++i) {
-        LONG pr = (LONG)(palette[i * 3 + 0] >> 24);
-        LONG pg = (LONG)(palette[i * 3 + 1] >> 24);
-        LONG pb = (LONG)(palette[i * 3 + 2] >> 24);
-        LONG dr = (LONG)r - pr;
-        LONG dg = (LONG)g - pg;
-        LONG db = (LONG)b - pb;
-        ULONG distance = (ULONG)(dr * dr + dg * dg + db * db);
-
-        if (distance < best_distance) {
-            best = i;
-            best_distance = distance;
-            if (distance == 0)
-                break;
-        }
-    }
-
-    return (UBYTE)best;
-}
-
-/* mp_sides_hint_nearest_pen() is a linear scan over the whole screen
- * palette (up to 256 entries) - fine once, but mp_draw_sides_hint() used
- * to call it for every pixel of the 32x32 hint image on every single
- * redraw (Query, every gadget click, every window refresh, ...), up to
- * ~1024*256 distance computations each time for no reason: the palette
- * essentially never changes between redraws. Cache the per-pixel result
- * here and only redo the scan when the palette actually differs from the
- * one the cache was built against (a real screen depth/mode change,
- * which is rare), rather than unconditionally every redraw. */
-static BOOL mp_sides_hint_ensure_pens(struct MPSidesHintImage *image,
-                                      const ULONG *palette, int pen_count) {
-    int pixels = image->width * image->height;
-    int i;
-
-    if (image->pens_valid && image->cached_pen_count == pen_count &&
-        memcmp(image->cached_palette, palette,
-               (size_t)pen_count * 3 * sizeof(ULONG)) == 0) {
-        return TRUE;
-    }
-
-    if (!image->pens) {
-        image->pens = AllocVec((ULONG)pixels, MEMF_ANY);
-        if (!image->pens) return FALSE;
-    }
-
-    for (i = 0; i < pixels; ++i) {
-        image->pens[i] = mp_sides_hint_nearest_pen(
-            palette, pen_count,
-            image->rgb[i * 3 + 0], image->rgb[i * 3 + 1],
-            image->rgb[i * 3 + 2]);
-    }
-
-    memcpy(image->cached_palette, palette,
-           (size_t)pen_count * 3 * sizeof(ULONG));
-    image->cached_pen_count = pen_count;
-    image->pens_valid = TRUE;
-    return TRUE;
-}
-
-/* GetRGB32() is a graphics.library v39 (AmigaOS 3.0/AGA) addition and does
- * not exist in a v37 (AmigaOS 2.04) graphics.library - calling it there
- * jumps through a library vector that was never filled in, which is
- * exactly the illegal-instruction crash a real AmigaOS 2.0/2.04 test of
- * this build hit, right after mp_draw_marker_strips() (no v39-only calls
- * on its own code path) and before mp_draw_sides_hint() had a chance to
- * log a trace line. GetRGB4() - 4 bits per component, 0x0RGB packed into
- * one ULONG - has existed since Kickstart 1.x, so build the same
- * top-byte-significant 32-bit-per-component table GetRGB32() would have,
- * one pen at a time, expanding each nibble to a full byte
- * (0x0..0xF -> 0x00..0xFF) exactly the way driver/classic_render_shim.c
- * already does for the OS3.1 driver's own 4-bit-gun input. Shared by
- * mp_draw_sides_hint() and mp_draw_printer_icon() below, which both used
- * to call GetRGB32() directly. */
-static void mp_fill_screen_palette32(struct ColorMap *cm, int pen_count,
-                                     ULONG *out_palette) {
-    if (GfxBase->LibNode.lib_Version >= 39) {
-        GetRGB32(cm, 0, (ULONG)pen_count, out_palette);
-        return;
-    }
-
-    int pen;
-    for (pen = 0; pen < pen_count; ++pen) {
-        ULONG rgb4 = GetRGB4(cm, pen);
-        UBYTE r4 = (UBYTE)((rgb4 >> 8) & 0xF);
-        UBYTE g4 = (UBYTE)((rgb4 >> 4) & 0xF);
-        UBYTE b4 = (UBYTE)(rgb4 & 0xF);
-        out_palette[pen * 3 + 0] = (ULONG)((r4 << 4) | r4) << 24;
-        out_palette[pen * 3 + 1] = (ULONG)((g4 << 4) | g4) << 24;
-        out_palette[pen * 3 + 2] = (ULONG)((b4 << 4) | b4) << 24;
-    }
-}
-
-/* cm->Count only names a real palette size on a "V38 compatible" ColorMap
- * (cm->Type != 0 - graphics/view.h's own comment on that field: Type == 0
- * means the older, simpler V1.2/V1.3-compatible ColorMap layout). A Type
- * == 0 ColorMap - still seen from some OS2.0/2.04-era graphics.library
- * builds - predates the Count field's meaning, so trusting it there feeds
- * mp_fill_screen_palette32() and every nearest-pen search a pen_count
- * that does not match the screen's real, much smaller pen table -
- * anything at or past the true end of that table is whatever memory
- * happens to sit there, and a search that picks one of those phantom
- * entries returns a pen index the hardware cannot actually display (a
- * 4-bitplane screen only ever has 16 real pens; SetAPen() with a larger
- * index does not fail, it just displays *some* real pen picked by
- * whichever low bits survive). Falling back to the bitmap's own plane
- * count sidesteps this entirely - BitMap->Depth has been a stable,
- * always-valid field since Kickstart 1.0, unlike Count's meaning here. */
-static int mp_screen_pen_count(struct Screen *scr, struct ColorMap *cm) {
-    int count = (cm->Type != 0) ? (int)cm->Count : 0;
-
-    if (count <= 0) {
-        count = (scr && scr->RastPort.BitMap)
-                    ? (1 << scr->RastPort.BitMap->Depth) : 16;
-    }
-    if (count > 256) count = 256;
-    if (count < 1) count = 1;
-    return count;
-}
-
-/* Ordered neutral dithering is only useful on classic planar screens.
- * Do not trust BitMap->Depth on RTG: CyberGraphX/Picasso96 compatibility
- * bitmaps can expose an 8-ish legacy field even when the real display is
- * 16/24/32-bit. On V39+ ask graphics.library for the effective bitmap depth
- * and flags instead. BMF_STANDARD specifically identifies the normal planar
- * Amiga bitmap representation; RTG bitmaps are therefore kept on the smooth
- * nearest-colour path even if a compatibility field reports <=8 bits.
- *
- * GetBitMapAttr() itself is V39, so AmigaOS 2.04 keeps the direct structure
- * fallback. That is safe there because the classic V37 graphics system only
- * has the planar bitmap representation this dither was written for. */
-static BOOL mp_should_dither_neutral(struct Screen *scr) {
-    static struct BitMap *cached_bitmap = NULL;
-    static BOOL cached_result = FALSE;
-    struct BitMap *bm;
-
-    if (!scr || !scr->RastPort.BitMap)
-        return FALSE;
-
-    bm = scr->RastPort.BitMap;
-    if (bm == cached_bitmap)
-        return cached_result;
-
-    cached_bitmap = bm;
-    if (GfxBase && GfxBase->LibNode.lib_Version >= 39) {
-        ULONG depth = GetBitMapAttr(bm, BMA_DEPTH);
-        ULONG flags = GetBitMapAttr(bm, BMA_FLAGS);
-        cached_result = (depth > 0 && depth <= 8 &&
-                         (flags & BMF_STANDARD)) ? TRUE : FALSE;
-    } else {
-        cached_result = (bm->Depth <= 8) ? TRUE : FALSE;
-    }
-
-    return cached_result;
-}
-
-/* A pixel counts as "near-neutral" (grey-ish rather than a real hue) when
- * its RGB channels are all within this many levels (0-255 scale) of each
- * other - loose enough for a slightly warm/cool grey, tight enough to
- * exclude a genuinely saturated colour. Used below to decide, per pixel,
- * whether to prefer mp_low_colour_gray_pen()'s neutral-biased pen search
- * over the plain nearest-colour one. */
-#define MP_NEUTRAL_SAT_THRESHOLD 32
-
-/* A nearest-colour lookup is useful on a 32+ colour screen, but it produces
- * harsh, misleading colour blocks on a 16-colour Workbench palette. Use the
- * closest-luminance, least-saturated existing pen there instead. This keeps
- * printer artwork effectively grayscale without changing Workbench's palette
- * or relying on colour pens such as blue and yellow. */
-static UBYTE mp_low_colour_gray_pen(const ULONG *palette, int pen_count,
-                                    UBYTE r, UBYTE g, UBYTE b) {
-    int i;
-    ULONG luminance = (299UL * r + 587UL * g + 114UL * b) / 1000UL;
-    ULONG best_score = 0xffffffffUL;
-    UBYTE best = 0;
-
-    for (i = 0; i < pen_count; ++i) {
-        LONG pr = (LONG)((palette[i * 3 + 0] >> 24) & 0xffUL);
-        LONG pg = (LONG)((palette[i * 3 + 1] >> 24) & 0xffUL);
-        LONG pb = (LONG)((palette[i * 3 + 2] >> 24) & 0xffUL);
-        LONG minimum = pr < pg ? pr : pg;
-        LONG maximum = pr > pg ? pr : pg;
-        ULONG palette_luminance;
-        LONG level_delta;
-        ULONG score;
-
-        if (pb < minimum)
-            minimum = pb;
-        if (pb > maximum)
-            maximum = pb;
-        palette_luminance = (299UL * (ULONG)pr +
-                             587UL * (ULONG)pg +
-                             114UL * (ULONG)pb) / 1000UL;
-        level_delta = (LONG)palette_luminance - (LONG)luminance;
-        if (level_delta < 0)
-            level_delta = -level_delta;
-        /* Chroma is weighted heavily so neutral pens win over similarly
-         * bright saturated pens in the old 16-colour Workbench palette. */
-        score = (ULONG)level_delta + (ULONG)(maximum - minimum) * 8UL;
-        if (score < best_score) {
-            best_score = score;
-            best = (UBYTE)i;
-        }
-    }
-    return best;
-}
-
-/* mp_low_colour_gray_pen() above always picks one flat pen - the single
- * closest match. On a 16-colour Workbench theme that has no pen truly
- * close to a given source luminance (a "loud" colour scheme, not
- * predominantly neutral tones), that one flat pen can still look
- * noticeably off, and OS2.0/2.1 predates graphics.library V39's
- * ObtainBestPenA(), so there is no way to allocate a custom pen with the
- * exact grey this driver wants - only whichever pens the running
- * Workbench screen already has. Ordered dithering between the two
- * existing pens whose luminance brackets the source pixel - alternating
- * them in a fixed screen-position pattern - reads as a smoother, better-
- * matched intermediate tone at normal viewing distance than either pen
- * alone, the classic Amiga technique for photographic content on a
- * constrained palette. */
-#define MP_NEUTRAL_RAMP_MAX 32
-/* Looser than MP_NEUTRAL_SAT_THRESHOLD (which gates a single best-match
- * pick) - a dither ramp needs several usable rungs, not just the one
- * closest pen, so this admits mildly-tinted pens too rather than only
- * true greys. */
-#define MP_NEUTRAL_RAMP_SAT_THRESHOLD 48
-
-/* Scans the palette once (pen_count is at most 256 - cheap, done once per
- * redraw, not per pixel) for its own near-neutral pens and returns them
- * insertion-sorted by luminance into ramp_pens/ramp_luma, ready for
- * mp_dither_neutral_pen(). Returns the count found (0 if this palette
- * has no near-neutral pen at all - some Workbench colour themes
- * genuinely don't; callers fall back to mp_low_colour_gray_pen() there). */
-static int mp_build_neutral_pen_ramp(const ULONG *palette, int pen_count,
-                                     UBYTE *ramp_pens, UBYTE *ramp_luma) {
-    int count = 0;
-    int i;
-
-    for (i = 0; i < pen_count && count < MP_NEUTRAL_RAMP_MAX; ++i) {
-        LONG pr = (LONG)((palette[i * 3 + 0] >> 24) & 0xffUL);
-        LONG pg = (LONG)((palette[i * 3 + 1] >> 24) & 0xffUL);
-        LONG pb = (LONG)((palette[i * 3 + 2] >> 24) & 0xffUL);
-        LONG p_max = (pr > pg) ? pr : pg;
-        LONG p_min = (pr < pg) ? pr : pg;
-        UBYTE luma;
-        int j;
-
-        if (pb > p_max) p_max = pb;
-        if (pb < p_min) p_min = pb;
-        if (p_max - p_min > MP_NEUTRAL_RAMP_SAT_THRESHOLD)
-            continue;
-
-        luma = (UBYTE)((299UL * (ULONG)pr + 587UL * (ULONG)pg +
-                        114UL * (ULONG)pb) / 1000UL);
-
-        j = count;
-        while (j > 0 && ramp_luma[j - 1] > luma) {
-            ramp_luma[j] = ramp_luma[j - 1];
-            ramp_pens[j] = ramp_pens[j - 1];
-            --j;
-        }
-        ramp_luma[j] = luma;
-        ramp_pens[j] = (UBYTE)i;
-        ++count;
-    }
-    return count;
-}
-
-/* Classic 4x4 Bayer ordered-dither matrix (values 0-15). */
-static const UBYTE mp_bayer4x4[4][4] = {
-    {  0,  8,  2, 10 },
-    { 12,  4, 14,  6 },
-    {  3, 11,  1,  9 },
-    { 15,  7, 13,  5 }
-};
-
-/* Picks a pen for (r,g,b) from a ramp built by mp_build_neutral_pen_ramp()
- * (ramp_pens/ramp_luma, ramp_count entries, ascending luminance),
- * dithering between the two ramp entries bracketing this pixel's own
- * luminance using screen position (x,y) - not image-local coordinates,
- * so the pattern stays consistent if two dithered patches ever sit
- * side by side - rather than snapping to whichever single one is
- * closest. Falls back to the nearest single ramp entry when the source
- * luminance is at or past either end of the ramp, where there is nothing
- * to dither between anyway. */
-static UBYTE mp_dither_neutral_pen(const UBYTE *ramp_pens,
-                                   const UBYTE *ramp_luma, int ramp_count,
-                                   UBYTE r, UBYTE g, UBYTE b, int x, int y) {
-    ULONG luma = (299UL * r + 587UL * g + 114UL * b) / 1000UL;
-    int lo, hi;
-    UBYTE lo_luma, hi_luma, threshold;
-    UWORD frac;
-
-    if (luma <= ramp_luma[0]) return ramp_pens[0];
-    if (luma >= ramp_luma[ramp_count - 1]) return ramp_pens[ramp_count - 1];
-
-    for (hi = 1; hi < ramp_count; ++hi) {
-        if (ramp_luma[hi] >= luma) break;
-    }
-    lo = hi - 1;
-
-    lo_luma = ramp_luma[lo];
-    hi_luma = ramp_luma[hi];
-    if (hi_luma == lo_luma) return ramp_pens[lo];
-
-    threshold = mp_bayer4x4[y & 3][x & 3];
-    frac = (UWORD)(((ULONG)(luma - lo_luma) * 15UL) /
-                   (ULONG)(hi_luma - lo_luma));
-    return (frac > threshold) ? ramp_pens[hi] : ramp_pens[lo];
-}
-
-static void mp_draw_sides_hint(void) {
-    struct MPSidesHintImage *image;
-    ULONG screen_palette[3 * 256];
-    struct ColorMap *cm;
-    struct RastPort *rp;
-    int index;
-    int screen_pen_count;
-    UBYTE ramp_pens[MP_NEUTRAL_RAMP_MAX];
-    UBYTE ramp_luma[MP_NEUTRAL_RAMP_MAX];
-    int ramp_count;
-    int draw_w, draw_h;
-    int x, y;
-    int left = MP_SIDES_HINT_LEFT;
-    int top = g_topborder + MP_SIDES_HINT_TOP;
-
-    if (!window || !screen)
-        return;
-
-    rp = window->RPort;
-    cm = screen->ViewPort.ColorMap;
-    if (!cm)
-        return;
-
-    screen_pen_count = mp_screen_pen_count(screen, cm);
-    mp_fill_screen_palette32(cm, screen_pen_count, screen_palette);
-    ramp_count = mp_build_neutral_pen_ramp(screen_palette, screen_pen_count,
-                                           ramp_pens, ramp_luma);
-    SetDrMd(rp, JAM1);
-    SetAPen(rp, 0);
-    RectFill(rp, left - 1, top - 1,
-             left + MP_SIDES_HINT_SIZE, top + MP_SIDES_HINT_SIZE);
-    SetAPen(rp, 1);
-    RectFill(rp, left - 1, top - 1,
-             left + MP_SIDES_HINT_SIZE, top - 1);
-    RectFill(rp, left - 1, top - 1,
-             left - 1, top + MP_SIDES_HINT_SIZE);
-    RectFill(rp, left - 1, top + MP_SIDES_HINT_SIZE,
-             left + MP_SIDES_HINT_SIZE, top + MP_SIDES_HINT_SIZE);
-    RectFill(rp, left + MP_SIDES_HINT_SIZE, top - 1,
-             left + MP_SIDES_HINT_SIZE, top + MP_SIDES_HINT_SIZE);
-
-    index = mp_sides_hint_index();
-    if (!mp_load_sides_hint_image(index))
-        return;
-
-    image = &mp_sides_hint_images[index];
-    if (!mp_sides_hint_ensure_pens(image, screen_palette, screen_pen_count))
-        return;
-
-    draw_w = image->width < MP_SIDES_HINT_SIZE
-           ? image->width : MP_SIDES_HINT_SIZE;
-    draw_h = image->height < MP_SIDES_HINT_SIZE
-           ? image->height : MP_SIDES_HINT_SIZE;
-
-    for (y = 0; y < draw_h; ++y) {
-        LONG last_pen = -1;
-        for (x = 0; x < draw_w; ++x) {
-            int pixel = y * image->width + x;
-            UBYTE sr = image->rgb[pixel * 3 + 0];
-            UBYTE sg = image->rgb[pixel * 3 + 1];
-            UBYTE sb = image->rgb[pixel * 3 + 2];
-            UBYTE smax = (sr > sg) ? sr : sg;
-            UBYTE smin = (sr < sg) ? sr : sg;
-            UBYTE pen = image->pens[pixel];
-
-            if (sb > smax) smax = sb;
-            if (sb < smin) smin = sb;
-
-            /* Per source pixel, not per screen: a screen's own advertised
-             * colour count/depth turned out not to be a reliable signal
-             * for whether it actually offers a smooth grey ramp (see
-             * mp_screen_pen_count()'s comment on why Count itself can be
-             * unreliable) - so this only asks whether THIS pixel looks
-             * like it was meant to be grey, and if so, prefers screen
-             * pens that are too, on any screen. A source pixel that is
-             * already a real colour still gets the plain nearest-colour
-             * match above unchanged. Dithers between the ramp's two
-             * bracketing pens when there are enough of them to dither
-             * with; a palette with 0 or 1 near-neutral pens falls back
-             * to mp_low_colour_gray_pen()'s single best pick. */
-            if (mp_should_dither_neutral(screen) &&
-                (int)smax - (int)smin <= MP_NEUTRAL_SAT_THRESHOLD) {
-                pen = (ramp_count >= 2)
-                    ? mp_dither_neutral_pen(ramp_pens, ramp_luma, ramp_count,
-                                            sr, sg, sb, left + x, top + y)
-                    : mp_low_colour_gray_pen(screen_palette, screen_pen_count,
-                                             sr, sg, sb);
-            }
-
-            if ((LONG)pen != last_pen) {
-                SetAPen(rp, pen);
-                last_pen = (LONG)pen;
-            }
-            WritePixel(rp, left + x, top + y);
-        }
-    }
-
-}
-
-static void mp_free_sides_hint_images(void) {
-    int i;
-    for (i = 0; i < MP_SIDES_HINT_COUNT; ++i) {
-        if (mp_sides_hint_images[i].rgb) {
-            FreeVec(mp_sides_hint_images[i].rgb);
-            mp_sides_hint_images[i].rgb = NULL;
-        }
-        if (mp_sides_hint_images[i].pens) {
-            FreeVec(mp_sides_hint_images[i].pens);
-            mp_sides_hint_images[i].pens = NULL;
-        }
-        mp_sides_hint_images[i].width = 0;
-        mp_sides_hint_images[i].height = 0;
-        mp_sides_hint_images[i].attempted = FALSE;
-        mp_sides_hint_images[i].pens_valid = FALSE;
-        mp_sides_hint_images[i].cached_pen_count = 0;
-    }
-}
-
-// Creates a valid PWG header and uncompressed RGB data
-int rgb_to_pwg_memory(unsigned char *rgb_data, int width, int height, unsigned char **pwg_out, int *pwg_size_out) {
-    int row_bytes = width * 3;
-    int header_size = 1796; // Standard PWG header size
-    int data_size = row_bytes * height;
-    int total_size = header_size + data_size;
-
-    unsigned char *buffer = malloc(total_size);
-    if (!buffer) return -1;
-    memset(buffer, 0, total_size);
-
-    // PWG header - 1796 bytes total
-    // See Apple Raster Format spec for details
-    buffer[0] = 'R'; buffer[1] = 'a'; buffer[2] = 'S'; buffer[3] = '2'; // PWG magic
-    buffer[4] = 0x00; buffer[5] = 0x00; buffer[6] = 0x00; buffer[7] = 0x02; // Version 2
-    buffer[8] = 0x00; buffer[9] = 0x00; buffer[10] = 0x00; buffer[11] = 0x01; // Number of pages = 1
-
-    // Page 1 - raster attributes
-    *(int *)&buffer[20] = width;       // pixelsPerLine
-    *(int *)&buffer[24] = height;      // linesPerPage
-    *(int *)&buffer[28] = 8;           // bitsPerColor
-    *(int *)&buffer[32] = 24;          // bitsPerPixel
-    *(int *)&buffer[36] = 1;           // color order (chunky)
-    *(int *)&buffer[40] = 1;           // color space = sRGB
-    *(int *)&buffer[44] = 0;           // compression = none
-
-    // Set resolution (300 dpi)
-    *(int *)&buffer[60] = 300;         // crossFeedTransform (dpi)
-    *(int *)&buffer[64] = 300;         // feedTransform (dpi)
-
-    // Copy raw RGB data after header
-    memcpy(buffer + header_size, rgb_data, data_size);
-
-    *pwg_out = buffer;
-    *pwg_size_out = total_size;
-    return 0;
-}
-
-// Existing functions (unchanged)
-int rgb_to_pwg(const char *filename, unsigned char *rgb_data, int width, int height) {
-    FILE *file = fopen(filename, "wb");
-    if (!file) {
-        printf("Failed to open PWG file: %s\n", filename);
-        return -1;
-    }
-
-    char header[128] = {0};
-    memcpy(header, "RaS2", 4);
-    header[4] = 0x00;
-    header[8] = 0x00;
-    header[12] = 0x00;
-    header[16] = 0x00;
-    header[20] = 0x00;
-    header[24] = (width >> 24) & 0xFF;
-    header[25] = (width >> 16) & 0xFF;
-    header[26] = (width >> 8) & 0xFF;
-    header[27] = width & 0xFF;
-    header[28] = (height >> 24) & 0xFF;
-    header[29] = (height >> 16) & 0xFF;
-    header[30] = (height >> 8) & 0xFF;
-    header[31] = height & 0xFF;
-    header[32] = 8;
-    header[36] = 3;
-    header[40] = 3;
-    header[44] = (width * 3 >> 24) & 0xFF;
-    header[45] = (width * 3 >> 16) & 0xFF;
-    header[46] = (width * 3 >> 8) & 0xFF;
-    header[47] = (width * 3) & 0xFF;
-    fwrite(header, 1, 128, file);
-
-    fwrite(rgb_data, 1, width * height * 3, file);
-
-    fclose(file);
-    return 0;
-}
-// Wrapper to convert RGB to PWG
-int convert_to_pwg(unsigned char *rgb, int w, int h, unsigned char **pwg_out, int *pwg_size_out) {
-    char pwgfile[256];
-    snprintf(pwgfile, sizeof(pwgfile), "UHD:temp.pwg");
-
-    if (rgb_to_pwg(pwgfile, rgb, w, h) != 0) {
-        return -1;
-    }
-
-    FILE *fp = fopen(pwgfile, "rb");
-    if (!fp) return -1;
-    fseek(fp, 0, SEEK_END);
-    int size = ftell(fp);
-    rewind(fp);
-
-    *pwg_out = malloc(size);
-    if (!*pwg_out) {
-        fclose(fp);
-        return -1;
-    }
-
-    fread(*pwg_out, 1, size, fp);
-    fclose(fp);
-    *pwg_size_out = size;
-    return 0;
-}
-/* ---------------------------------------------------------------------
- * DEVS:Printers/MintPRINT install helper
- *
- * MintPrint Settings ships as a single drawer holding both bundled driver
- * builds under PROGDIR:Drivers/ (MintPRINT-V44 and MintPRINT-OS31 - see
- * docs/OS31_SUPPORT.md for why two builds exist at all) and automatically
- * picks the one matching this machine's printer.device generation. If the
- * chosen driver is not yet installed in DEVS:Printers/, offer to copy it
- * in and point the user at Printer Prefs.
- * ------------------------------------------------------------------- */
-
-/* The extended V44 printer-driver interface (PPCF_EXTENDED / PRTA_NoIO /
- * PRTA_8BitGuns) shipped with AmigaOS 3.5, whose components are v44.
- * Every component released together with a given AmigaOS version shares
- * that version's major library number - except exec.library itself on a
- * software-only OS update layered on an existing Kickstart ROM. AmigaOS
- * 3.9 is exactly this: real-world 3.9 systems keep whatever exec.library
- * version their Kickstart ROM shipped with (3.1's exec v40 is common)
- * while workbench.library and the rest of LIBS: - including the parts
- * printer.device actually depends on here - get bumped to V44+ (v45,
- * higher again after Boing Bags). Checking exec.library's version alone
- * misdetected such a 3.9 system as needing the classic pre-V44 driver.
- * workbench.library, being a plain LIBS: file every such update actually
- * replaces, tracks "what AmigaOS is genuinely running" far more reliably
- * than the Kickstart-resident exec.library does. */
-#define MP_EXEC_VERSION_V44 44
-
-/* Falls back to exec.library's version only if workbench.library can't be
- * opened at all - should never happen on a real system, but that is a
- * safer failure mode than mis-defaulting to the classic driver on an
- * unknown one. */
-static UWORD mp_os_version(void) {
-    struct Library *wb_base = OpenLibrary((CONST_STRPTR)"workbench.library", 0);
-    UWORD ver;
-
-    if (!wb_base) return SysBase->LibNode.lib_Version;
-
-    ver = wb_base->lib_Version;
-    CloseLibrary(wb_base);
-    return ver;
-}
-
-static BOOL mp_needs_os31_driver(void) {
-    return mp_os_version() < MP_EXEC_VERSION_V44;
-}
-
-/* Short friendly label for EasyRequest prompts and the About box - kept
- * deliberately brief (no version number) because EasyRequest sizes its
- * window to the single longest \n-delimited line with no wrapping, and a
- * long line here easily pushes the whole requester off a low-resolution
- * AmigaOS screen. workbench.library's version, not exec.library's, is
- * what's checked (see mp_os_version() above) - the numbers below are the
- * ones real AmigaOS 3.x releases shipped workbench.library with on an
- * unpatched system; a 3.9 install with Boing Bags applied commonly reads
- * higher than the plain "45" below and falls through to the generic
- * fallback label instead, which is only cosmetic - mp_needs_os31_driver()'s
- * own >=44 comparison does not depend on hitting one of these exact
- * numbers. Any version outside this list (older, a future release, or a
- * patched 3.9) still gets a short label rather than being left blank -
- * see printf() callers for the version number itself, logged separately
- * to the on-screen output box where a longer line just wraps instead of
- * resizing a window. */
-static void mp_describe_amiga_os(char *buf, size_t bufsize) {
-    UWORD ver = mp_os_version();
-    const char *label;
-
-    switch (ver) {
-        case 36: label = "2.0/2.03"; break;
-        case 37: label = "2.04/2.1"; break;
-        case 39: label = "3.0";  break;
-        case 40: label = "3.1";  break;
-        case 44: label = "3.5";  break;
-        case 45: label = "3.9";  break;
-        case 47: label = "3.2+"; break;
-        default: label = NULL;   break;
-    }
-
-    if (label) {
-        snprintf(buf, bufsize, "AmigaOS %s", label);
-    } else {
-        snprintf(buf, bufsize, "AmigaOS (v%u)", (unsigned)ver);
-    }
-}
-
-/* Bundled driver source path, chosen from the two drawers under
- * PROGDIR:Drivers/ - see mp_needs_os31_driver() above. */
-static CONST_STRPTR mp_driver_src_path(void) {
-    return mp_needs_os31_driver()
-        ? (CONST_STRPTR)"PROGDIR:Drivers/MintPRINT-OS31/MintPRINT"
-        : (CONST_STRPTR)"PROGDIR:Drivers/MintPRINT-V44/MintPRINT";
-}
-
-static BOOL mp_file_exists(CONST_STRPTR name) {
-    BPTR lock = Lock(name, ACCESS_READ);
-    if (lock) {
-        UnLock(lock);
-        return TRUE;
-    }
-    return FALSE;
-}
-
-/* Copies to a "<dst>.new" temp file first, validates the full source size
- * landed, and only then swaps it in over the real destination. dst - e.g.
- * DEVS:Printers/MintPRINT, the live driver a printer.device caller may be
- * using right now - used to be Open(dst, MODE_NEWFILE) directly, which
- * truncates it immediately: an AllocVec failure, a short write, or the disk
- * filling up partway through left a previously-working file destroyed with
- * no way back. Now any such failure only ever touches the temp file.
- *
- * The swap itself is a rename-old-aside/rename-new-in/delete-old dance
- * rather than delete-then-rename: if Rename(tmp, dst) is the thing that
- * fails (disk full on the directory entry, whatever), a plain
- * DeleteFile(dst) beforehand would have already destroyed the working
- * file with nothing to put back. Keeping the old file as "<dst>.bak"
- * until the new one is confirmed in place means that failure instead
- * restores dst from the backup. */
-static BOOL mp_copy_file(CONST_STRPTR src, CONST_STRPTR dst) {
-    BPTR in, out;
-    UBYTE *buf;
-    LONG nread;
-    BOOL ok = TRUE;
-    LONG src_size;
-    LONG written = 0;
-    char tmp_path[256];
-    char bak_path[256];
-    BOOL had_existing;
-    BOOL bak_created = FALSE;
-
-    in = Open(src, MODE_OLDFILE);
-    if (!in) return FALSE;
-
-    if (Seek(in, 0, OFFSET_END) == -1) { Close(in); return FALSE; }
-    src_size = Seek(in, 0, OFFSET_CURRENT);
-    if (src_size < 0 || Seek(in, 0, OFFSET_BEGINNING) == -1) {
-        Close(in);
-        return FALSE;
-    }
-
-    snprintf(tmp_path, sizeof(tmp_path), "%s.new", (const char *)dst);
-
-    out = Open((CONST_STRPTR)tmp_path, MODE_NEWFILE);
-    if (!out) {
-        Close(in);
-        return FALSE;
-    }
-
-    buf = AllocVec(32768, MEMF_ANY);
-    if (!buf) {
-        Close(out);
-        Close(in);
-        DeleteFile((CONST_STRPTR)tmp_path);
-        return FALSE;
-    }
-
-    while ((nread = Read(in, buf, 32768)) > 0) {
-        if (Write(out, buf, nread) != nread) {
-            ok = FALSE;
-            break;
-        }
-        written += nread;
-    }
-    if (nread < 0) ok = FALSE;
-
-    FreeVec(buf);
-    Close(out);
-    Close(in);
-
-    if (ok && written == src_size) {
-        snprintf(bak_path, sizeof(bak_path), "%s.bak", (const char *)dst);
-        had_existing = mp_file_exists(dst);
-
-        if (had_existing) {
-            /* Clear any stale .bak left over from a prior failed attempt
-             * first - Rename() fails if the destination name exists. */
-            DeleteFile((CONST_STRPTR)bak_path);
-            if (Rename(dst, (CONST_STRPTR)bak_path)) {
-                bak_created = TRUE;
-            } else {
-                /* Couldn't even move the current file aside - stop here
-                 * rather than risk leaving dst in an unknown state. */
-                DeleteFile((CONST_STRPTR)tmp_path);
-                return FALSE;
-            }
-        }
-
-        if (Rename((CONST_STRPTR)tmp_path, dst)) {
-            if (bak_created) DeleteFile((CONST_STRPTR)bak_path);
-            return TRUE;
-        }
-
-        /* The new file didn't make it into place - put the previously
-         * working one back rather than leaving dst missing/truncated. */
-        if (bak_created) Rename((CONST_STRPTR)bak_path, dst);
-    }
-
-    DeleteFile((CONST_STRPTR)tmp_path);
-    return FALSE;
-}
-
-/* Same NIL:-handles convention as mp_launch_printer_prefs() below: an
- * async SystemTags() child must not inherit and later close this program's
- * (and its launching Shell's) own console handles. Multiview displays an
- * AmigaGuide file directly, so no amigaguide.library calls are needed here.
- *
- * PROGDIR: is deliberately NOT passed straight through in the command
- * string, unlike the Art/ and Drivers/ PROGDIR: paths used elsewhere in
- * this file: those are opened directly by THIS process, where PROGDIR: is
- * a valid local assign pointing at this program's own drawer. This
- * command line instead runs in a brand-new Process that SystemTags()
- * spawns to run Multiview - PROGDIR: is local to the process that has it,
- * not inherited by a freshly spawned one, so that new process's own
- * PROGDIR: (if it resolves at all) has no reason to still mean "this
- * program's drawer". The Help menu item silently did nothing as a result:
- * Multiview looked for the guide next to wherever ITS OWN idea of
- * PROGDIR: pointed, generally failed to find it, and its own std{in,out}
- * were redirected to NIL: like the rest of this async launch, so nothing
- * was visible either way. Resolving PROGDIR: to a real absolute path
- * *before* building the command line - while still running as this
- * process, where the assign is valid - sidesteps that entirely. */
-static void mp_launch_help_guide(void) {
-    BPTR in;
-    BPTR out;
-    BPTR lock;
-    char dir[192];
-    char guide[224];
-    char cmd[320];
-    CONST_STRPTR viewer = NULL;
-    BOOL resolved = FALSE;
-
-    /* MultiView is the normal Release 3+ viewer. Stock AmigaOS 2.04 does
-     * not provide it; Commodore's separately-distributed AmigaGuide V34
-     * viewer/library supports older systems, so accept that when present.
-     * Check explicit paths rather than relying on the caller's command
-     * search path, which may differ for the asynchronous child process. */
-    if (mp_file_exists((CONST_STRPTR)"SYS:Utilities/MultiView"))
-        viewer = (CONST_STRPTR)"SYS:Utilities/MultiView";
-    else if (mp_file_exists((CONST_STRPTR)"C:MultiView"))
-        viewer = (CONST_STRPTR)"C:MultiView";
-    else if (mp_file_exists((CONST_STRPTR)"SYS:Utilities/AmigaGuide"))
-        viewer = (CONST_STRPTR)"SYS:Utilities/AmigaGuide";
-    else if (mp_file_exists((CONST_STRPTR)"C:AmigaGuide"))
-        viewer = (CONST_STRPTR)"C:AmigaGuide";
-
-    if (!viewer) {
-        printf("No AmigaGuide help viewer is installed.\n");
-        if (GfxBase && GfxBase->LibNode.lib_Version < 39)
-            printf("AmigaOS 2.x can use Commodore AmigaGuide V34.\n");
-        else
-            printf("MultiView should normally be in SYS:Utilities.\n");
-        return;
-    }
-
-    lock = Lock((CONST_STRPTR)"PROGDIR:", ACCESS_READ);
-    if (lock) {
-        resolved = NameFromLock(lock, (STRPTR)dir, sizeof(dir));
-        UnLock(lock);
-    }
-
-    if (!resolved) {
-        printf("Could not resolve the MintPrint Settings drawer.\n");
-        printf("Open MintPrintSettings.guide manually.\n");
-        return;
-    }
-
-    {
-        size_t len = strlen(dir);
-        const char *sep = (len && dir[len - 1] == ':') ? "" : "/";
-        snprintf(guide, sizeof(guide), "%s%sMintPrintSettings.guide", dir, sep);
-    }
-
-    if (!mp_file_exists((CONST_STRPTR)guide)) {
-        printf("MintPrintSettings.guide is missing from the program drawer.\n");
-        return;
-    }
-
-    snprintf(cmd, sizeof(cmd), "%s \"%s\"", (const char *)viewer, guide);
-
-    /* Give the asynchronous viewer private handles so it cannot inherit
-     * and later close this program's (or its launching Shell's) console. */
-    in = Open((CONST_STRPTR)"NIL:", MODE_OLDFILE);
-    out = Open((CONST_STRPTR)"NIL:", MODE_NEWFILE);
-
-    if (SystemTags((CONST_STRPTR)cmd,
-                   SYS_Asynch, TRUE,
-                   SYS_Input, (ULONG)in, SYS_Output, (ULONG)out,
-                   TAG_DONE) != 0) {
-        printf("Could not open MintPrintSettings.guide automatically.\n");
-        if (in) Close(in);
-        if (out) Close(out);
-    }
-}
-
-static void mp_launch_printer_prefs(void) {
-    /* SYS_Asynch without explicit SYS_Input/SYS_Output shares the CALLER's
-     * own console handles with the new process - and an async process
-     * closes its input/output when it exits, which then closes the
-     * caller's (this program's, and its launching Shell's) console out
-     * from under it. Give the child its own private NIL: handles instead
-     * so it owns and closes only those. */
-    BPTR in = Open((CONST_STRPTR)"NIL:", MODE_OLDFILE);
-    BPTR out = Open((CONST_STRPTR)"NIL:", MODE_NEWFILE);
-
-    if (SystemTags((CONST_STRPTR)"SYS:Prefs/Printer", SYS_Asynch, TRUE,
-                   SYS_Input, (ULONG)in, SYS_Output, (ULONG)out,
-                   TAG_DONE) != 0) {
-        printf("Could not launch SYS:Prefs/Printer automatically\n");
-        printf("Please open Printer preferences manually.\n");
-        if (in) Close(in);
-        if (out) Close(out);
-    }
-}
-
-/* Reads this project's own driver build version out of a driver file, by
- * scanning for the driver's own "$VER: MintPRINT <version>.<revision>"
- * string embedded in printertag.s/printertag_classic.s (see there for why:
- * the compiled driver FILE on disk is a standard AmigaDOS hunk-format load
- * module, not a raw blob starting at its code entry point, so there is no
- * reliable FIXED BYTE OFFSET to read this from - a scannable marker is
- * exactly what AmigaOS's own "Version" command already does for "$VER:"
- * strings, so this now scans for the real thing rather than the ad-hoc
- * "MPDRVREV:<decimal>" prefix earlier driver revisions used). Returns
- * FALSE if the file can't be opened or the string isn't found. */
-#define MP_DRIVER_VER_MARKER "$VER: MintPRINT "
-#define MP_DRIVER_VER_SCAN_MAX 65536
-
-static BOOL mp_read_driver_version(CONST_STRPTR path, struct MPDriverVersion *out) {
-    BPTR file;
-    UBYTE *buf;
-    LONG got;
-    LONG marker_len = (LONG)strlen(MP_DRIVER_VER_MARKER);
-    LONG i;
-    BOOL found = FALSE;
-
-    file = Open(path, MODE_OLDFILE);
-    if (!file) return FALSE;
-
-    buf = AllocVec(MP_DRIVER_VER_SCAN_MAX, MEMF_ANY);
-    if (!buf) {
-        Close(file);
-        return FALSE;
-    }
-
-    got = Read(file, buf, MP_DRIVER_VER_SCAN_MAX);
-    Close(file);
-
-    if (got < marker_len) {
-        FreeVec(buf);
-        return FALSE;
-    }
-
-    for (i = 0; i <= got - marker_len; i++) {
-        if (memcmp(buf + i, MP_DRIVER_VER_MARKER, marker_len) == 0) {
-            LONG j = i + marker_len;
-            ULONG version = 0, revision = 0;
-            BOOL have_version = FALSE, have_revision = FALSE;
-
-            while (j < got && buf[j] >= '0' && buf[j] <= '9') {
-                version = version * 10UL + (ULONG)(buf[j] - '0');
-                have_version = TRUE;
-                j++;
-            }
-            if (have_version && j < got && buf[j] == '.') {
-                j++;
-                while (j < got && buf[j] >= '0' && buf[j] <= '9') {
-                    revision = revision * 10UL + (ULONG)(buf[j] - '0');
-                    have_revision = TRUE;
-                    j++;
-                }
-            }
-            if (have_version) {
-                out->version = (UWORD)version;
-                out->revision = have_revision ? (UWORD)revision : 0;
-                found = TRUE;
-            }
-            break;
-        }
-    }
-
-    FreeVec(buf);
-    return found;
-}
-
-/* TRUE if a is a newer driver build than b - version compared first, then
- * revision within a matching version, the same precedence AmigaOS's own
- * version.revision pairs use. */
-static BOOL mp_driver_version_newer(const struct MPDriverVersion *a,
-                                    const struct MPDriverVersion *b) {
-    if (a->version != b->version) return a->version > b->version;
-    return a->revision > b->revision;
-}
-
-static void show_about(struct Window *win) {
-    struct EasyStruct es;
-    char msg[512];
-    char installed_str[32];
-    char bundled_str[32];
-    char os_desc[64];
-    struct MPDriverVersion installed_ver, bundled_ver;
-    CONST_STRPTR src_path = MINTPRINT_DRIVER_SRC;
-    CONST_STRPTR variant_name = mp_needs_os31_driver() ? "OS2.0-3.1" : "V44+";
-
-    mp_describe_amiga_os(os_desc, sizeof(os_desc));
-
-    if (mp_read_driver_version(MINTPRINT_DRIVER_DEST, &installed_ver)) {
-        snprintf(installed_str, sizeof(installed_str), "v%u.%u",
-                 (unsigned)installed_ver.version, (unsigned)installed_ver.revision);
-    } else {
-        strcpy(installed_str, "not installed");
-    }
-    if (mp_read_driver_version(src_path, &bundled_ver)) {
-        snprintf(bundled_str, sizeof(bundled_str), "v%u.%u",
-                 (unsigned)bundled_ver.version, (unsigned)bundled_ver.revision);
-    } else {
-        strcpy(bundled_str, "not found");
-    }
-
-    /* Deliberately short lines, and no PROGDIR: path shown here - see the
-     * comment on mp_describe_amiga_os() above for why: EasyRequest sizes
-     * its window to the single widest line with no wrapping, and this
-     * requester's own longest line was pushing the window off-screen on a
-     * default low-resolution AmigaOS display. */
-    snprintf(msg, sizeof(msg),
-        "MintPRINT v" MINTPRINT_SETTINGS_VERSION
-        " - IPP/AirPrint printing for AmigaOS\n\n"
-        "Detected: %s\n"
-        "Driver build: %s\n\n"
-        "Installed driver: %s\n"
-        "Bundled driver: %s\n\n"
-        "Bug reports and source:\n"
-        "github.com/boingball/MintPRINT\n\n"
-        "If this saved you a trip to the printer shop:\n"
-        "buymeacoffee.com/boingball",
-        os_desc, variant_name,
-        installed_str, bundled_str);
-
-    es.es_StructSize = sizeof(struct EasyStruct);
-    es.es_Flags = 0;
-    es.es_Title = (UBYTE *)"About MintPrint Settings";
-    es.es_TextFormat = (UBYTE *)msg;
-    es.es_GadgetFormat = (UBYTE *)"OK";
-    EasyRequest(win, &es, NULL);
-}
-
-static void check_and_offer_driver_install(struct Window *win) {
-    struct EasyStruct es;
-    char msg[256];
-    char os_desc[64];
-    struct MPDriverVersion src_ver, dest_ver;
-    BOOL have_src_ver, have_dest_ver;
-    CONST_STRPTR src_path = MINTPRINT_DRIVER_SRC;
-    CONST_STRPTR variant_name = mp_needs_os31_driver() ? "OS2.0-3.1" : "V44+";
-
-    mp_describe_amiga_os(os_desc, sizeof(os_desc));
-    printf("Detected %s (workbench.library v%u) - using the %s driver (%s).\n",
-           os_desc, (unsigned)mp_os_version(), variant_name, src_path);
-
-    if (!mp_file_exists(src_path)) {
-        printf("Bundled driver not found at %s; skipping install check.\n", src_path);
-        printf("Check that both Drivers/MintPRINT-V44/ and Drivers/MintPRINT-OS31/\n");
-        printf("are present next to this program.\n");
-        return;
-    }
-
-    es.es_StructSize = sizeof(struct EasyStruct);
-    es.es_Flags = 0;
-    es.es_Title = (UBYTE *)"MintPrint Settings";
-
-    if (mp_file_exists(MINTPRINT_DRIVER_DEST)) {
-        /* Already installed - only bother the user if the copy bundled
-         * next to this program is a newer build than what's installed.
-         * An installed driver with no readable "$VER: MintPRINT" string
-         * at all (predates version tracking - true for anyone who hasn't
-         * updated since before it was added) is NOT "up to date": it's
-         * unreadable because it's older, not because it's current. Only
-         * skip the prompt when the installed version is actually known
-         * and already at least as new as the bundled one. */
-        have_src_ver = mp_read_driver_version(src_path, &src_ver);
-        have_dest_ver = mp_read_driver_version(MINTPRINT_DRIVER_DEST, &dest_ver);
-
-        if (!have_src_ver) {
-            return; /* nothing to offer - can't even read the bundled copy */
-        }
-        if (have_dest_ver && !mp_driver_version_newer(&src_ver, &dest_ver)) {
-            return; /* installed copy is already current */
-        }
-
-        if (have_dest_ver) {
-            snprintf(msg, sizeof(msg),
-                     "A newer MintPRINT driver is available.\n"
-                     "Installed: v%u.%u  Bundled: v%u.%u\n\n"
-                     "Detected: %s (%s driver)\n\n"
-                     "Update DEVS:Printers/MintPRINT now?",
-                     (unsigned)dest_ver.version, (unsigned)dest_ver.revision,
-                     (unsigned)src_ver.version, (unsigned)src_ver.revision,
-                     os_desc, variant_name);
-        } else {
-            snprintf(msg, sizeof(msg),
-                     "A newer MintPRINT driver is available.\n"
-                     "Installed: pre-versioning  Bundled: v%u.%u\n\n"
-                     "Detected: %s (%s driver)\n\n"
-                     "Update DEVS:Printers/MintPRINT now?",
-                     (unsigned)src_ver.version, (unsigned)src_ver.revision,
-                     os_desc, variant_name);
-        }
-        es.es_TextFormat = (UBYTE *)msg;
-        es.es_GadgetFormat = (UBYTE *)"Update|Later";
-
-        if (!EasyRequest(win, &es, NULL)) return;
-
-        if (mp_copy_file(src_path, MINTPRINT_DRIVER_DEST)) {
-            printf("Updated MintPRINT driver to v%u.%u in DEVS:Printers/MintPRINT\n",
-                   (unsigned)src_ver.version, (unsigned)src_ver.revision);
-            printf("Reboot (or otherwise unload the old driver segment) before printing.\n");
-
-            es.es_TextFormat = (UBYTE *)"MintPRINT driver updated.\n\nReboot before printing - the old driver segment\nalready resident in memory will not pick up this\nfile until then.";
-            es.es_GadgetFormat = (UBYTE *)"OK";
-            EasyRequest(win, &es, NULL);
-        } else {
-            es.es_TextFormat = (UBYTE *)"Could not copy the driver to DEVS:Printers/.\nCheck disk space and write access.";
-            es.es_GadgetFormat = (UBYTE *)"OK";
-            EasyRequest(win, &es, NULL);
-        }
-        return;
-    }
-
-    snprintf(msg, sizeof(msg),
-             "The MintPRINT driver is not installed in\n"
-             "DEVS:Printers/.\n\n"
-             "Detected: %s (%s driver)\n\n"
-             "Install it now?",
-             os_desc, variant_name);
-    es.es_TextFormat = (UBYTE *)msg;
-    es.es_GadgetFormat = (UBYTE *)"Install|Cancel";
-
-    if (EasyRequest(win, &es, NULL)) {
-        if (mp_copy_file(src_path, MINTPRINT_DRIVER_DEST)) {
-            printf("Installed MintPRINT driver to DEVS:Printers/MintPRINT\n");
-
-            es.es_TextFormat = (UBYTE *)"MintPRINT driver installed.\n\nOpen Printer preferences now and select\n'MintPRINT' as your printer, then save.\n\nReboot before printing - a driver segment already\nresident in memory will not pick up this file until then.";
-            es.es_GadgetFormat = (UBYTE *)"Open Printer Prefs|Later";
-            if (EasyRequest(win, &es, NULL)) {
-                mp_launch_printer_prefs();
-            }
-        } else {
-            es.es_TextFormat = (UBYTE *)"Could not copy the driver to DEVS:Printers/.\nCheck disk space and write access.";
-            es.es_GadgetFormat = (UBYTE *)"OK";
-            EasyRequest(win, &es, NULL);
-        }
-    }
-}
-
-/* ---------------------------------------------------------------------
- * LAN printer discovery (SSDP)
- *
- * Sends a single SSDP M-SEARCH multicast and collects distinct source
- * addresses that reply within a few seconds. Any AirPrint/network printer
- * that answers UPnP discovery (most consumer inkjets/lasers do, alongside
- * mDNS) shows up here as a candidate; the actual IPP capability check
- * still goes through the same query_printer_attributes() used by the
- * Query button once the user picks one from the list.
- * ------------------------------------------------------------------- */
-static void ssdp_extract_server(const char *buf, char *out, int out_size) {
-    const char *p = strstr(buf, "SERVER:");
-    if (!p) p = strstr(buf, "Server:");
-    if (!p) p = strstr(buf, "server:");
-    out[0] = '\0';
-    if (p) {
-        int i = 0;
-        p += 7;
-        while (*p == ' ') p++;
-        while (*p && *p != '\r' && *p != '\n' && i < out_size - 1) {
-            out[i++] = *p++;
-        }
-        out[i] = '\0';
-    }
-}
-
-static BOOL discovery_ip_seen(struct DiscoveredPrinter *results, int count, const char *ip) {
-    int i;
-    for (i = 0; i < count; i++) {
-        if (strcmp(results[i].ip, ip) == 0) return TRUE;
-    }
-    return FALSE;
-}
-
-static int ssdp_discover_printers(struct DiscoveredPrinter *results, int max_results) {
-    int sockfd;
-    struct sockaddr_in dest;
-    char msearch[256];
-    char *buf;
-    int count = 0;
-    int poll_num;
-    const int max_polls = 10; /* ~500ms per poll => ~5s total scan time */
-
-    if (max_results <= 0) return 0;
-
-    sockfd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (sockfd < 0) {
-        printf("Discovery: could not create UDP socket\n");
-        return 0;
-    }
-
-    memset(&dest, 0, sizeof(dest));
-    dest.sin_family = AF_INET;
-    dest.sin_port = htons(1900);
-    dest.sin_addr.s_addr = inet_addr((STRPTR)"239.255.255.250");
-
-    snprintf(msearch, sizeof(msearch),
-        "M-SEARCH * HTTP/1.1\r\n"
-        "HOST: 239.255.255.250:1900\r\n"
-        "MAN: \"ssdp:discover\"\r\n"
-        "MX: 3\r\n"
-        "ST: ssdp:all\r\n"
-        "\r\n");
-
-    if (sendto(sockfd, msearch, strlen(msearch), 0,
-               (struct sockaddr *)&dest, sizeof(dest)) < 0) {
-        printf("Discovery: SSDP send failed (no route to 239.255.255.250?)\n");
-        CloseSocket(sockfd);
-        return 0;
-    }
-
-    buf = malloc(1024);
-    if (!buf) {
-        CloseSocket(sockfd);
-        return 0;
-    }
-
-    for (poll_num = 0; poll_num < max_polls && count < max_results; poll_num++) {
-        fd_set readfds;
-        struct timeval tv;
-        long ready;
-        struct sockaddr_in from;
-        socklen_t fromlen;
-        ssize_t received;
-
-        if (window) {
-            struct IntuiMessage *imsg;
-            while ((imsg = GT_GetIMsg(window->UserPort))) {
-                GT_ReplyIMsg(imsg);
-            }
-        }
-
-        /* Bound each poll to ~500ms with WaitSelect rather than trusting
-         * SO_RCVTIMEO on a datagram socket (not every bsdsocket.library
-         * stack honours it) or a non-blocking-mode ioctl (this NDK's name
-         * for it, FNONBIO, turned out not to work either). WaitSelect is
-         * the one bsdsocket.library primitive this is built directly on. */
-        FD_ZERO(&readfds);
-        FD_SET(sockfd, &readfds);
-        tv.tv_sec = 0;
-        tv.tv_usec = 500000;
-        ready = WaitSelect(sockfd + 1, &readfds, NULL, NULL, &tv, NULL);
-        if (ready <= 0) {
-            continue; /* timeout or error this poll; try again */
-        }
-
-        fromlen = sizeof(from);
-        memset(&from, 0, sizeof(from));
-        received = recvfrom(sockfd, buf, 1023, 0, (struct sockaddr *)&from, &fromlen);
-        if (received <= 0) {
-            continue;
-        }
-        buf[received] = '\0';
-
-        {
-            char ipstr[16];
-            const unsigned char *addr_bytes = (const unsigned char *)&from.sin_addr;
-
-            /* sin_addr is already in network (big-endian) byte order, so the
-             * raw bytes are the dotted-decimal octets left to right. Formats
-             * manually rather than via inet_ntoa(), which this NDK does not
-             * declare for bsdsocket.library. */
-            snprintf(ipstr, sizeof(ipstr), "%u.%u.%u.%u",
-                     addr_bytes[0], addr_bytes[1], addr_bytes[2], addr_bytes[3]);
-
-            /* Skip loopback replies (e.g. the host's own SSDP responder
-             * echoing back through some emulated/NAT network setups) -
-             * never a real network printer. */
-            if (addr_bytes[0] == 127) {
-                continue;
-            }
-
-            if (ipstr[0] && !discovery_ip_seen(results, count, ipstr)) {
-                char server_info[64];
-                ssdp_extract_server(buf, server_info, sizeof(server_info));
-
-                strncpy(results[count].ip, ipstr, sizeof(results[count].ip) - 1);
-                results[count].ip[sizeof(results[count].ip) - 1] = '\0';
-
-                if (server_info[0]) {
-                    snprintf(results[count].label, sizeof(results[count].label),
-                             "%s (%s)", ipstr, server_info);
-                } else {
-                    snprintf(results[count].label, sizeof(results[count].label),
-                             "%s", ipstr);
-                }
-
-                printf("Discovery: found %s\n", results[count].label);
-                count++;
-            }
-        }
-    }
-
-    free(buf);
-    CloseSocket(sockfd);
-    return count;
-}
-
-/* ---------------------------------------------------------------------
- * LAN printer discovery (mDNS / Bonjour / AirPrint)
- *
- * Most current printers advertise IPP over mDNS-SD (_ipp._tcp.local),
- * not SSDP, so this is the discovery path that actually matters for
- * AirPrint-style printers. Builds a minimal DNS PTR query by hand (no
- * name compression in the query - only ever one question) with the "QU"
- * unicast-response bit set, so responders reply directly to our source
- * port instead of over multicast. That means this never needs to join
- * the 224.0.0.251 multicast group to receive replies, keeping it on the
- * same plain send/WaitSelect/recvfrom shape already proven for SSDP.
- *
- * Deliberately does not decode the DNS response payload (PTR/SRV/TXT
- * records, name-compression pointers, ...): that is real parsing work
- * with real edge cases, and getting it wrong risks the same kind of
- * lock-up/crash this file has already hit twice on this NDK. All that is
- * used from a reply is which address it came from - good enough to
- * populate the picker; the follow-up IPP query after selection is what
- * actually pulls in the printer's real details.
- * ------------------------------------------------------------------- */
-static int build_mdns_ptr_query(unsigned char *buf, int buf_size) {
-    static const unsigned char header[12] = {
-        0x00, 0x00, /* ID - unused, mDNS clients don't need to match it */
-        0x00, 0x00, /* Flags - standard query */
-        0x00, 0x01, /* QDCOUNT = 1 */
-        0x00, 0x00, /* ANCOUNT */
-        0x00, 0x00, /* NSCOUNT */
-        0x00, 0x00  /* ARCOUNT */
-    };
-    static const char *labels[] = { "_ipp", "_tcp", "local", NULL };
-    int off;
-    int i;
-
-    if (buf_size < 33) return 0;
-
-    memcpy(buf, header, sizeof(header));
-    off = sizeof(header);
-
-    for (i = 0; labels[i]; i++) {
-        int len = (int)strlen(labels[i]);
-        buf[off++] = (unsigned char)len;
-        memcpy(buf + off, labels[i], len);
-        off += len;
-    }
-    buf[off++] = 0x00; /* root label terminator */
-
-    buf[off++] = 0x00; buf[off++] = 0x0C; /* QTYPE = PTR (12) */
-    buf[off++] = 0x80; buf[off++] = 0x01; /* QCLASS = IN, QU bit set */
-
-    return off;
-}
-
-/* Appends newly-found, distinct, non-loopback responders to results[],
- * starting at index *count_io, up to max_results. Returns the new count. */
-static int mdns_discover_printers(struct DiscoveredPrinter *results, int count_io, int max_results) {
-    int sockfd;
-    struct sockaddr_in dest;
-    unsigned char query[64];
-    int query_len;
-    char *buf;
-    int count = count_io;
-    int poll_num;
-    const int max_polls = 10; /* ~500ms per poll => ~5s total scan time */
-
-    if (count >= max_results) return count;
-
-    query_len = build_mdns_ptr_query(query, sizeof(query));
-    if (query_len <= 0) {
-        printf("Discovery: could not build mDNS query\n");
-        return count;
-    }
-
-    sockfd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (sockfd < 0) {
-        printf("Discovery: could not create mDNS socket\n");
-        return count;
-    }
-
-    memset(&dest, 0, sizeof(dest));
-    dest.sin_family = AF_INET;
-    dest.sin_port = htons(5353);
-    dest.sin_addr.s_addr = inet_addr((STRPTR)"224.0.0.251");
-
-    if (sendto(sockfd, (char *)query, query_len, 0,
-               (struct sockaddr *)&dest, sizeof(dest)) < 0) {
-        printf("Discovery: mDNS send failed (no route to 224.0.0.251?)\n");
-        CloseSocket(sockfd);
-        return count;
-    }
-
-    buf = malloc(1024);
-    if (!buf) {
-        CloseSocket(sockfd);
-        return count;
-    }
-
-    for (poll_num = 0; poll_num < max_polls && count < max_results; poll_num++) {
-        fd_set readfds;
-        struct timeval tv;
-        long ready;
-        struct sockaddr_in from;
-        socklen_t fromlen;
-        ssize_t received;
-
-        if (window) {
-            struct IntuiMessage *imsg;
-            while ((imsg = GT_GetIMsg(window->UserPort))) {
-                GT_ReplyIMsg(imsg);
-            }
-        }
-
-        FD_ZERO(&readfds);
-        FD_SET(sockfd, &readfds);
-        tv.tv_sec = 0;
-        tv.tv_usec = 500000;
-        ready = WaitSelect(sockfd + 1, &readfds, NULL, NULL, &tv, NULL);
-        if (ready <= 0) {
-            continue;
-        }
-
-        fromlen = sizeof(from);
-        memset(&from, 0, sizeof(from));
-        received = recvfrom(sockfd, buf, 1023, 0, (struct sockaddr *)&from, &fromlen);
-        /* A real DNS response needs at least a 12-byte header with a
-         * non-zero answer count, and a unicast QU reply comes from the
-         * responder's own port 5353. Cheap enough sanity checks to reject
-         * unrelated UDP traffic without decoding the message itself. */
-        if (received < 12 || from.sin_port != htons(5353)) {
-            continue;
-        }
-        if (buf[6] == 0 && buf[7] == 0) {
-            continue; /* ANCOUNT == 0: not actually answering anything */
-        }
-
-        {
-            char ipstr[16];
-            const unsigned char *addr_bytes = (const unsigned char *)&from.sin_addr;
-
-            snprintf(ipstr, sizeof(ipstr), "%u.%u.%u.%u",
-                     addr_bytes[0], addr_bytes[1], addr_bytes[2], addr_bytes[3]);
-
-            if (addr_bytes[0] == 127) {
-                continue;
-            }
-
-            if (!discovery_ip_seen(results, count, ipstr)) {
-                strncpy(results[count].ip, ipstr, sizeof(results[count].ip) - 1);
-                results[count].ip[sizeof(results[count].ip) - 1] = '\0';
-                snprintf(results[count].label, sizeof(results[count].label),
-                         "%s (mDNS/IPP)", ipstr);
-
-                printf("Discovery: found %s\n", results[count].label);
-                count++;
-            }
-        }
-    }
-
-    free(buf);
-    CloseSocket(sockfd);
-    return count;
-}
-
-/* Runs both discovery mechanisms and merges the results: SSDP catches
- * printers/print servers that answer UPnP discovery, mDNS catches the
- * more common AirPrint/Bonjour-style IPP advertisement. */
-static int discover_printers_on_lan(struct DiscoveredPrinter *results, int max_results) {
-    int count;
-
-    printf("Searching LAN for printers (SSDP)...\n");
-    count = ssdp_discover_printers(results, max_results);
-
-    printf("Searching LAN for printers (mDNS)...\n");
-    count = mdns_discover_printers(results, count, max_results);
-
-    return count;
-}
-
-/* Small GadTools dialog listing discovered candidates as a cycle gadget.
- * Mirrors the main window's CreateContext/CreateGadget/OpenWindowTags
- * pattern so it reuses the same, already-proven idioms. */
-static BOOL run_discovery_selection(struct Window *parent,
-                                     struct DiscoveredPrinter *results,
-                                     int count,
-                                     char *chosen_ip,
-                                     int chosen_ip_size) {
-    struct Screen *dscreen;
-    APTR dvi;
-    struct Gadget *dglist = NULL;
-    struct Gadget *gad;
-    struct NewGadget ng;
-    struct Window *dwin;
-    STRPTR *labels;
-    BOOL picked = FALSE;
-    BOOL terminated = FALSE;
-    UWORD topborder;
-    int i;
-    ULONG selected = 0;
-
-    (void)parent;
-
-    if (count <= 0) return FALSE;
-
-    dscreen = LockPubScreen(NULL);
-    if (!dscreen) return FALSE;
-
-    dvi = GetVisualInfo(dscreen, TAG_DONE);
-    if (!dvi) {
-        UnlockPubScreen(NULL, dscreen);
-        return FALSE;
-    }
-
-    labels = AllocVec((count + 1) * sizeof(STRPTR), MEMF_CLEAR);
-    if (!labels) {
-        FreeVisualInfo(dvi);
-        UnlockPubScreen(NULL, dscreen);
-        return FALSE;
-    }
-    for (i = 0; i < count; i++) {
-        labels[i] = (STRPTR)results[i].label;
-    }
-    labels[count] = NULL;
-
-    topborder = dscreen->WBorTop + (dscreen->Font->ta_YSize + 1);
-
-    gad = CreateContext(&dglist);
-    if (!gad) {
-        FreeVec(labels);
-        FreeVisualInfo(dvi);
-        UnlockPubScreen(NULL, dscreen);
-        return FALSE;
-    }
-
-    ng.ng_TextAttr = &Topaz80;
-    ng.ng_VisualInfo = dvi;
-    ng.ng_Flags = 0;
-    ng.ng_LeftEdge = 10;
-    ng.ng_TopEdge = 10 + topborder;
-    ng.ng_Width = 410;
-    ng.ng_Height = 14;
-    ng.ng_GadgetText = (STRPTR)"Found:";
-    ng.ng_GadgetID = GAD_DISC_CYCLE;
-    gad = CreateGadget(CYCLE_KIND, gad, &ng,
-        GTCY_Labels, (ULONG)labels,
-        GTCY_Active, 0,
-        TAG_DONE);
-    if (!gad) {
-        FreeGadgets(dglist);
-        FreeVec(labels);
-        FreeVisualInfo(dvi);
-        UnlockPubScreen(NULL, dscreen);
-        return FALSE;
-    }
-
-    ng.ng_TopEdge += 26;
-    ng.ng_LeftEdge = 10;
-    ng.ng_Width = 120;
-    ng.ng_Height = 14;
-    ng.ng_GadgetText = (STRPTR)"_Use Selected";
-    ng.ng_GadgetID = GAD_DISC_USE;
-    gad = CreateGadget(BUTTON_KIND, gad, &ng,
-        GT_Underscore, '_',
-        TAG_DONE);
-    if (!gad) {
-        FreeGadgets(dglist);
-        FreeVec(labels);
-        FreeVisualInfo(dvi);
-        UnlockPubScreen(NULL, dscreen);
-        return FALSE;
-    }
-
-    ng.ng_LeftEdge = 290;
-    ng.ng_Width = 120;
-    ng.ng_GadgetText = (STRPTR)"_Cancel";
-    ng.ng_GadgetID = GAD_DISC_CANCEL;
-    gad = CreateGadget(BUTTON_KIND, gad, &ng,
-        GT_Underscore, '_',
-        TAG_DONE);
-    if (!gad) {
-        FreeGadgets(dglist);
-        FreeVec(labels);
-        FreeVisualInfo(dvi);
-        UnlockPubScreen(NULL, dscreen);
-        return FALSE;
-    }
-
-    dwin = OpenWindowTags(NULL,
-        WA_Title, (ULONG)"Select Discovered Printer",
-        WA_Gadgets, (ULONG)dglist,
-        WA_Width, 430,
-        WA_InnerHeight, 70,
-        WA_DragBar, TRUE,
-        WA_DepthGadget, TRUE,
-        WA_Activate, TRUE,
-        WA_CloseGadget, TRUE,
-        WA_SimpleRefresh, TRUE,
-        WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW | BUTTONIDCMP | CYCLEIDCMP,
-        WA_PubScreen, (ULONG)dscreen,
-        TAG_DONE);
-
-    if (!dwin) {
-        FreeGadgets(dglist);
-        FreeVec(labels);
-        FreeVisualInfo(dvi);
-        UnlockPubScreen(NULL, dscreen);
-        return FALSE;
-    }
-
-    GT_RefreshWindow(dwin, NULL);
-
-    while (!terminated) {
-        struct IntuiMessage *imsg;
-
-        Wait(1L << dwin->UserPort->mp_SigBit);
-        imsg = GT_GetIMsg(dwin->UserPort);
-        while (!terminated && imsg) {
-            struct Gadget *g = (struct Gadget *)imsg->IAddress;
-            ULONG cls = imsg->Class;
-            UWORD code = imsg->Code;
-            GT_ReplyIMsg(imsg);
-
-            if (cls == IDCMP_CLOSEWINDOW) {
-                terminated = TRUE;
-            } else if (cls == IDCMP_REFRESHWINDOW) {
-                GT_BeginRefresh(dwin);
-                GT_EndRefresh(dwin, TRUE);
-            } else if (cls == IDCMP_GADGETUP) {
-                if (g->GadgetID == GAD_DISC_CYCLE) {
-                    if ((ULONG)code < (ULONG)count)
-                        selected = (ULONG)code;
-                } else if (g->GadgetID == GAD_DISC_CANCEL) {
-                    terminated = TRUE;
-                } else if (g->GadgetID == GAD_DISC_USE) {
-                    if (selected < (ULONG)count) {
-                        strncpy(chosen_ip, results[selected].ip, chosen_ip_size - 1);
-                        chosen_ip[chosen_ip_size - 1] = '\0';
-                        picked = TRUE;
-                    }
-                    terminated = TRUE;
-                }
-            }
-            imsg = GT_GetIMsg(dwin->UserPort);
-        }
-    }
-
-    CloseWindow(dwin);
-    FreeGadgets(dglist);
-    FreeVec(labels);
-    FreeVisualInfo(dvi);
-    UnlockPubScreen(NULL, dscreen);
-
-    return picked;
-}
-
-/* Spooler management window: lists jobs the driver is currently tracking
- * (see driver_core.c's mp_job_begin()/mp_write_job_status() and the
- * MPSPOOL drawer both write into) with their live STATE and, for a failed
- * one, why - and lets the user delete a held job, retry/reprint it, or
- * print extra copies. */
-#define MP_SPOOL_LIST_MAX 32
-
-struct MPSpoolJobEntry {
-    struct Node node; /* must be first - GadTools ListView owns this list */
-    char job_path[MAX_ATTR_LEN + 48];
-    char status_path[MAX_ATTR_LEN + 56];
-    char basename[80]; /* job_path's filename alone, for the list label */
-    struct DateStamp date; /* status sidecar's fib_Date - sort key, newest first */
-    char state[16];
-    char reason[64];
-    char host[64]; /* HOST= from the .status sidecar - who this job targets */
-    int port;      /* PORT=, -1 if the sidecar has none (pre-1.3.0 job) */
-    char label[192]; /* node.ln_Name points here */
-};
-
-/* Kept static (not a stack local) so a Refresh - which redoes this scan
- * in place without recursing - never risks stack growth across repeated
- * presses. Only ever touched from the mp_spool_win_*() functions below,
- * single-threaded, one instance of the window open at a time. */
-static struct MPSpoolJobEntry mp_spool_jobs[MP_SPOOL_LIST_MAX];
-
-/* The Spooler window's entire live state, as globals rather than one
- * function's stack locals - process_window_events()'s main loop needs to
- * reach all of it between messages, since the window is non-modal: it
- * Waits on this window's UserPort signal bit alongside the main window's
- * own (see that function), so both windows keep processing input at the
- * same time instead of one blocking the other the way a nested modal
- * event loop would. g_spool_win doubling as "is the window open" (NULL
- * when it isn't) is what lets that Wait() call skip this signal bit
- * entirely while the window is closed. */
-static struct Window *g_spool_win = NULL;
-static struct Screen *g_spool_screen = NULL;
-static APTR g_spool_vi = NULL;
-static struct Gadget *g_spool_sglist = NULL;
-static struct Gadget *g_spool_job_listview = NULL;
-static struct Gadget *g_spool_delete_gadget = NULL;
-static struct Gadget *g_spool_retry_gadget = NULL;
-static struct Gadget *g_spool_copies_gadget = NULL;
-static struct List g_spool_job_list;
-static int g_spool_count = 0;
-static ULONG g_spool_selected = 0;
-static BOOL g_spool_selection_made = FALSE;
-static int g_spool_retry_unit = -1; /* -1 = not yet defaulted to current_unit_index */
-/* -1 = not yet positioned; the window is centred the first time it opens
- * and then keeps whatever LeftEdge/TopEdge it was last closed at (drags
- * included), rather than recentring itself every time it is reopened. */
-static WORD g_spool_win_left = -1;
-static WORD g_spool_win_top = -1;
-
-/* Turns the numeric (error, http_status, ipp_status) triple a job's
- * .status sidecar records (driver_core.c's mp_write_job_status(),
- * ERROR=) into the kind of short phrase a print queue normally shows for
- * "why did this fail". error is mp_ipp_print_document()'s
- * (driver/ipp_client.c) own return code, naming exactly which step
- * failed; ipp_status is only meaningful once a real IPP response came
- * back (error -15/-16 below - see that function's own rc comments).
- * IPP's response status alone can't distinguish "out of paper" from "out
- * of ink" - that lives in a separate printer-state-reasons attribute
- * this driver doesn't currently request - so 0x0504 (server-error-
- * device-error) is reported as a hardware problem in general, not a
- * specific cause; naming one precisely would be a guess this data
- * doesn't support. */
-static void mp_spool_error_reason(LONG error, LONG http_status,
-                                  UWORD ipp_status, char *out, size_t out_cap)
-{
-    const char *reason;
-
-    switch (error) {
-        case 0:   reason = "OK"; break;
-        case -2:  reason = "Could not open job file"; break;
-        case -3:  reason = "Job file is empty"; break;
-        case -7:
-        case -8:  reason = "Network unavailable"; break;
-        case -9:  reason = "Invalid printer address"; break;
-        case -10: reason = "Connection refused"; break;
-        case -18: reason = "Connection timed out"; break;
-        case -11:
-        case -13: reason = "Sending job failed (connection dropped)"; break;
-        case -12: reason = "Error reading job file"; break;
-        case -14: reason = "Printer sent an invalid response"; break;
-        case -17: reason = "Printer accepted job but never responded"; break;
-        case -15:
-            if (http_status == 401 || http_status == 403)
-                reason = "Printer refused (access denied)";
-            else if (http_status == 404)
-                reason = "Printer rejected request (wrong IPP path?)";
-            else if (http_status >= 500)
-                reason = "Printer error (HTTP)";
-            else
-                reason = "Printer rejected request (HTTP)";
-            break;
-        case -16:
-            switch (ipp_status) {
-                case 0x0507: reason = "Printer busy"; break;
-                case 0x0504:
-                    reason = "Printer hardware problem (check paper/ink)";
-                    break;
-                case 0x0506: reason = "Printer not accepting jobs"; break;
-                case 0x0508: reason = "Job canceled at printer"; break;
-                default:
-                    if (ipp_status >= 0x0500) reason = "Printer error";
-                    else if (ipp_status >= 0x0400) reason = "Printer rejected job";
-                    else reason = "Printer returned an unexpected status";
-                    break;
-            }
-            break;
-        default:  reason = "Failed"; break;
-    }
-
-    strncpy(out, reason, out_cap - 1);
-    out[out_cap - 1] = '\0';
-}
-
-/* Scans <driver_spool_buffer>MPSPOOL/ for job files this driver is
- * tracking. Each *.status sidecar names a job file (the same name minus
- * ".status") and holds its current STATE=/ERROR= - read here so this
- * window never needs any live connection to the driver's spool process,
- * and still shows a job's outcome long after that process (and the print
- * that created it) is gone. Newest first: the timestamp embedded in each
- * job's own filename is DDMMYYHHMMSS, which does not sort correctly as a
- * plain string across month/year boundaries (e.g. "010823" < "150723"
- * lexicographically despite being the later date), so this sorts by each
- * sidecar file's real fib_Date instead - a simple insertion sort, plenty
- * for the at-most MP_SPOOL_LIST_MAX (32) entries here. list is NewList()'d
- * and filled with jobs[0] through jobs[count-1] via AddTail(), in that
- * sorted order, ready for GTLV_Labels. Returns the number of jobs found;
- * 0 if the drawer doesn't exist yet, or Spooler isn't a real device. */
-static int mp_scan_spool_jobs(struct MPSpoolJobEntry *jobs, int max_jobs,
-                              struct List *list)
-{
-    char dir_path[MAX_ATTR_LEN + 16];
-    BPTR lock;
-    /* A plain stack struct, not AllocDosObject(DOS_FIB, ...): Examine()/
-     * ExNext() have taken a caller-supplied struct FileInfoBlock * since
-     * Kickstart 1.x, and a normal C local already satisfies its longword
-     * alignment - one fewer NDK symbol (DOS_FIB, a V36+ addition) to
-     * depend on. */
-    struct FileInfoBlock fib;
-    int count = 0;
-    int i;
-
-    NewList(list);
-    if (!mp_spool_keep_available()) return 0;
-
-    snprintf(dir_path, sizeof(dir_path), "%sMPSPOOL", driver_spool_buffer);
-    lock = Lock((CONST_STRPTR)dir_path, ACCESS_READ);
-    if (!lock) return 0;
-
-    if (Examine(lock, &fib)) {
-        while (count < max_jobs && ExNext(lock, &fib)) {
-            char *name = (char *)fib.fib_FileName;
-            size_t len = strlen(name);
-
-            /* fib_DirEntryType < 0 -> plain file, not a drawer. */
-            if (fib.fib_DirEntryType < 0 && len > 7 &&
-                strcmp(name + len - 7, ".status") == 0) {
-                BPTR sfh;
-                size_t blen = (len - 7 < sizeof(jobs[count].basename) - 1)
-                    ? len - 7 : sizeof(jobs[count].basename) - 1;
-
-                memcpy(jobs[count].basename, name, blen);
-                jobs[count].basename[blen] = '\0';
-                jobs[count].date = fib.fib_Date;
-
-                snprintf(jobs[count].status_path,
-                         sizeof(jobs[count].status_path),
-                         "%s/%s", dir_path, name);
-                snprintf(jobs[count].job_path, sizeof(jobs[count].job_path),
-                         "%s/%s", dir_path, jobs[count].basename);
-
-                strcpy(jobs[count].state, "UNKNOWN");
-                jobs[count].reason[0] = '\0';
-                jobs[count].host[0] = '\0';
-                jobs[count].port = -1;
-                sfh = Open((CONST_STRPTR)jobs[count].status_path,
-                          MODE_OLDFILE);
-                if (sfh) {
-                    char status[768];
-                    LONG got = Read(sfh, status, sizeof(status) - 1);
-                    char *p;
-
-                    /* Some AmigaDOS/NDK combinations are fussy about the
-                     * signed char buffer passed to FGets(). Read the small
-                     * sidecar in one bounded operation instead; this also
-                     * handles older sidecars that contain only STATE/ERROR.
-                     */
-                    if (got > 0) {
-                        status[got] = '\0';
-                        p = strstr(status, "STATE=");
-                        if (p) {
-                            char *eol = strchr(p, '\n');
-                            size_t n = eol ? (size_t)(eol - (p + 6))
-                                           : strlen(p + 6);
-                            if (n >= sizeof(jobs[count].state))
-                                n = sizeof(jobs[count].state) - 1;
-                            memcpy(jobs[count].state, p + 6, n);
-                            jobs[count].state[n] = '\0';
-                            trim_config_line(jobs[count].state);
-                        }
-                        p = strstr(status, "HOST=");
-                        if (p) {
-                            char *eol = strchr(p, '\n');
-                            size_t n = eol ? (size_t)(eol - (p + 5))
-                                           : strlen(p + 5);
-                            if (n >= sizeof(jobs[count].host))
-                                n = sizeof(jobs[count].host) - 1;
-                            memcpy(jobs[count].host, p + 5, n);
-                            jobs[count].host[n] = '\0';
-                            trim_config_line(jobs[count].host);
-                        }
-                        p = strstr(status, "PORT=");
-                        if (p) jobs[count].port = atoi(p + 5);
-                        p = strstr(status, "ERROR=");
-                        if (p) {
-                            long e = 0, h = 0;
-                            int ipp = 0;
-                            if (sscanf(p + 6, "%ld %ld %d", &e, &h, &ipp) == 3)
-                                mp_spool_error_reason(e, h, (UWORD)ipp,
-                                    jobs[count].reason,
-                                    sizeof(jobs[count].reason));
-                        }
-                    }
-                    Close(sfh);
-                }
-
-                ++count;
-            }
-        }
-    }
-
-    UnLock(lock);
-
-    /* Newest first, by fib_Date (ds_Days, then ds_Minute, then ds_Tick -
-     * each a plain increasing count, so comparing them in that order is
-     * a correct chronological compare). */
-    for (i = 1; i < count; ++i) {
-        struct MPSpoolJobEntry tmp = jobs[i];
-        int j = i - 1;
-
-        while (j >= 0 &&
-               (jobs[j].date.ds_Days < tmp.date.ds_Days ||
-                (jobs[j].date.ds_Days == tmp.date.ds_Days &&
-                 (jobs[j].date.ds_Minute < tmp.date.ds_Minute ||
-                  (jobs[j].date.ds_Minute == tmp.date.ds_Minute &&
-                   jobs[j].date.ds_Tick < tmp.date.ds_Tick))))) {
-            jobs[j + 1] = jobs[j];
-            --j;
-        }
-        jobs[j + 1] = tmp;
-    }
-
-    for (i = 0; i < count; ++i) {
-        /* "who": the recorded destination for a tracked job, or a dash
-         * for one spooled before HOST=/PORT= sidecars existed. */
-        char who[24];
-
-        if (jobs[i].host[0])
-            snprintf(who, sizeof(who), "%s:%d", jobs[i].host,
-                     jobs[i].port > 0 ? jobs[i].port : 80);
-        else
-            strcpy(who, "-");
-
-        /* Column widths are a compromise: none of this fits comfortably
-         * on an Amiga screen without truncating something, and the
-         * reason (state names why a job failed - "connection refused",
-         * "printer hardware problem", ...) matters more moment-to-moment
-         * than the exact job name or destination, both already visible
-         * elsewhere (job name in Delete/Retry's own file path; "who" is
-         * exactly what the "Retry to:" picker is about to resubmit
-         * against). Selecting a row also puts the state and full,
-         * untruncated reason in the window title - see
-         * mp_spool_win_process()'s GAD_SPOOL_JOB_LIST handling - so
-         * nothing here is ever permanently unreadable, just abbreviated
-         * for the at-a-glance list. */
-        if (jobs[i].reason[0])
-            snprintf(jobs[i].label, sizeof(jobs[i].label),
-                     "%-20.20s %-10.10s %-15.15s %s", jobs[i].basename,
-                     jobs[i].state, who, jobs[i].reason);
-        else
-            snprintf(jobs[i].label, sizeof(jobs[i].label),
-                     "%-20.20s %-10.10s %s", jobs[i].basename,
-                     jobs[i].state, who);
-
-        jobs[i].node.ln_Name = jobs[i].label;
-        AddTail(list, &jobs[i].node);
-    }
-
-    return count;
-}
-
-static CONST_STRPTR mp_spool_document_format_for_ext(const char *path)
-{
-    size_t len = strlen(path);
-
-    if (len > 4 && strcmp(path + len - 4, ".jpg") == 0)
-        return (CONST_STRPTR)"image/jpeg";
-    if (len > 4 && strcmp(path + len - 4, ".pwg") == 0)
-        return (CONST_STRPTR)"image/pwg-raster";
-    if (len > 4 && strcmp(path + len - 4, ".pdf") == 0)
-        return (CONST_STRPTR)"application/pdf";
-    if (len > 3 && strcmp(path + len - 3, ".ps") == 0)
-        return (CONST_STRPTR)"application/postscript";
-    if (len > 4 && strcmp(path + len - 4, ".urf") == 0)
-        return (CONST_STRPTR)"image/urf";
-    return (CONST_STRPTR)"application/octet-stream";
-}
-
-/* A job is actionable only after the driver has closed the file and reached
- * a terminal state. Allowing Retry/Delete while RENDERING or SUBMITTING can
- * race the driver and either submit a truncated file or remove its live
- * output underneath it. */
-static BOOL mp_spool_job_actionable(const struct MPSpoolJobEntry *job)
-{
-    if (!job) return FALSE;
-    return strcmp(job->state, "DONE") == 0 ||
-           strcmp(job->state, "FAILED") == 0;
-}
-
-static void mp_spool_update_action_buttons(struct Window *win)
-{
-    BOOL enabled = g_spool_selection_made &&
-                   g_spool_selected < (ULONG)g_spool_count &&
-                   mp_spool_job_actionable(
-                       &mp_spool_jobs[g_spool_selected]);
-    if (!win) return;
-    GT_SetGadgetAttrs(g_spool_delete_gadget, win, NULL,
-                      GA_Disabled, (ULONG)(enabled ? FALSE : TRUE), TAG_DONE);
-    GT_SetGadgetAttrs(g_spool_retry_gadget, win, NULL,
-                      GA_Disabled, (ULONG)(enabled ? FALSE : TRUE), TAG_DONE);
-    GT_SetGadgetAttrs(g_spool_copies_gadget, win, NULL,
-                      GA_Disabled, (ULONG)(enabled ? FALSE : TRUE), TAG_DONE);
-}
-
-/* Reads HOST=/PORT=/PATH= straight out of a saved Unit%d file, without
- * touching any of the live GUI/driver-config globals (ip_buffer,
- * driver_path_buffer, ...) that reload_current_unit() would disturb - so
- * the Spooler window's Unit picker can target a specific saved profile
- * regardless of which Unit the main window happens to have loaded right
- * now. Returns TRUE only if the file existed and had a non-empty HOST=. */
-static BOOL mp_load_unit_endpoint(int idx, char *host, size_t host_cap,
-                                  int *port, char *path, size_t path_cap)
-{
-    BPTR file;
-    char env_path[64];
-    char envarc_path[64];
-    char line[192];
-    BOOL found = FALSE;
-
-    host[0] = '\0';
-    *port = 80;
-    strncpy(path, "/ipp/print", path_cap - 1);
-    path[path_cap - 1] = '\0';
-
-    unit_config_path(idx, FALSE, env_path, sizeof(env_path));
-    unit_config_path(idx, TRUE, envarc_path, sizeof(envarc_path));
-
-    file = Open((CONST_STRPTR)env_path, MODE_OLDFILE);
-    if (!file)
-        file = Open((CONST_STRPTR)envarc_path, MODE_OLDFILE);
-    if (!file)
-        return FALSE;
-
-    while (FGets(file, line, sizeof(line))) {
-        trim_config_line(line);
-        if (strncmp(line, "HOST=", 5) == 0) {
-            strncpy(host, line + 5, host_cap - 1);
-            host[host_cap - 1] = '\0';
-            found = host[0] != '\0';
-        } else if (strncmp(line, "PORT=", 5) == 0) {
-            int p = atoi(line + 5);
-            if (p >= 1 && p <= 65535) *port = p;
-        } else if (strncmp(line, "PATH=", 5) == 0 && line[5] == '/') {
-            strncpy(path, line + 5, path_cap - 1);
-            path[path_cap - 1] = '\0';
-        }
-    }
-    Close(file);
-    return found;
-}
-
-/* Resubmits an already-rendered, retained job file over IPP - used for
- * Retry (a held, failed job), Reprint (a successful one sent again), and
- * each pass of multi-copy printing. unit_index selects which saved Unit's
- * HOST/PORT/PATH to send it to (the Spooler window's Unit picker - lets a
- * job be reassigned to a different printer than the one it originally
- * failed against); if that Unit has no saved HOST=, this falls back to
- * whatever the main window currently has loaded, the previous behaviour.
- * Either way, only the endpoint comes from today's settings - the
- * retained file's own content already reflects whichever job-template
- * options (media, colour, quality, ...) were live when it was first
- * rendered, so resending it with today's attributes layered on top would
- * be misleading; empty attributes are the same "nothing extra" no-op
- * mp_ipp_print_document() already treats them as, see that function's own
- * comment in driver/ipp_client.c. Updates the job's own .status sidecar
- * with the outcome and the endpoint actually used, the same
- * STATE=/HOST=/PORT=/ERROR= format the driver itself writes, so a
- * following Refresh shows it. Returns TRUE on success. */
-static BOOL mp_spool_retry_job(struct MPSpoolJobEntry *job, int unit_index)
-{
-    struct MPConfig cfg;
-    struct MPIPPResult result;
-    CONST_STRPTR document_format;
-    char host[64];
-    char path[MAX_ATTR_LEN];
-    int port = 80;
-    LONG rc;
-    BPTR sfh;
-
-    memset(&cfg, 0, sizeof(cfg));
-
-    if (!mp_load_unit_endpoint(unit_index, host, sizeof(host), &port,
-                               path, sizeof(path)) || !host[0]) {
-        int fallback_port = -1;
-        if (!parse_ip_and_port(ip_buffer, host, sizeof(host),
-                               &fallback_port) || !host[0])
-            return FALSE;
-        port = (fallback_port > 0 && fallback_port <= 65535)
-                   ? fallback_port : 80;
-        strncpy(path, driver_path_buffer[0] == '/' ? driver_path_buffer
-                                                     : "/ipp/print",
-               sizeof(path) - 1);
-        path[sizeof(path) - 1] = '\0';
-    }
-
-    strncpy(cfg.host, host, sizeof(cfg.host) - 1);
-    cfg.port = (UWORD)port;
-    strncpy(cfg.path, path, sizeof(cfg.path) - 1);
-
-    document_format = mp_spool_document_format_for_ext(job->job_path);
-
-    result.error = -1;
-    result.http_status = 0;
-    result.ipp_status = 0xffff;
-    result.document_bytes = 0;
-    rc = mp_ipp_print_document(&cfg, (CONST_STRPTR)job->job_path,
-                               document_format, &result);
-
-    sfh = Open((CONST_STRPTR)job->status_path, MODE_NEWFILE);
-    if (sfh) {
-        char buf[96];
-        int n = snprintf(buf, sizeof(buf), "STATE=%s\n",
-                         rc == 0 ? "DONE" : "FAILED");
-        Write(sfh, buf, n);
-        n = snprintf(buf, sizeof(buf), "HOST=%s\n", cfg.host);
-        Write(sfh, buf, n);
-        n = snprintf(buf, sizeof(buf), "PORT=%d\n", (int)cfg.port);
-        Write(sfh, buf, n);
-        if (rc != 0) {
-            n = snprintf(buf, sizeof(buf), "ERROR=%ld %ld %d\n",
-                        (long)result.error, (long)result.http_status,
-                        (int)result.ipp_status);
-            Write(sfh, buf, n);
-        }
-        Close(sfh);
-    }
-
-    return rc == 0;
-}
-
-/* Small OK/Cancel dialog asking how many copies to print - see
- * GAD_SPOOL_COPIES in mp_spool_win_process() below, which resubmits the
- * selected job that many times (mp_spool_retry_job() per copy) rather
- * than relying on the IPP copies Job Template attribute, since not every
- * printer this driver targets is known to honour it - see the project's
- * own multi-copy design discussion. Returns TRUE if OK was pressed, with
- * *out_copies set to 1-99; FALSE (out_copies untouched past its initial
- * 1) on Cancel or any setup failure. */
-static BOOL run_copies_dialog(struct Window *parent, int *out_copies)
-{
-    struct Screen *cscreen;
-    APTR cvi;
-    struct Gadget *cglist = NULL;
-    struct Gadget *gad;
-    struct Gadget *copies_field;
-    struct NewGadget ng;
-    struct Window *cwin;
-    static char copies_buffer[8];
-    BOOL confirmed = FALSE;
-    BOOL terminated = FALSE;
-    UWORD topborder;
-
-    (void)parent;
-    *out_copies = 1;
-    strcpy(copies_buffer, "1");
-
-    cscreen = LockPubScreen(NULL);
-    if (!cscreen) return FALSE;
-    cvi = GetVisualInfo(cscreen, TAG_DONE);
-    if (!cvi) {
-        UnlockPubScreen(NULL, cscreen);
-        return FALSE;
-    }
-
-    topborder = cscreen->WBorTop + (cscreen->Font->ta_YSize + 1);
-
-    gad = CreateContext(&cglist);
-    if (!gad) {
-        FreeVisualInfo(cvi);
-        UnlockPubScreen(NULL, cscreen);
-        return FALSE;
-    }
-
-    ng.ng_TextAttr = &Topaz80;
-    ng.ng_VisualInfo = cvi;
-    ng.ng_Flags = 0;
-    ng.ng_LeftEdge = 10;
-    ng.ng_TopEdge = 10 + topborder;
-    ng.ng_Width = 100;
-    ng.ng_Height = 14;
-    ng.ng_GadgetText = (STRPTR)"Copies:";
-    ng.ng_GadgetID = GAD_SPOOL_COPIES_FIELD;
-    gad = CreateGadget(STRING_KIND, gad, &ng,
-        GTST_String, (ULONG)copies_buffer,
-        GTST_MaxChars, sizeof(copies_buffer) - 1,
-        GA_Immediate, TRUE,
-        TAG_DONE);
-    if (!gad) {
-        FreeGadgets(cglist);
-        FreeVisualInfo(cvi);
-        UnlockPubScreen(NULL, cscreen);
-        return FALSE;
-    }
-    copies_field = gad;
-
-    ng.ng_TopEdge += 26;
-    ng.ng_LeftEdge = 10;
-    ng.ng_Width = 90;
-    ng.ng_GadgetText = (STRPTR)"_OK";
-    ng.ng_GadgetID = GAD_SPOOL_COPIES_OK;
-    gad = CreateGadget(BUTTON_KIND, gad, &ng, GT_Underscore, '_', TAG_DONE);
-    if (!gad) {
-        FreeGadgets(cglist);
-        FreeVisualInfo(cvi);
-        UnlockPubScreen(NULL, cscreen);
-        return FALSE;
-    }
-
-    ng.ng_LeftEdge = 120;
-    ng.ng_GadgetText = (STRPTR)"_Cancel";
-    ng.ng_GadgetID = GAD_SPOOL_COPIES_CANCEL;
-    gad = CreateGadget(BUTTON_KIND, gad, &ng, GT_Underscore, '_', TAG_DONE);
-    if (!gad) {
-        FreeGadgets(cglist);
-        FreeVisualInfo(cvi);
-        UnlockPubScreen(NULL, cscreen);
-        return FALSE;
-    }
-
-    cwin = OpenWindowTags(NULL,
-        WA_Title, (ULONG)"Print Copies",
-        WA_Gadgets, (ULONG)cglist,
-        WA_Width, 230,
-        WA_InnerHeight, 70,
-        WA_DragBar, TRUE,
-        WA_DepthGadget, TRUE,
-        WA_Activate, TRUE,
-        WA_CloseGadget, TRUE,
-        WA_SimpleRefresh, TRUE,
-        WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW | BUTTONIDCMP | STRINGIDCMP,
-        WA_PubScreen, (ULONG)cscreen,
-        TAG_DONE);
-    if (!cwin) {
-        FreeGadgets(cglist);
-        FreeVisualInfo(cvi);
-        UnlockPubScreen(NULL, cscreen);
-        return FALSE;
-    }
-
-    GT_RefreshWindow(cwin, NULL);
-
-    while (!terminated) {
-        struct IntuiMessage *imsg;
-
-        Wait(1L << cwin->UserPort->mp_SigBit);
-        imsg = GT_GetIMsg(cwin->UserPort);
-        while (!terminated && imsg) {
-            struct Gadget *g = (struct Gadget *)imsg->IAddress;
-            ULONG cls = imsg->Class;
-            GT_ReplyIMsg(imsg);
-
-            if (cls == IDCMP_CLOSEWINDOW) {
-                terminated = TRUE;
-            } else if (cls == IDCMP_REFRESHWINDOW) {
-                GT_BeginRefresh(cwin);
-                GT_EndRefresh(cwin, TRUE);
-            } else if (cls == IDCMP_GADGETUP) {
-                if (g->GadgetID == GAD_SPOOL_COPIES_CANCEL) {
-                    terminated = TRUE;
-                } else if (g->GadgetID == GAD_SPOOL_COPIES_OK) {
-                    char *value = mp_string_gadget_value(copies_field);
-                    int n = value ? atoi(value) : 1;
-                    if (n < 1) n = 1;
-                    if (n > 99) n = 99;
-                    *out_copies = n;
-                    confirmed = TRUE;
-                    terminated = TRUE;
-                }
-            }
-            imsg = GT_GetIMsg(cwin->UserPort);
-        }
-    }
-
-    CloseWindow(cwin);
-    FreeGadgets(cglist);
-    FreeVisualInfo(cvi);
-    UnlockPubScreen(NULL, cscreen);
-    return confirmed;
-}
-
-/* Rescans MPSPOOL and swaps the results into the already-open Spooler
- * window's listview in place - the window itself is never closed. Follows
- * MintAMP's RadioRefreshResults(): detach the gadget from its current
- * label list first (GTLV_Labels/GTLV_Selected set to ~0 tells GadTools to
- * let go of the old struct List's nodes) before touching that struct
- * List's contents, then rebuild it and reattach. Mutating a live
- * LISTVIEW_KIND's list while the gadget still points at it is exactly the
- * kind of thing that produced this window's earlier "selects then
- * deselects itself" symptom - detaching first is what makes the swap
- * safe. *count/*selected/*selection_made are reset the same way a fresh
- * open would: a rescan can renumber, add, or remove rows, so whatever was
- * selected before no longer means anything. Also resyncs
- * Delete/Retry/Copies' enabled state to whether the list has anything in
- * it now, and clears any "select a job first"/"Retrying..." title text
- * left over from whichever action triggered this refresh. */
-static void mp_spool_refresh_list_live(struct Window *swin,
-                                       struct Gadget *job_listview,
-                                       struct Gadget *delete_gadget,
-                                       struct Gadget *retry_gadget,
-                                       struct Gadget *copies_gadget,
-                                       struct List *job_list,
-                                       int *count, ULONG *selected,
-                                       BOOL *selection_made)
-{
-    BOOL have_selection;
-
-    GT_SetGadgetAttrs(job_listview, swin, NULL,
-                      GTLV_Labels, (ULONG)~0,
-                      GTLV_Selected, (ULONG)~0,
-                      TAG_DONE);
-
-    *count = mp_scan_spool_jobs(mp_spool_jobs, MP_SPOOL_LIST_MAX, job_list);
-    *selected = 0;
-    *selection_made = FALSE;
-    have_selection = *count > 0;
-
-    GT_SetGadgetAttrs(job_listview, swin, NULL,
-                      GTLV_Labels, (ULONG)job_list,
-                      GTLV_Selected, (ULONG)~0,
-                      GA_Disabled, (ULONG)(have_selection ? FALSE : TRUE),
-                      TAG_DONE);
-    /* Nothing is selected after a rescan. Keep the action buttons disabled
-     * until the user selects a terminal (DONE/FAILED) job. */
-    (void)delete_gadget;
-    (void)retry_gadget;
-    (void)copies_gadget;
-    mp_spool_update_action_buttons(swin);
-    SetWindowTitles(swin, (STRPTR)"Spooler Management", (STRPTR)~0);
-}
-
-/* Closes the Spooler window (if open) and releases everything opening it
- * took - screen lock, visual info, gadget list - leaving g_spool_win NULL
- * so process_window_events()'s Wait() stops listening on its signal bit.
- * Records LeftEdge/TopEdge first so the next mp_spool_win_open() reopens
- * in the same place rather than recentring. */
-static void mp_spool_win_close(void)
-{
-    if (!g_spool_win) return;
-
-    g_spool_win_left = g_spool_win->LeftEdge;
-    g_spool_win_top = g_spool_win->TopEdge;
-    CloseWindow(g_spool_win);
-    g_spool_win = NULL;
-
-    FreeGadgets(g_spool_sglist);
-    g_spool_sglist = NULL;
-    g_spool_job_listview = NULL;
-    g_spool_delete_gadget = NULL;
-    g_spool_retry_gadget = NULL;
-    g_spool_copies_gadget = NULL;
-
-    FreeVisualInfo(g_spool_vi);
-    g_spool_vi = NULL;
-    UnlockPubScreen(NULL, g_spool_screen);
-    g_spool_screen = NULL;
-}
-
-/* Opens the Spooler window, or - if one is already open - just brings the
- * existing one to the front instead of opening a second instance sharing
- * the same g_spool_*() globals underneath it. Non-modal: unlike the
- * discovery-selection and Copies dialogs, this does not run its own
- * IDCMP loop. It returns immediately after opening, and
- * process_window_events()'s own main-window loop below folds this
- * window's UserPort signal bit into the same Wait() call as the main
- * window's, calling mp_spool_win_process() whenever it fires - the same
- * technique already used there for test_print_job's async completion.
- * That is what lets both windows accept input at the same time instead
- * of one blocking the other the way a nested modal loop would. */
-static void mp_spool_win_open(struct Window *parent)
-{
-    struct Gadget *sglist = NULL;
-    struct Gadget *gad;
-    struct NewGadget ng;
-    UWORD topborder;
-    BOOL have_selection;
-
-    (void)parent;
-
-    if (g_spool_win) {
-        WindowToFront(g_spool_win);
-        ActivateWindow(g_spool_win);
-        return;
-    }
-
-    g_spool_screen = LockPubScreen(NULL);
-    if (!g_spool_screen) return;
-
-    g_spool_vi = GetVisualInfo(g_spool_screen, TAG_DONE);
-    if (!g_spool_vi) {
-        UnlockPubScreen(NULL, g_spool_screen);
-        g_spool_screen = NULL;
-        return;
-    }
-
-    topborder = g_spool_screen->WBorTop +
-                (g_spool_screen->Font->ta_YSize + 1);
-
-    /* Centred the first time this ever opens; every later open reuses
-     * wherever it was last closed (drags included) instead of recentring. */
-    if (g_spool_win_left < 0) {
-        g_spool_win_left = (g_spool_screen->Width > 620)
-                                ? (g_spool_screen->Width - 620) / 2 : 0;
-        g_spool_win_top = (g_spool_screen->Height > 220 + topborder)
-                               ? (g_spool_screen->Height - 220) / 2
-                               : topborder;
-    }
-
-    /* Which saved Unit a Retry/Copies resubmission targets - defaults to
-     * whatever the main window currently has active the first time this
-     * opens, but the Unit cycle gadget below lets it be reassigned to any
-     * other saved printer profile, and that choice (like the window's
-     * position) is remembered across closing and reopening this window. */
-    if (g_spool_retry_unit < 0) {
-        g_spool_retry_unit = current_unit_index;
-        if (g_spool_retry_unit < 0) g_spool_retry_unit = 0;
-        if (g_spool_retry_unit >= MAX_UNITS)
-            g_spool_retry_unit = MAX_UNITS - 1;
-    }
-
-    g_spool_count = mp_scan_spool_jobs(mp_spool_jobs, MP_SPOOL_LIST_MAX,
-                                       &g_spool_job_list);
-    g_spool_selected = 0;
-    g_spool_selection_made = FALSE;
-    have_selection = g_spool_count > 0;
-
-    gad = CreateContext(&sglist);
-    if (!gad) {
-        FreeVisualInfo(g_spool_vi); g_spool_vi = NULL;
-        UnlockPubScreen(NULL, g_spool_screen); g_spool_screen = NULL;
-        return;
-    }
-
-    /* A real scrolling multi-row list (GadTools LISTVIEW_KIND), not
-     * the single-entry-at-a-time CYCLE_KIND browsing gadget the
-     * discovery dialog uses - every tracked job and its status is
-     * visible at once, the way MintAMP/MintVID-style list windows
-     * show theirs. */
-    ng.ng_TextAttr = &Topaz80;
-    ng.ng_VisualInfo = g_spool_vi;
-    ng.ng_Flags = 0;
-    ng.ng_LeftEdge = 10;
-    ng.ng_TopEdge = 10 + topborder;
-    ng.ng_Width = 600;
-    ng.ng_Height = 150;
-    ng.ng_GadgetText = NULL;
-    ng.ng_GadgetID = GAD_SPOOL_JOB_LIST;
-    /* No GTLV_ReadOnly here: that attribute, despite its name, does
-     * not mean "not editable" (a plain text listview like this one
-     * was never editable in the first place) - it means "the user
-     * cannot select an entry at all", which is exactly why rows
-     * couldn't be clicked. Selectable-but-not-editable is simply the
-     * GadTools default with no tag needed. */
-    /* GTLV_Selected starts at ~0 (no row pre-highlighted), the same
-     * sentinel MintAMP's working radio-results listview uses - not 0,
-     * which pre-selects row 0 and can confuse the "did my click do
-     * anything" read on the very first paint. GTLV_ShowSelected is
-     * included too, matching that same gadget, even though this list
-     * has no companion display gadget to copy the selection into. */
-    gad = CreateGadget(LISTVIEW_KIND, gad, &ng,
-        GTLV_Labels, (ULONG)&g_spool_job_list,
-        GTLV_Selected, (ULONG)~0,
-        GTLV_ShowSelected, (ULONG)NULL,
-        GA_Disabled, (ULONG)(have_selection ? FALSE : TRUE),
-        TAG_DONE);
-    if (!gad) {
-        FreeGadgets(sglist);
-        FreeVisualInfo(g_spool_vi); g_spool_vi = NULL;
-        UnlockPubScreen(NULL, g_spool_screen); g_spool_screen = NULL;
-        return;
-    }
-    g_spool_job_listview = gad;
-
-    ng.ng_TopEdge += 162;
-    ng.ng_LeftEdge = 10;
-    ng.ng_Width = 100;
-    ng.ng_Height = 14;
-    ng.ng_GadgetText = (STRPTR)"_Refresh";
-    ng.ng_GadgetID = GAD_SPOOL_REFRESH;
-    gad = CreateGadget(BUTTON_KIND, gad, &ng, GT_Underscore, '_', TAG_DONE);
-    if (!gad) goto fail;
-
-    ng.ng_LeftEdge = 120;
-    ng.ng_GadgetText = (STRPTR)"_Delete";
-    ng.ng_GadgetID = GAD_SPOOL_DELETE;
-    gad = CreateGadget(BUTTON_KIND, gad, &ng,
-        GT_Underscore, '_', GA_Disabled, (ULONG)(have_selection ? FALSE : TRUE),
-        TAG_DONE);
-    if (!gad) goto fail;
-    g_spool_delete_gadget = gad;
-
-    ng.ng_LeftEdge = 230;
-    ng.ng_GadgetText = (STRPTR)"_Retry";
-    ng.ng_GadgetID = GAD_SPOOL_RETRY;
-    gad = CreateGadget(BUTTON_KIND, gad, &ng,
-        GT_Underscore, '_', GA_Disabled, (ULONG)(have_selection ? FALSE : TRUE),
-        TAG_DONE);
-    if (!gad) goto fail;
-    g_spool_retry_gadget = gad;
-
-    ng.ng_LeftEdge = 340;
-    ng.ng_Width = 110;
-    ng.ng_GadgetText = (STRPTR)"_Copies...";
-    ng.ng_GadgetID = GAD_SPOOL_COPIES;
-    gad = CreateGadget(BUTTON_KIND, gad, &ng,
-        GT_Underscore, '_', GA_Disabled, (ULONG)(have_selection ? FALSE : TRUE),
-        TAG_DONE);
-    if (!gad) goto fail;
-    g_spool_copies_gadget = gad;
-
-    ng.ng_LeftEdge = 460;
-    ng.ng_Width = 90;
-    ng.ng_GadgetText = (STRPTR)"_Close";
-    ng.ng_GadgetID = GAD_SPOOL_CLOSE;
-    gad = CreateGadget(BUTTON_KIND, gad, &ng, GT_Underscore, '_', TAG_DONE);
-    if (!gad) goto fail;
-
-    /* Which printer a Retry/Copies resubmission goes to - defaults to
-     * the main window's active Unit, reassignable to any other saved
-     * Unit profile right here without having to close this window,
-     * switch it in the main window, and reopen. Purely a resubmission
-     * target: it does not change which Unit a job's "assigned to"
-     * host:port column shows - that always reflects where the job
-     * actually went (or will go, once retried against this choice). */
-    /* PLACETEXT_LEFT draws the label to the left of ng_LeftEdge, not
-     * inside it - the same off-window trap the "Keep Jobs (HDD)"
-     * checkbox above hit at LeftEdge=10 (see its own comment). Leaving
-     * room here by starting the box itself at LeftEdge=90 instead. */
-    ng.ng_TopEdge += 22;
-    ng.ng_LeftEdge = 90;
-    ng.ng_Width = 520;
-    ng.ng_GadgetText = (STRPTR)"Retry to:";
-    ng.ng_GadgetID = GAD_SPOOL_UNIT;
-    ng.ng_Flags = PLACETEXT_LEFT;
-    gad = CreateGadget(CYCLE_KIND, gad, &ng,
-        GTCY_Labels, (ULONG)unit_dropdown_labels,
-        GTCY_Active, (ULONG)g_spool_retry_unit,
-        TAG_DONE);
-    if (!gad) goto fail;
-
-    /* Gadgets are attached after OpenWindowTags via AddGList/RefreshGList,
-     * not the WA_Gadgets tag - the same sequence MintAMP's working
-     * listview windows use. WA_Gadgets attaches the list at open time
-     * too in principle, but this is the pattern proven to leave a
-     * GadTools LISTVIEW_KIND actually clickable on real hardware. */
-    g_spool_win = OpenWindowTags(NULL,
-        WA_Title, (ULONG)"Spooler Management",
-        WA_Left, (ULONG)g_spool_win_left,
-        WA_Top, (ULONG)g_spool_win_top,
-        WA_Width, 620,
-        WA_InnerHeight, 220,
-        WA_DragBar, TRUE,
-        WA_DepthGadget, TRUE,
-        WA_Activate, TRUE,
-        WA_CloseGadget, TRUE,
-        WA_SimpleRefresh, TRUE,
-        WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW | BUTTONIDCMP | LISTVIEWIDCMP,
-        WA_PubScreen, (ULONG)g_spool_screen,
-        TAG_DONE);
-    if (!g_spool_win) goto fail;
-
-    g_spool_sglist = sglist;
-    AddGList(g_spool_win, sglist, (UWORD)-1, -1, NULL);
-    RefreshGList(sglist, g_spool_win, NULL, -1);
-    GT_RefreshWindow(g_spool_win, NULL);
-    return;
-
-fail:
-    FreeGadgets(sglist);
-    FreeVisualInfo(g_spool_vi); g_spool_vi = NULL;
-    UnlockPubScreen(NULL, g_spool_screen); g_spool_screen = NULL;
-    g_spool_job_listview = NULL;
-    g_spool_delete_gadget = NULL;
-    g_spool_retry_gadget = NULL;
-    g_spool_copies_gadget = NULL;
-}
-
-/* Drains and dispatches every IntuiMessage currently queued on the
- * Spooler window's port - called from process_window_events()'s main
- * loop whenever that window's signal bit comes back from Wait(), the
- * same way test_print_job's completion port is handled there. swin is
- * captured up front and used for the whole drain even if a Close request
- * is seen partway through: every message GadTools hands back must be
- * GT_ReplyIMsg()'d before mp_spool_win_close() calls CloseWindow(),
- * including ones still queued from a rapid double-click on Retry/
- * Copies/Delete that arrived while the first click's (possibly blocking,
- * network-bound) handler was still running - so this keeps draining and
- * replying right up to the end, it just stops acting on anything once a
- * close was requested, which is what stops a queued second Retry click
- * from firing a second resubmission behind the first one's back. */
-static void mp_spool_win_process(void)
-{
-    struct Window *swin = g_spool_win;
-    struct IntuiMessage *imsg;
-    BOOL want_close = FALSE;
-
-    if (!swin) return;
-
-    imsg = GT_GetIMsg(swin->UserPort);
-    while (imsg) {
-        struct Gadget *g = (struct Gadget *)imsg->IAddress;
-        ULONG cls = imsg->Class;
-        UWORD code = imsg->Code;
-        GT_ReplyIMsg(imsg);
-
-        if (want_close) {
-            imsg = GT_GetIMsg(swin->UserPort);
-            continue;
-        }
-
-        if (cls == IDCMP_CLOSEWINDOW) {
-            want_close = TRUE;
-        } else if (cls == IDCMP_REFRESHWINDOW) {
-            GT_BeginRefresh(swin);
-            GT_EndRefresh(swin, TRUE);
-        } else if (cls == IDCMP_GADGETUP) {
-            if (g->GadgetID == GAD_SPOOL_JOB_LIST) {
-                if ((ULONG)code < (ULONG)g_spool_count) {
-                    g_spool_selected = (ULONG)code;
-                    g_spool_selection_made = TRUE;
-                    /* GadTools does not persist which row a click
-                     * selected on its own - a later IDCMP_REFRESHWINDOW
-                     * (there are more of those than you'd expect: window
-                     * activation, another window uncovering this one,
-                     * ...) repaints the listview from its own stored
-                     * GTLV_Selected, which otherwise still says "none",
-                     * making the highlight vanish right after the click.
-                     * Mirroring the selection back here is what makes it
-                     * stick. */
-                    GT_SetGadgetAttrs(g_spool_job_listview, swin, NULL,
-                                      GTLV_Selected, g_spool_selected,
-                                      TAG_DONE);
-                    mp_spool_update_action_buttons(swin);
-                    /* The list truncates each row to fit the window - a
-                     * failure reason like "Printer rejected request
-                     * (wrong IPP path?)" does not fit in the column
-                     * budget mp_scan_spool_jobs() has to work with on any
-                     * Amiga screen this driver targets. The window title
-                     * has the room a list column doesn't, so show the
-                     * selected job's full state/reason there instead.
-                     * static, not a stack local: SetWindowTitles() keeps
-                     * only a pointer, not a copy, and this has to stay
-                     * valid for however long this title stays on screen -
-                     * across GadTools refresh events this function isn't
-                     * even running for - not just this one call. */
-                    {
-                        static char spool_title[192];
-                        struct MPSpoolJobEntry *job =
-                            &mp_spool_jobs[g_spool_selected];
-                        if (job->reason[0])
-                            snprintf(spool_title, sizeof(spool_title),
-                                    "Spooler Management - %s: %s",
-                                    job->state, job->reason);
-                        else
-                            snprintf(spool_title, sizeof(spool_title),
-                                    "Spooler Management - %s", job->state);
-                        SetWindowTitles(swin, (STRPTR)spool_title,
-                                        (STRPTR)~0);
-                    }
-                }
-            } else if (g->GadgetID == GAD_SPOOL_UNIT) {
-                g_spool_retry_unit = (int)code;
-            } else if (g->GadgetID == GAD_SPOOL_CLOSE) {
-                want_close = TRUE;
-            } else if (g->GadgetID == GAD_SPOOL_REFRESH) {
-                /* Swaps the listview's contents in place - the window
-                 * stays open, same as MintAMP's search results Refresh -
-                 * see mp_spool_refresh_list_live()'s own comment. */
-                mp_spool_refresh_list_live(swin, g_spool_job_listview,
-                    g_spool_delete_gadget, g_spool_retry_gadget,
-                    g_spool_copies_gadget, &g_spool_job_list,
-                    &g_spool_count, &g_spool_selected,
-                    &g_spool_selection_made);
-            } else if (g->GadgetID == GAD_SPOOL_DELETE) {
-                if (g_spool_selection_made &&
-                    g_spool_selected < (ULONG)g_spool_count &&
-                    mp_spool_job_actionable(
-                        &mp_spool_jobs[g_spool_selected])) {
-                    DeleteFile((CONST_STRPTR)
-                        mp_spool_jobs[g_spool_selected].job_path);
-                    DeleteFile((CONST_STRPTR)
-                        mp_spool_jobs[g_spool_selected].status_path);
-                    mp_spool_refresh_list_live(swin, g_spool_job_listview,
-                        g_spool_delete_gadget, g_spool_retry_gadget,
-                        g_spool_copies_gadget, &g_spool_job_list,
-                        &g_spool_count, &g_spool_selected,
-                        &g_spool_selection_made);
-                } else {
-                    SetWindowTitles(swin,
-                        (STRPTR)"Spooler Management - select a job first",
-                        (STRPTR)~0);
-                }
-            } else if (g->GadgetID == GAD_SPOOL_RETRY) {
-                if (g_spool_selection_made &&
-                    g_spool_selected < (ULONG)g_spool_count &&
-                    mp_spool_job_actionable(
-                        &mp_spool_jobs[g_spool_selected])) {
-                    /* Blocking (network I/O) - said so up front, and the
-                     * buttons are disabled for the same reason a second
-                     * click mid-retry queued up behind this one is
-                     * drained above without triggering a second
-                     * resubmission. The main window stays responsive
-                     * throughout, since this whole dispatch only runs
-                     * when the Spooler window's own signal bit fires -
-                     * but this call itself still blocks until the
-                     * network round-trip finishes. */
-                    SetWindowTitles(swin,
-                        (STRPTR)"Spooler Management - Retrying...",
-                        (STRPTR)~0);
-                    GT_SetGadgetAttrs(g_spool_retry_gadget, swin, NULL,
-                                      GA_Disabled, TRUE, TAG_DONE);
-                    GT_SetGadgetAttrs(g_spool_copies_gadget, swin, NULL,
-                                      GA_Disabled, TRUE, TAG_DONE);
-                    mp_spool_retry_job(&mp_spool_jobs[g_spool_selected],
-                                       g_spool_retry_unit);
-                    mp_spool_refresh_list_live(swin, g_spool_job_listview,
-                        g_spool_delete_gadget, g_spool_retry_gadget,
-                        g_spool_copies_gadget, &g_spool_job_list,
-                        &g_spool_count, &g_spool_selected,
-                        &g_spool_selection_made);
-                } else {
-                    SetWindowTitles(swin,
-                        (STRPTR)"Spooler Management - select a job first",
-                        (STRPTR)~0);
-                }
-            } else if (g->GadgetID == GAD_SPOOL_COPIES) {
-                int copies = 1;
-                if (g_spool_selection_made &&
-                    g_spool_selected < (ULONG)g_spool_count &&
-                    mp_spool_job_actionable(
-                        &mp_spool_jobs[g_spool_selected]) &&
-                    run_copies_dialog(swin, &copies)) {
-                    int i;
-                    GT_SetGadgetAttrs(g_spool_retry_gadget, swin, NULL,
-                                      GA_Disabled, TRUE, TAG_DONE);
-                    GT_SetGadgetAttrs(g_spool_copies_gadget, swin, NULL,
-                                      GA_Disabled, TRUE, TAG_DONE);
-                    for (i = 0; i < copies; ++i) {
-                        /* static: see the row-selection title's own
-                         * comment above on why a stack local isn't safe
-                         * for a SetWindowTitles() string. */
-                        static char title[64];
-                        snprintf(title, sizeof(title),
-                                "Spooler Management - Retrying (%d/%d)...",
-                                i + 1, copies);
-                        SetWindowTitles(swin, (STRPTR)title, (STRPTR)~0);
-                        mp_spool_retry_job(
-                            &mp_spool_jobs[g_spool_selected],
-                            g_spool_retry_unit);
-                    }
-                    mp_spool_refresh_list_live(swin, g_spool_job_listview,
-                        g_spool_delete_gadget, g_spool_retry_gadget,
-                        g_spool_copies_gadget, &g_spool_job_list,
-                        &g_spool_count, &g_spool_selected,
-                        &g_spool_selection_made);
-                } else if (!g_spool_selection_made) {
-                    SetWindowTitles(swin,
-                        (STRPTR)"Spooler Management - select a job first",
-                        (STRPTR)~0);
-                }
-            }
-        }
-        imsg = GT_GetIMsg(swin->UserPort);
-    }
-
-    if (want_close)
-        mp_spool_win_close();
-}
-
-/* Bounded, GUI-responsive connect(): socket -> IoctlSocket(FIONBIO on) ->
- * connect() -> if EINPROGRESS, WaitSelect() on the write+exception sets in
- * short chunks (pumping GUI events between them) until connected, refused,
- * or timeout_secs is up -> getsockopt(SO_ERROR) to find out which ->
- * IoctlSocket(FIONBIO off).
- *
- * connect() alone is a plain blocking call with no timeout - SO_RCVTIMEO
- * only ever covered recv() - so an unreachable host that doesn't actively
- * refuse the connection (dropped SYNs, asleep, etc.) could block far
- * longer than any UI expects, with nothing pumping GUI events while
- * stuck. This uses the same WaitSelect()-with-a-bounded-timeval shape
- * already proven working in this file for SSDP/mDNS discovery - a
- * previous attempt at non-blocking sockets elsewhere in this file
- * referenced a constant called "FNONBIO", which is not a real BSD ioctl
- * name (the real one, used here, is FIONBIO) and is the more likely
- * explanation for that attempt not working, rather than non-blocking
- * mode being unavailable on this NDK/stack.
- *
- * Returns 0 on success, -1 on failure (errno set: from SO_ERROR when the
- * stack reported one, or ETIMEDOUT for this function's own timeout). The
- * socket is always left blocking again before returning, whatever the
- * outcome, so callers don't need to know this happened. */
-static int mp_connect_with_timeout(int sockfd, struct sockaddr_in *addr, int timeout_secs) {
-    long nonblock = 1;
-    long block = 0;
-    int rc;
-    int connect_errno;
-
-    if (IoctlSocket(sockfd, FIONBIO, (char *)&nonblock) < 0) {
-        /* Non-blocking mode unavailable on this stack for some reason -
-         * fall back to a plain blocking connect (still covered by the
-         * SO_SNDTIMEO best-effort set by the caller) rather than failing
-         * outright. */
-        printf("connect: IoctlSocket(FIONBIO on) failed, falling back to blocking\n");
-        return connect(sockfd, (struct sockaddr *)addr, sizeof(*addr));
-    }
-
-    rc = connect(sockfd, (struct sockaddr *)addr, sizeof(*addr));
-    connect_errno = (rc < 0) ? Errno() : 0;
-    printf("connect: immediate rc=%d errno=%d Errno()=%d\n", rc, errno, connect_errno);
-
-    /* AmigaOS bsdsocket.library does NOT update the standard C errno
-     * global - confirmed for real: a prior build of this exact function
-     * logged "rc=-1 errno=0" on every attempt, which is what happens when
-     * nothing ever sets errno at all, not what any real connect() failure
-     * looks like. bsdsocket.library tracks its own error state instead,
-     * read back with its own Errno() function (see proto/bsdsocket.h) -
-     * that's what's checked below, not errno.
-     *
-     * Which value Errno() returns for "in progress, not decided yet" on a
-     * non-blocking connect also isn't standardised across
-     * bsdsocket.library stacks, so both EINPROGRESS and EWOULDBLOCK are
-     * accepted rather than gambling on just one. */
-    if (rc < 0 && (connect_errno == EINPROGRESS || connect_errno == EWOULDBLOCK)) {
-        int elapsed_ms = 0;
-        const int chunk_ms = 250;
-        int outcome = -2; /* -2 = still waiting, -1 = failed, 0 = connected */
-
-        while (outcome == -2 && elapsed_ms < timeout_secs * 1000) {
-            fd_set wfds, efds;
-            struct timeval tv;
-            long ready;
-
-            if (window) {
-                struct IntuiMessage *imsg;
-                while ((imsg = GT_GetIMsg(window->UserPort))) {
-                    GT_ReplyIMsg(imsg);
-                }
-            }
-
-            FD_ZERO(&wfds);
-            FD_SET(sockfd, &wfds);
-            FD_ZERO(&efds);
-            FD_SET(sockfd, &efds);
-            tv.tv_sec = 0;
-            tv.tv_usec = chunk_ms * 1000;
-
-            ready = WaitSelect(sockfd + 1, NULL, &wfds, &efds, &tv, NULL);
-            if (ready > 0 && (FD_ISSET(sockfd, &wfds) || FD_ISSET(sockfd, &efds))) {
-                int so_err = 0;
-                socklen_t optlen = sizeof(so_err);
-                int gso_rc = getsockopt(sockfd, SOL_SOCKET, SO_ERROR, (char *)&so_err, &optlen);
-                printf("connect: WaitSelect ready, getsockopt rc=%d so_err=%d Errno()=%d\n",
-                       gso_rc, so_err, (gso_rc < 0) ? Errno() : 0);
-                if (gso_rc == 0) {
-                    if (so_err == 0) {
-                        outcome = 0;
-                    } else {
-                        errno = so_err;
-                        outcome = -1;
-                    }
-                } else {
-                    /* getsockopt(SO_ERROR) itself failing is a real
-                     * possibility on an older/limited bsdsocket.library -
-                     * if so, write-readiness alone is the best signal
-                     * available that the connection attempt resolved,
-                     * so trust it as success rather than treating an
-                     * unsupported diagnostic call as a connection
-                     * failure. */
-                    printf("connect: getsockopt(SO_ERROR) unsupported, trusting write-ready as success\n");
-                    outcome = 0;
-                }
-            }
-            elapsed_ms += chunk_ms;
-        }
-
-        if (outcome == -2) {
-            printf("connect: timed out after %dms waiting for write-ready\n", elapsed_ms);
-            errno = ETIMEDOUT;
-            outcome = -1;
-        }
-        rc = outcome;
-    }
-
-    IoctlSocket(sockfd, FIONBIO, (char *)&block);
-    printf("connect: mp_connect_with_timeout returning %d\n", rc);
-    return rc;
-}
-
-/* ---------------------------------------------------------------------
- * Optional printer picture advertised by IPP's printer-icons attribute.
- *
- * Fetch the first HTTP URI only.  PNG decoding is handled internally by
- * the same LodePNG decoder used by MintAMP, producing RGBA pixels with real
- * alpha.  MintPRINT area-averages that image down to 32x32, composites the
- * translucent edge pixels against the GUI background, then maps the result
- * to the current screen's pens.  No picture.datatype is required.
- * This is deliberately optional: unsupported URI/download/decode failure
- * simply leaves the preview blank.
- * ------------------------------------------------------------------ */
-static void mp_clear_printer_icon(void) {
-    mp_printer_icon_valid = FALSE;
-    mp_printer_icon_pens_valid = FALSE;
-    memset(mp_printer_icon_rgba, 0, sizeof(mp_printer_icon_rgba));
-    memset(mp_printer_icon_mask, 0, sizeof(mp_printer_icon_mask));
-    DeleteFile((CONST_STRPTR)MP_PRINTER_ICON_TEMP);
-}
-
-/* Processed printer-art cache format.  Keep this deliberately tiny and
- * private to MintPRINT: 8-byte version magic, a fixed 256-byte source URI,
- * then the already-scaled RGBA pixels.  Loading this avoids both the HTTP
- * transfer and a LodePNG decode on subsequent opens. */
-static const UBYTE mp_printer_icon_cache_magic[8] = {
-    'M', 'P', 'I', 'C', '0', '0', '0', '1'
-};
-
-static BOOL mp_write_printer_icon_cache_file(CONST_STRPTR path) {
-    BPTR file;
-    char cached_uri[sizeof(printer_icon_uri)];
-    BOOL ok = TRUE;
-
-    if (!mp_printer_icon_valid || !path)
-        return FALSE;
-
-    memset(cached_uri, 0, sizeof(cached_uri));
-    strncpy(cached_uri, printer_icon_uri, sizeof(cached_uri) - 1);
-
-    file = Open(path, MODE_NEWFILE);
-    if (!file)
-        return FALSE;
-
-    if (Write(file, (APTR)mp_printer_icon_cache_magic,
-              sizeof(mp_printer_icon_cache_magic)) !=
-        (LONG)sizeof(mp_printer_icon_cache_magic))
-        ok = FALSE;
-    if (ok && Write(file, cached_uri, sizeof(cached_uri)) !=
-              (LONG)sizeof(cached_uri))
-        ok = FALSE;
-    if (ok && Write(file, mp_printer_icon_rgba,
-                    sizeof(mp_printer_icon_rgba)) !=
-              (LONG)sizeof(mp_printer_icon_rgba))
-        ok = FALSE;
-
-    Close(file);
-    if (!ok)
-        DeleteFile(path);
-    return ok;
-}
-
-static BOOL mp_load_printer_icon_cache_file(CONST_STRPTR path,
-                                             BOOL require_uri_match) {
-    BPTR file;
-    UBYTE magic[sizeof(mp_printer_icon_cache_magic)];
-    char cached_uri[sizeof(printer_icon_uri)];
-    UBYTE *rgba;
-    int i;
-
-    file = Open(path, MODE_OLDFILE);
-    if (!file)
-        return FALSE;
-
-    if (Read(file, magic, sizeof(magic)) != (LONG)sizeof(magic) ||
-        memcmp(magic, mp_printer_icon_cache_magic, sizeof(magic)) != 0 ||
-        Read(file, cached_uri, sizeof(cached_uri)) !=
-            (LONG)sizeof(cached_uri)) {
-        Close(file);
-        return FALSE;
-    }
-    cached_uri[sizeof(cached_uri) - 1] = '\0';
-
-    if (require_uri_match &&
-        (!printer_icon_uri[0] || strcmp(cached_uri, printer_icon_uri) != 0)) {
-        Close(file);
-        return FALSE;
-    }
-
-    rgba = AllocVec(sizeof(mp_printer_icon_rgba), MEMF_ANY);
-    if (!rgba) {
-        Close(file);
-        return FALSE;
-    }
-    if (Read(file, rgba, sizeof(mp_printer_icon_rgba)) !=
-        (LONG)sizeof(mp_printer_icon_rgba)) {
-        FreeVec(rgba);
-        Close(file);
-        return FALSE;
-    }
-    Close(file);
-
-    memcpy(mp_printer_icon_rgba, rgba, sizeof(mp_printer_icon_rgba));
-    FreeVec(rgba);
-    memset(mp_printer_icon_mask, 0, sizeof(mp_printer_icon_mask));
-    for (i = 0; i < MP_PRINTER_ICON_PIXELS; ++i)
-        mp_printer_icon_mask[i] = mp_printer_icon_rgba[i * 4 + 3] ? 1 : 0;
-
-    mp_printer_icon_valid = TRUE;
-    mp_printer_icon_pens_valid = FALSE;
-    return TRUE;
-}
-
-static void mp_save_printer_icon_cache(void) {
-    char env_path[96];
-    char envarc_path[96];
-
-    if (!mp_printer_icon_valid)
-        return;
-
-    if (!ensure_config_dir((CONST_STRPTR)"ENV:MintPRINT") ||
-        !ensure_config_dir((CONST_STRPTR)"ENVARC:MintPRINT") ||
-        !ensure_config_dir((CONST_STRPTR)"ENV:MintPRINT/Art") ||
-        !ensure_config_dir((CONST_STRPTR)"ENVARC:MintPRINT/Art"))
-        return;
-
-    unit_icon_cache_path(current_unit_index, FALSE, env_path, sizeof(env_path));
-    unit_icon_cache_path(current_unit_index, TRUE, envarc_path, sizeof(envarc_path));
-    mp_write_printer_icon_cache_file((CONST_STRPTR)env_path);
-    mp_write_printer_icon_cache_file((CONST_STRPTR)envarc_path);
-}
-
-static BOOL mp_load_printer_icon_cache(BOOL require_uri_match) {
-    char env_path[96];
-    char envarc_path[96];
-
-    unit_icon_cache_path(current_unit_index, FALSE, env_path, sizeof(env_path));
-    unit_icon_cache_path(current_unit_index, TRUE, envarc_path, sizeof(envarc_path));
-
-    if (mp_load_printer_icon_cache_file((CONST_STRPTR)env_path,
-                                        require_uri_match))
-        return TRUE;
-
-    if (mp_load_printer_icon_cache_file((CONST_STRPTR)envarc_path,
-                                        require_uri_match)) {
-        /* Re-seed volatile ENV: after a reboot, best-effort. */
-        if (ensure_config_dir((CONST_STRPTR)"ENV:MintPRINT") &&
-            ensure_config_dir((CONST_STRPTR)"ENV:MintPRINT/Art"))
-            mp_copy_file((CONST_STRPTR)envarc_path, (CONST_STRPTR)env_path);
-        return TRUE;
-    }
-    return FALSE;
-}
-
-static void mp_delete_printer_icon_cache(void) {
-    char env_path[96];
-    char envarc_path[96];
-    unit_icon_cache_path(current_unit_index, FALSE, env_path, sizeof(env_path));
-    unit_icon_cache_path(current_unit_index, TRUE, envarc_path, sizeof(envarc_path));
-    DeleteFile((CONST_STRPTR)env_path);
-    DeleteFile((CONST_STRPTR)envarc_path);
-}
-
-static BOOL mp_fetch_printer_icon_file(const char *uri) {
-    const char *authority;
-    const char *slash;
-    const char *colon;
-    char host[96];
-    char path[256];
-    char request[512];
-    char *response;
-    int host_len;
-    int port = 80;
-    int sockfd;
-    int total = 0;
-    int http_status = 0;
-    int body_off = 0;
-    int body_len = 0;
-    int complete = 0;
-    int request_len;
-    struct sockaddr_in serv_addr;
-    struct timeval timeout;
-    BPTR file;
-
-    if (!uri || strncmp(uri, "http://", 7) != 0)
-        return FALSE;
-
-    authority = uri + 7;
-    slash = strchr(authority, '/');
-    if (!slash)
-        return FALSE;
-
-    colon = memchr(authority, ':', (size_t)(slash - authority));
-    host_len = (int)((colon ? colon : slash) - authority);
-    if (host_len <= 0 || host_len >= (int)sizeof(host))
-        return FALSE;
-
-    memcpy(host, authority, (size_t)host_len);
-    host[host_len] = '\0';
-
-    if (colon) {
-        port = atoi(colon + 1);
-        if (port <= 0 || port > 65535)
-            return FALSE;
-    }
-
-    strncpy(path, slash, sizeof(path) - 1);
-    path[sizeof(path) - 1] = '\0';
-
-    memset(&serv_addr, 0, sizeof(serv_addr));
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_port = htons((UWORD)port);
-    serv_addr.sin_addr.s_addr = inet_addr(host);
-    if (serv_addr.sin_addr.s_addr == (ULONG)-1)
-        return FALSE;
-
-    sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0)
-        return FALSE;
-
-    timeout.tv_sec = 5;
-    timeout.tv_usec = 0;
-    setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout));
-    setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, (char *)&timeout, sizeof(timeout));
-
-    if (mp_connect_with_timeout(sockfd, &serv_addr, 5) < 0) {
-        CloseSocket(sockfd);
-        return FALSE;
-    }
-
-    snprintf(request, sizeof(request),
-             "GET %s HTTP/1.1\r\n"
-             "Host: %s\r\n"
-             "User-Agent: MintPrintSettings/%s\r\n"
-             "Accept: image/png,image/jpeg,image/*\r\n"
-             "Connection: close\r\n\r\n",
-             path, host, MINTPRINT_SETTINGS_VERSION);
-    request_len = (int)strlen(request);
-
-    if (safe_send(sockfd, request, request_len) != request_len) {
-        CloseSocket(sockfd);
-        return FALSE;
-    }
-
-    response = AllocVec(MAX_BUFFER, MEMF_ANY);
-    if (!response) {
-        CloseSocket(sockfd);
-        return FALSE;
-    }
-
-    while (total < MAX_BUFFER) {
-        int got = recv(sockfd, response + total, MAX_BUFFER - total, 0);
-        if (got <= 0)
-            break;
-        total += got;
-        complete = mp_http_final_body(response, total, &http_status,
-                                      &body_off, &body_len);
-        if (complete != 0)
-            break;
-    }
-    CloseSocket(sockfd);
-
-    if (complete == 0)
-        complete = mp_http_final_body(response, total, &http_status,
-                                      &body_off, &body_len);
-
-    if (complete != 1 || http_status != 200 || body_len <= 0 ||
-        body_off < 0 || body_off + body_len > total) {
-        FreeVec(response);
-        return FALSE;
-    }
-
-    file = Open((CONST_STRPTR)MP_PRINTER_ICON_TEMP, MODE_NEWFILE);
-    if (!file) {
-        FreeVec(response);
-        return FALSE;
-    }
-
-    if (Write(file, response + body_off, body_len) != body_len) {
-        Close(file);
-        DeleteFile((CONST_STRPTR)MP_PRINTER_ICON_TEMP);
-        FreeVec(response);
-        return FALSE;
-    }
-
-    Close(file);
-    FreeVec(response);
-    return TRUE;
-}
-
-static BOOL mp_load_printer_icon_rgba(void) {
-    static const UBYTE png_signature[8] = { 137, 80, 78, 71, 13, 10, 26, 10 };
-    BPTR file;
-    LONG file_size;
-    UBYTE *png_data = NULL;
-    unsigned char *decoded = NULL;
-    unsigned png_w = 0;
-    unsigned png_h = 0;
-    unsigned err;
-    int draw_w;
-    int draw_h;
-    int off_x;
-    int off_y;
-    int dy;
-
-    file = Open((CONST_STRPTR)MP_PRINTER_ICON_TEMP, MODE_OLDFILE);
-    if (!file)
-        return FALSE;
-
-    if (Seek(file, 0, OFFSET_END) == -1) {
-        Close(file);
-        return FALSE;
-    }
-    file_size = Seek(file, 0, OFFSET_BEGINNING);
-    if (file_size < 24 || file_size > MAX_BUFFER) {
-        Close(file);
-        return FALSE;
-    }
-
-    png_data = AllocVec((ULONG)file_size, MEMF_ANY);
-    if (!png_data) {
-        Close(file);
-        return FALSE;
-    }
-    if (Read(file, png_data, file_size) != file_size) {
-        Close(file);
-        FreeVec(png_data);
-        return FALSE;
-    }
-    Close(file);
-
-    /* Reject non-PNG and decompression-bomb dimensions before LodePNG
-     * allocates width*height*4.  PNG's IHDR width/height live at bytes
-     * 16..23 and are big-endian. */
-    if (memcmp(png_data, png_signature, sizeof(png_signature)) != 0) {
-        FreeVec(png_data);
-        return FALSE;
-    }
-    png_w = ((unsigned)png_data[16] << 24) |
-            ((unsigned)png_data[17] << 16) |
-            ((unsigned)png_data[18] << 8) |
-            (unsigned)png_data[19];
-    png_h = ((unsigned)png_data[20] << 24) |
-            ((unsigned)png_data[21] << 16) |
-            ((unsigned)png_data[22] << 8) |
-            (unsigned)png_data[23];
-    if (png_w == 0 || png_h == 0 ||
-        png_w > MP_PRINTER_ICON_MAX_SOURCE_DIM ||
-        png_h > MP_PRINTER_ICON_MAX_SOURCE_DIM) {
-        FreeVec(png_data);
-        return FALSE;
-    }
-
-    err = lodepng_decode32(&decoded, &png_w, &png_h,
-                           png_data, (size_t)file_size);
-    FreeVec(png_data);
-    if (err || !decoded)
-        return FALSE;
-
-    memset(mp_printer_icon_rgba, 0, sizeof(mp_printer_icon_rgba));
-    memset(mp_printer_icon_mask, 0, sizeof(mp_printer_icon_mask));
-
-    draw_w = MP_PRINTER_ICON_SIZE;
-    draw_h = MP_PRINTER_ICON_SIZE;
-    if (png_w > png_h)
-        draw_h = (int)((png_h * MP_PRINTER_ICON_SIZE) / png_w);
-    else if (png_h > png_w)
-        draw_w = (int)((png_w * MP_PRINTER_ICON_SIZE) / png_h);
-    if (draw_w < 1) draw_w = 1;
-    if (draw_h < 1) draw_h = 1;
-    off_x = (MP_PRINTER_ICON_SIZE - draw_w) / 2;
-    off_y = (MP_PRINTER_ICON_SIZE - draw_h) / 2;
-
-    /* Area-average each destination pixel.  The source Brother icon is
-     * normally 128x128, so this is just a cheap 4x4 average and gives a
-     * much nicer tiny icon than nearest-neighbour.  RGB is accumulated
-     * premultiplied by alpha so transparent coloured pixels cannot bleed
-     * a red/black matte into the edges. */
-    for (dy = 0; dy < draw_h; ++dy) {
-        unsigned sy0 = (unsigned)((dy * (int)png_h) / draw_h);
-        unsigned sy1 = (unsigned)(((dy + 1) * (int)png_h) / draw_h);
-        int dx2;
-        if (sy1 <= sy0) sy1 = sy0 + 1;
-        if (sy1 > png_h) sy1 = png_h;
-
-        for (dx2 = 0; dx2 < draw_w; ++dx2) {
-            unsigned sx0 = (unsigned)((dx2 * (int)png_w) / draw_w);
-            unsigned sx1 = (unsigned)(((dx2 + 1) * (int)png_w) / draw_w);
-            unsigned sy;
-            ULONG sum_a = 0;
-            ULONG sum_ra = 0;
-            ULONG sum_ga = 0;
-            ULONG sum_ba = 0;
-            ULONG samples = 0;
-            int dest = (off_y + dy) * MP_PRINTER_ICON_SIZE + (off_x + dx2);
-            if (sx1 <= sx0) sx1 = sx0 + 1;
-            if (sx1 > png_w) sx1 = png_w;
-
-            for (sy = sy0; sy < sy1; ++sy) {
-                unsigned sx;
-                for (sx = sx0; sx < sx1; ++sx) {
-                    const unsigned char *p = decoded + ((sy * png_w + sx) * 4U);
-                    ULONG a = p[3];
-                    sum_a += a;
-                    sum_ra += (ULONG)p[0] * a;
-                    sum_ga += (ULONG)p[1] * a;
-                    sum_ba += (ULONG)p[2] * a;
-                    ++samples;
-                }
-            }
-
-            if (samples && sum_a) {
-                UBYTE *d = mp_printer_icon_rgba + dest * 4;
-                d[0] = (UBYTE)(sum_ra / sum_a);
-                d[1] = (UBYTE)(sum_ga / sum_a);
-                d[2] = (UBYTE)(sum_ba / sum_a);
-                d[3] = (UBYTE)(sum_a / samples);
-                mp_printer_icon_mask[dest] = d[3] ? 1 : 0;
-            }
-        }
-    }
-
-    free(decoded); /* matching allocator used by lodepng.c */
-    mp_printer_icon_valid = TRUE;
-    mp_printer_icon_pens_valid = FALSE;
-    return TRUE;
-}
-
-static void mp_refresh_printer_icon(void) {
-    mp_clear_printer_icon();
-
-    if (!printer_icon_uri[0]) {
-        /* A successful Query saying there is no printer-icons attribute
-         * makes any older artwork for this Unit stale. */
-        mp_delete_printer_icon_cache();
-        return;
-    }
-
-    /* This only ever runs from an explicit Query press (the one call
-     * site is the Query success handler), which already does a much
-     * heavier IPP round-trip - so always attempt a genuinely fresh
-     * fetch+decode here rather than trusting a same-URI cache hit
-     * forever. That used to mean a single bad decode (a truncated
-     * transfer, or a genuinely malformed source image the printer
-     * briefly served) got written once and then displayed on every
-     * later Query indefinitely, since the printer's icon URI itself
-     * doesn't change - reported as "the corrupted image keeps
-     * displaying, guess it's cached". Query is now the icon's one
-     * chance to self-heal; the cache is only a fallback for when the
-     * live attempt itself fails (printer briefly unreachable etc.), not
-     * an assumption that a URI match means the art is still good. */
-    if (mp_fetch_printer_icon_file(printer_icon_uri) &&
-        mp_load_printer_icon_rgba()) {
-        mp_save_printer_icon_cache();
-    } else {
-        mp_load_printer_icon_cache(TRUE);
-    }
-
-    DeleteFile((CONST_STRPTR)MP_PRINTER_ICON_TEMP);
-}
-
-static UBYTE mp_printer_icon_nearest_pen(const ULONG *palette,
-                                         int pen_count,
-                                         UBYTE r, UBYTE g, UBYTE b) {
-    int i;
-    int best = 0;
-    ULONG best_distance = 0xffffffffUL;
-
-    for (i = 0; i < pen_count; ++i) {
-        LONG pr = (LONG)((palette[i * 3 + 0] >> 24) & 0xffUL);
-        LONG pg = (LONG)((palette[i * 3 + 1] >> 24) & 0xffUL);
-        LONG pb = (LONG)((palette[i * 3 + 2] >> 24) & 0xffUL);
-        LONG dr = (LONG)r - pr;
-        LONG dg = (LONG)g - pg;
-        LONG db = (LONG)b - pb;
-        ULONG distance = (ULONG)(dr * dr + dg * dg + db * db);
-        if (distance < best_distance) {
-            best_distance = distance;
-            best = i;
-            if (distance == 0)
-                break;
-        }
-    }
-    return (UBYTE)best;
-}
-
-static void mp_draw_printer_icon(void) {
-    ULONG screen_palette[3 * 256];
-    struct ColorMap *cm;
-    struct RastPort *rp;
-    int screen_pen_count;
-    UBYTE ramp_pens[MP_NEUTRAL_RAMP_MAX];
-    UBYTE ramp_luma[MP_NEUTRAL_RAMP_MAX];
-    int ramp_count;
-    int left = MP_PRINTER_ICON_LEFT;
-    int top = g_topborder + MP_PRINTER_ICON_TOP;
-    int i;
-    LONG last_pen = -1;
-    UBYTE bg_r, bg_g, bg_b;
-
-    if (!window || !screen)
-        return;
-
-    rp = window->RPort;
-    cm = screen->ViewPort.ColorMap;
-    if (!cm)
-        return;
-
-    screen_pen_count = mp_screen_pen_count(screen, cm);
-    mp_fill_screen_palette32(cm, screen_pen_count, screen_palette);
-    ramp_count = mp_build_neutral_pen_ramp(screen_palette, screen_pen_count,
-                                           ramp_pens, ramp_luma);
-    SetDrMd(rp, JAM1);
-    SetAPen(rp, 0);
-    RectFill(rp, left - 1, top - 1,
-             left + MP_PRINTER_ICON_SIZE, top + MP_PRINTER_ICON_SIZE);
-
-    if (!mp_printer_icon_valid)
-        return;
-
-    /* Partial alpha is composited against pen 0, which is exactly the
-     * background we just cleared the icon box with - needed both to
-     * populate the cached base pens below and, every redraw, to decide
-     * per pixel whether the actual on-screen colour a viewer would see
-     * is itself near-neutral. */
-    bg_r = (UBYTE)((screen_palette[0] >> 24) & 0xffUL);
-    bg_g = (UBYTE)((screen_palette[1] >> 24) & 0xffUL);
-    bg_b = (UBYTE)((screen_palette[2] >> 24) & 0xffUL);
-
-    /* Convert RGBA to the current screen's pens once per downloaded icon,
-     * not on every refresh. */
-    if (!mp_printer_icon_pens_valid) {
-        for (i = 0; i < MP_PRINTER_ICON_PIXELS; ++i) {
-            const UBYTE *p = mp_printer_icon_rgba + i * 4;
-            ULONG a = p[3];
-            UBYTE r;
-            UBYTE g;
-            UBYTE b;
-
-            if (a == 0) {
-                mp_printer_icon_mask[i] = 0;
-                mp_printer_icon_pens[i] = 0;
-                continue;
-            }
-
-            r = (UBYTE)(((ULONG)p[0] * a + (ULONG)bg_r * (255UL - a) + 127UL) / 255UL);
-            g = (UBYTE)(((ULONG)p[1] * a + (ULONG)bg_g * (255UL - a) + 127UL) / 255UL);
-            b = (UBYTE)(((ULONG)p[2] * a + (ULONG)bg_b * (255UL - a) + 127UL) / 255UL);
-            mp_printer_icon_pens[i] = mp_printer_icon_nearest_pen(screen_palette,
-                                                                  screen_pen_count,
-                                                                  r, g, b);
-            mp_printer_icon_mask[i] = 1;
-        }
-        mp_printer_icon_pens_valid = TRUE;
-    }
-
-    for (i = 0; i < MP_PRINTER_ICON_PIXELS; ++i) {
-        int x;
-        int y;
-        UBYTE pen;
-        const UBYTE *p;
-        ULONG a;
-        UBYTE r, g, b, smax, smin;
-
-        if (!mp_printer_icon_mask[i])
-            continue;
-        pen = mp_printer_icon_pens[i];
-
-        /* Per pixel, not per screen: a screen's own advertised colour
-         * count/depth turned out not to be a reliable signal for whether
-         * it actually offers a smooth grey ramp (see
-         * mp_screen_pen_count()'s comment on why Count itself can be
-         * unreliable) - so this only asks whether the actual on-screen
-         * colour this pixel composites to (background-blended, same as
-         * the cached base pen above - not the raw un-composited RGBA)
-         * looks like it was meant to be grey, and if so, prefers screen
-         * pens that are too, on any screen depth. A pixel that
-         * composites to a real colour still gets the plain nearest-colour
-         * cached pen unchanged. Dithers between the ramp's two bracketing
-         * pens when there are enough of them to dither with; a palette
-         * with 0 or 1 near-neutral pens falls back to
-         * mp_low_colour_gray_pen()'s single best pick. */
-        x = i % MP_PRINTER_ICON_SIZE;
-        y = i / MP_PRINTER_ICON_SIZE;
-        p = mp_printer_icon_rgba + i * 4;
-        a = p[3];
-        r = (UBYTE)(((ULONG)p[0] * a + (ULONG)bg_r * (255UL - a) + 127UL) / 255UL);
-        g = (UBYTE)(((ULONG)p[1] * a + (ULONG)bg_g * (255UL - a) + 127UL) / 255UL);
-        b = (UBYTE)(((ULONG)p[2] * a + (ULONG)bg_b * (255UL - a) + 127UL) / 255UL);
-        smax = (r > g) ? r : g;
-        smin = (r < g) ? r : g;
-        if (b > smax) smax = b;
-        if (b < smin) smin = b;
-        if (mp_should_dither_neutral(screen) &&
-                (int)smax - (int)smin <= MP_NEUTRAL_SAT_THRESHOLD) {
-            pen = (ramp_count >= 2)
-                ? mp_dither_neutral_pen(ramp_pens, ramp_luma, ramp_count,
-                                        r, g, b, left + x, top + y)
-                : mp_low_colour_gray_pen(screen_palette, screen_pen_count,
-                                         r, g, b);
-        }
-
-        if ((LONG)pen != last_pen) {
-            SetAPen(rp, pen);
-            last_pen = (LONG)pen;
-        }
-        WritePixel(rp, left + x, top + y);
-    }
-}
-
-// Updated query_printer_attributes with fixed mapping logic and tray name parsing
-int query_printer_attributes(const char *ip, int port, char *response, int maxlen) {
-    custom_printf("CLEAR");
-    if (operation_in_progress) {
-        printf("Operation already in progress, please wait...\n");
-        return -1;
-    }
-    operation_in_progress = TRUE;
-
-    // Reset all supported values
-    num_supported_formats = 0;
-    num_supported_media = 0;
-    num_supported_output_modes = 0;
-    num_supported_sides = 0;
-    num_supported_scaling = 0;
-    num_supported_orientations = 0;
-    num_supported_media_sources = 0;
-    num_supported_print_modes = 0;
-    num_supported_quality = 0;
-    num_supported_dpi = 0;
-    num_media_tray_mappings = 0;
-    has_media_ready = FALSE;
-    jpeg_constraints_queried = TRUE;
-    jpeg_k_octets_reported = FALSE;
-    jpeg_x_dimension_reported = FALSE;
-    jpeg_y_dimension_reported = FALSE;
-    supports_create_job = FALSE;
-    supports_send_document = FALSE;
-    supports_multiple_document_jobs = FALSE;
-    supports_single_document_handling = FALSE;
-    strcpy(pwg_sheet_back_value, "normal");
-    printer_make_model[0] = '\0';
-    printer_icon_uri[0] = '\0';
-    num_marker_names = 0;
-    num_marker_colors = 0;
-    num_marker_types = 0;
-    num_marker_levels = 0;
-    num_marker_low_levels = 0;
-    num_marker_high_levels = 0;
-    printer_state_value = 0;
-    num_printer_state_reasons = 0;
-
-    // Allocate buffers for parsing
-    char *name = malloc(512);
-    char *value = malloc(512);
-    if (!name || !value) {
-        printf("Memory allocation failed\n");
-        if (name) free(name);
-        if (value) free(value);
-        operation_in_progress = FALSE;
-        return -1;
-    }
-
-    // Build IPP payload for Get-Printer-Attributes request
-    unsigned char *ipp_payload = malloc(2048);// Dynamically allocate
-    if (!ipp_payload) {
-        printf("Failed to allocate memory for IPP payload\n");
-        free(name);
-        free(value);
-        operation_in_progress = FALSE;
-        return -1;
-    }
-    int offset = 0;
-
-    /* 631 is the default/implied port for the ipp:// scheme and is safe to
-     * omit; any other port (e.g. 80) must be stated explicitly or the URI
-     * silently claims a printer on 631 while we actually connect elsewhere.
-     * Use the configured IPP path (driver_path_buffer) rather than a
-     * hardcoded one, so this matches whatever the user's printer actually
-     * needs (e.g. Tallguy58's Canon needs /ipp/print, not /ipp). */
-    char uri[128];
-    if (port == 631) {
-        snprintf(uri, sizeof(uri), "ipp://%s%s", ip, driver_path_buffer);
-    } else {
-        snprintf(uri, sizeof(uri), "ipp://%s:%d%s", ip, port, driver_path_buffer);
-    }
-    int uri_len = strlen(uri);
-
-    ipp_payload[offset++] = 0x01; ipp_payload[offset++] = 0x01; // IPP 1.1
-    ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x0B; // Get-Printer-Attributes
-    ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x01; // Request ID
-
-    ipp_payload[offset++] = 0x01; // Operation attributes group
-    ipp_payload[offset++] = 0x47; ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x12;
-    memcpy(&ipp_payload[offset], "attributes-charset", 18); offset += 18;
-    ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x05;
-    memcpy(&ipp_payload[offset], "utf-8", 5); offset += 5;
-
-    ipp_payload[offset++] = 0x48; ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x1b;
-    memcpy(&ipp_payload[offset], "attributes-natural-language", 27); offset += 27;
-    ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x02;
-    memcpy(&ipp_payload[offset], "en", 2); offset += 2;
-
-    ipp_payload[offset++] = 0x45; ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x0b;
-    memcpy(&ipp_payload[offset], "printer-uri", 11); offset += 11;
-    ipp_payload[offset++] = (uri_len >> 8) & 0xFF;
-    ipp_payload[offset++] = uri_len & 0xFF;
-    memcpy(&ipp_payload[offset], uri, uri_len); offset += uri_len;
-
-    /* requested-attributes is 1setOf keyword (RFC 8011 3.1.7): each
-     * attribute name is its own value, not one comma-joined string - a
-     * single keyword value can't hold multiple keywords. The first value
-     * carries the attribute's own name; every value after it is an
-     * "additional value" and repeats with name-length 0.
-     * (This also used to send the name itself truncated to 18 bytes -
-     * "requested-attribut" - instead of the full 20-byte
-     * "requested-attributes", which alone was enough to make a strict
-     * printer not recognise the filter at all.) */
-    {
-        static const char *mp_requested_attrs[] = {
-            "media-source-supported", "media-ready", "printer-input-tray",
-            "printer-state", "printer-state-reasons", "print-color-mode-supported",
-            "print-scaling-supported", "print-quality-supported",
-            "printer-resolution-default", "printer-resolution-supported",
-            "pwg-raster-document-resolution-supported",
-            "pwg-raster-document-sheet-back",
-            "document-format-supported", "printer-make-and-model",
-            "sides-supported", "operations-supported",
-            "multiple-document-jobs-supported",
-            "multiple-document-handling-supported",
-            "jpeg-k-octets-supported", "jpeg-x-dimension-supported",
-            "jpeg-y-dimension-supported",
-            "printer-icons",
-            "marker-names", "marker-colors", "marker-types",
-            "marker-levels", "marker-low-levels", "marker-high-levels",
-            NULL
-        };
-        int i;
-        for (i = 0; mp_requested_attrs[i]; i++) {
-            int attr_len = strlen(mp_requested_attrs[i]);
-            ipp_payload[offset++] = 0x44; // keyword
-            if (i == 0) {
-                ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x14;
-                memcpy(&ipp_payload[offset], "requested-attributes", 20); offset += 20;
-            } else {
-                ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x00; // additional value
-            }
-            ipp_payload[offset++] = (attr_len >> 8) & 0xFF;
-            ipp_payload[offset++] = attr_len & 0xFF;
-            memcpy(&ipp_payload[offset], mp_requested_attrs[i], attr_len); offset += attr_len;
-        }
-    }
-    /* No print-scaling (or any other Job Template attribute) belongs here -
-     * this is a capability query, not a job. A stray "print-scaling"
-     * keyword used to get appended to this request's operation-attributes
-     * group; at least one real printer (Canon TS8300) responded to that
-     * with an empty printer-attributes group instead of an error, which
-     * looked like "query succeeded, printer reported nothing supported". */
-    ipp_payload[offset++] = 0x03; // End of attributes
-
-    // Build HTTP header
-    char *http_header = malloc(256); // Dynamically allocate
-    if (!http_header) {
-        printf("Failed to allocate memory for HTTP header\n");
-        free(ipp_payload);
-        free(name);
-        free(value);
-        operation_in_progress = FALSE;
-        return -1;
-    }
-    snprintf(http_header, 256,
-             "POST %s HTTP/1.1\r\nHost: %s:%d\r\nContent-Type: application/ipp\r\nContent-Length: %d\r\nConnection: close\r\n\r\n",
-             driver_path_buffer, ip, port, offset);
-
-    // Open socket
-    int sockfd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (sockfd < 0) {
-        snprintf(response, maxlen, "Socket creation failed");
-        free(http_header);
-        free(ipp_payload);
-        free(name);
-        free(value);
-        operation_in_progress = FALSE;
-        return -1;
-    }
-    
-    // Set a very short timeout to minimize blocking
-    struct timeval timeout = {5, 0}; // 5-second timeout
-    if (setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout)) < 0) {
-        printf("Failed to set socket timeout\n");
-        CloseSocket(sockfd);
-        free(http_header);
-        free(ipp_payload);
-        free(name);
-        free(value);
-        operation_in_progress = FALSE;
-        return -1;
-    }
-    /* connect() itself is bounded by mp_connect_with_timeout() below, not
-     * by this - SO_SNDTIMEO is only formally specified for send(), and is
-     * set here purely as a secondary safety net for the rare case where
-     * that helper's non-blocking-mode setup fails and it falls back to a
-     * plain blocking connect(). */
-    setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, (char*)&timeout, sizeof(timeout));
-
-    struct sockaddr_in serv_addr = {0};
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_port = htons(port);
-    serv_addr.sin_addr.s_addr = inet_addr((STRPTR)ip);
-    if (serv_addr.sin_addr.s_addr == INADDR_NONE) {
-        snprintf(response, maxlen, "Invalid IP address: %s", ip);
-        CloseSocket(sockfd);
-        free(http_header);
-        free(ipp_payload);
-        free(name);
-        free(value);
-        operation_in_progress = FALSE;
-        return -1;
-    }
-
-    printf("Connecting to printer...\n");
-    /* Some AirPrint-capable inkjets (HP OfficeJet/Envy series confirmed -
-     * see issue #30) let their Wi-Fi radio drop into a power-save state
-     * between jobs. UDP discovery (SSDP/mDNS) still gets a reply because
-     * the radio wakes for broadcast/multicast traffic, but the printer's
-     * first real TCP SYN after that can take noticeably longer than 5
-     * seconds to answer while the radio comes back up - a wired printer,
-     * or the same printer once its radio is already awake, answers almost
-     * immediately. 8 seconds gives that wake-up room without making a
-     * genuinely dead endpoint (refused/unreachable) noticeably slower to
-     * give up on, since those fail via ECONNREFUSED/host-unreachable long
-     * before the timeout regardless of its length. */
-    if (mp_connect_with_timeout(sockfd, &serv_addr, 8) < 0) {
-        snprintf(response, maxlen, "Failed to connect to printer");
-        CloseSocket(sockfd);
-        free(http_header);
-        free(ipp_payload);
-        free(name);
-        free(value);
-        operation_in_progress = FALSE;
-        /* Distinct from -1 (data/parsing failures worth retrying, e.g. a
-         * genuinely transient truncated response) so perform_query_flow()
-         * can tell "this endpoint doesn't answer at all" apart from "that
-         * attempt was flaky" and skip straight to the next port instead
-         * of repeating a now-deterministically-bounded connect failure. */
-        return -2;
-    }
-
-    // Process GUI events
-    if (window) {
-        struct IntuiMessage *imsg;
-        while ((imsg = GT_GetIMsg(window->UserPort))) {
-            GT_ReplyIMsg(imsg);
-        }
-    }
-
-    // Send request
-    printf("Sending request...\n");
-    if (send(sockfd, http_header, strlen(http_header), 0) < 0 ||
-        send(sockfd, (char *)ipp_payload, offset, 0) < 0) {
-        snprintf(response, maxlen, "Failed to send request");
-        CloseSocket(sockfd);
-        free(http_header);
-        free(ipp_payload);
-        free(name);
-        free(value);
-        operation_in_progress = FALSE;
-        return -1;
-    }
-
-    free(http_header);
-    free(ipp_payload);
-
-    // Process GUI events
-    if (window) {
-        struct IntuiMessage *imsg;
-        while ((imsg = GT_GetIMsg(window->UserPort))) {
-            GT_ReplyIMsg(imsg);
-        }
-    }
-
-    // Receive response in bounded, GUI-responsive chunks. HTTP permits three
-    // body framing modes here: Content-Length, Transfer-Encoding: chunked, or
-    // connection close. Canon firmware has now exercised all the awkward
-    // parts at once: an interim 100 response followed by a final response
-    // whose header spelling/framing cannot be assumed.
-    printf("Waiting for response...\n");
-    int total_received = 0;
-    int max_idle_attempts = 40; // 40 idle waits at 100ms = 4 seconds
-    int idle_attempts = 0;
-    int header_start = 0; // advanced past any interim "1xx" response below
-    int body_off = -1;
-    int content_len = -1; // -1 = not yet known
-    int chunked = FALSE;
-    int connection_closed = FALSE;
-    int final_http_status = -1; // set once the final (non-1xx) header is seen
-
-    while (total_received < maxlen - 1 && idle_attempts < max_idle_attempts) {
-        fd_set rfds;
-        struct timeval wait_tv;
-        long ready;
-        ssize_t received;
-
-        FD_ZERO(&rfds);
-        FD_SET(sockfd, &rfds);
-        wait_tv.tv_sec = 0;
-        wait_tv.tv_usec = 100000;
-        ready = WaitSelect(sockfd + 1, &rfds, NULL, NULL, &wait_tv, NULL);
-        if (ready == 0) {
-            ++idle_attempts;
-            goto query_receive_pump_gui;
-        }
-        if (ready < 0) {
-            int recv_err = Errno();
-            if (recv_err == EAGAIN || recv_err == EWOULDBLOCK) {
-                ++idle_attempts;
-                goto query_receive_pump_gui;
-            }
-            printf("WaitSelect receive error: %d\n", recv_err);
-            snprintf(response, maxlen, "Receive wait error");
-            CloseSocket(sockfd);
-            free(name);
-            free(value);
-            operation_in_progress = FALSE;
-            return -1;
-        }
-
-        received = recv(sockfd, response + total_received,
-                        maxlen - 1 - total_received, 0);
-        if (received > 0) {
-            total_received += received;
-            response[total_received] = '\0';
-            idle_attempts = 0;
-
-            while (body_off < 0) {
-                int off = mp_http_find_body(response, total_received, header_start);
-                int status;
-                if (off < 0) break;
-                status = mp_http_status(response, total_received, header_start);
-                if (status >= 100 && status < 200) {
-                    // Parse again immediately: the final response may already
-                    // be in this same recv() buffer after the interim header.
-                    printf("Skipping interim HTTP %d response\n", status);
-                    header_start = off;
-                    continue;
-                }
-
-                body_off = off;
-                final_http_status = status;
-                chunked = mp_http_header_has_token(response, header_start,
-                                                   body_off,
-                                                   "Transfer-Encoding",
-                                                   "chunked");
-                if (chunked) {
-                    printf("HTTP response uses chunked transfer encoding\n");
-                } else {
-                    content_len = mp_http_content_length(response, header_start,
-                                                         body_off);
-                    if (content_len >= 0)
-                        printf("Content-Length: %d\n", content_len);
-                    else
-                        printf("HTTP response has no length; reading until close\n");
-                }
-            }
-
-            if (body_off >= 0) {
-                if (chunked) {
-                    int complete = mp_http_chunked_complete(response + body_off,
-                                                            total_received - body_off);
-                    if (complete < 0) {
-                        printf("Malformed chunked HTTP response\n");
-                        snprintf(response, maxlen, "Malformed chunked response");
-                        CloseSocket(sockfd);
-                        free(name);
-                        free(value);
-                        operation_in_progress = FALSE;
-                        return -1;
-                    }
-                    if (complete > 0) break;
-                } else if (content_len >= 0 &&
-                           (total_received - body_off) >= content_len) {
-                    break; // Got the full declared IPP payload
-                }
-            }
-        } else if (received == 0) {
-            connection_closed = TRUE;
-            break;
-        } else {
-            int recv_err = Errno();
-            if (recv_err != EAGAIN && recv_err != EWOULDBLOCK) {
-                printf("Receive error: %d\n", recv_err);
-                snprintf(response, maxlen, "Receive error");
-                CloseSocket(sockfd);
-                free(name);
-                free(value);
-                operation_in_progress = FALSE;
-                return -1;
-            }
-            ++idle_attempts;
-        }
-
-query_receive_pump_gui:
-        // Process GUI events to keep the mouse responsive
-        if (window) {
-            struct IntuiMessage *imsg;
-            while ((imsg = GT_GetIMsg(window->UserPort))) {
-                GT_ReplyIMsg(imsg);
-            }
-        }
-    }
-
-    if (total_received == 0) {
-        snprintf(response, maxlen, "No response or timeout");
-        CloseSocket(sockfd);
-        free(name);
-        free(value);
-        operation_in_progress = FALSE;
-        return -1;
-    }
-
-    response[total_received] = '\0';
-
-    // Find the start of the IPP payload (past any interim response already
-    // skipped above)
-    if (body_off < 0) {
-        body_off = mp_http_find_body(response, total_received, header_start);
-        if (body_off >= 0 && final_http_status < 0)
-            final_http_status = mp_http_status(response, total_received, header_start);
-    }
-    if (body_off < 0) {
-        printf("Failed to find IPP payload (no \\r\\n\\r\\n separator)\n");
-        CloseSocket(sockfd);
-        free(name);
-        free(value);
-        operation_in_progress = FALSE;
-        return -1;
-    }
-    char *ipp_start = response + body_off;
-    int ipp_len = total_received - body_off;
-
-    if (chunked) {
-        int decoded_len = mp_http_decode_chunked(ipp_start, ipp_len);
-        if (decoded_len < 0) {
-            printf("Incomplete chunked IPP response\n");
-            CloseSocket(sockfd);
-            free(name);
-            free(value);
-            operation_in_progress = FALSE;
-            return -1;
-        }
-        ipp_len = decoded_len;
-        response[body_off + ipp_len] = '\0';
-    } else if (content_len < 0 && !connection_closed &&
-               idle_attempts >= max_idle_attempts) {
-        printf("Timed out waiting for close-delimited IPP response\n");
-        CloseSocket(sockfd);
-        free(name);
-        free(value);
-        operation_in_progress = FALSE;
-        return -1;
-    }
-
-    // Don't parse a response we know is short: if the printer told us how
-    // many body bytes to expect and we didn't get that many (timed out or
-    // the connection dropped mid-response), that's a failed scan, not a
-    // printer that reported empty capabilities.
-    if (content_len >= 0 && ipp_len < content_len) {
-        printf("Incomplete IPP response: got %d of %d declared bytes\n", ipp_len, content_len);
-        CloseSocket(sockfd);
-        free(name);
-        free(value);
-        operation_in_progress = FALSE;
-        return -1;
-    }
-
-    if (ipp_len < 8) {
-        printf("IPP response too short: %d bytes\n", ipp_len);
-        CloseSocket(sockfd);
-        free(name);
-        free(value);
-        operation_in_progress = FALSE;
-        return -1;
-    }
-
-    // Check the IPP header
-    printf("IPP Version: 0x%02x%02x\n", (unsigned char)ipp_start[0], (unsigned char)ipp_start[1]);
-    printf("IPP Status: 0x%02x%02x\n", (unsigned char)ipp_start[2], (unsigned char)ipp_start[3]);
-    printf("Request ID: 0x%02x%02x%02x%02x\n", (unsigned char)ipp_start[4], (unsigned char)ipp_start[5], (unsigned char)ipp_start[6], (unsigned char)ipp_start[7]);
-
-    // Reject a failed Get-Printer-Attributes response outright, before any
-    // capability attributes are parsed/cached: a non-200 HTTP status or an
-    // IPP status outside the 0x0000 (successful) class means the printer
-    // did not actually answer the query, and whatever bytes follow must not
-    // be read as capabilities.
-    if (final_http_status != 200) {
-        printf("Get-Printer-Attributes failed: HTTP status %d\n", final_http_status);
-        CloseSocket(sockfd);
-        free(name);
-        free(value);
-        operation_in_progress = FALSE;
-        return -1;
-    }
-    {
-        unsigned int ipp_status = ((unsigned char)ipp_start[2] << 8) |
-                                   (unsigned char)ipp_start[3];
-        if (ipp_status >= 0x0100) {
-            printf("Get-Printer-Attributes failed: IPP status 0x%04x\n", ipp_status);
-            CloseSocket(sockfd);
-            free(name);
-            free(value);
-            operation_in_progress = FALSE;
-            return -1;
-        }
-    }
-
-    int pos = 8; // Skip header
-    int attributes_processed = 0;
-    int max_attributes = 1000; // Safety limit to prevent infinite loops
-    char current_name[512] = ""; // Store the current attribute name for multi-value attributes
-
-    while (pos < ipp_len && attributes_processed < max_attributes) {
-        unsigned char tag = ipp_start[pos++];
-        if (tag == 0x03) {
-            break; // End of attributes
-        }
-
-        if (tag >= 0x01 && tag <= 0x05) { // Attribute group
-            int group_start_pos = pos;
-            while (pos < ipp_len && ipp_start[pos] > 0x05) {
-                int attr_start_pos = pos;
-                unsigned char value_tag = ipp_start[pos++];
-
-                if (pos + 2 > ipp_len) {
-                    pos = ipp_len; // Force exit
-                    break;
-                }
-                int name_len = ((unsigned char)ipp_start[pos] << 8) | (unsigned char)ipp_start[pos + 1]; pos += 2;
-
-                if (name_len == 0) {
-                    strncpy(name, current_name, 512);
-                    name[511] = '\0';
-                } else {
-                    if (name_len < 0 || name_len >= 512 || pos + name_len > ipp_len) {
-                        pos = ipp_len; // Force exit
-                        break;
-                    }
-                    strncpy(name, ipp_start + pos, name_len); name[name_len] = '\0'; pos += name_len;
-                    strncpy(current_name, name, 512);
-                    current_name[511] = '\0';
-                }
-
-                if (pos + 2 > ipp_len) {
-                    pos = ipp_len; // Force exit
-                    break;
-                }
-                int value_len = ((unsigned char)ipp_start[pos] << 8) | (unsigned char)ipp_start[pos + 1]; pos += 2;
-                if (value_len < 0 || value_len >= 512 || pos + value_len > ipp_len) {
-                    pos = ipp_len; // Force exit
-                    break;
-                }
-
-                if (value_tag == 0x34 || value_tag == 0x37) {
-                    pos += value_len;
-                } else {
-                    strncpy(value, ipp_start + pos, value_len); value[value_len] = '\0'; pos += value_len;
-
-                    if (strcmp(name, "media-source-supported") == 0 && value_tag == 0x44) {
-                        store_value(supported_media_sources, &num_supported_media_sources, value);
-                    } else if (strcmp(name, "media-ready") == 0 && value_tag == 0x44) {
-                        has_media_ready = TRUE;
-                        store_value(supported_media, &num_supported_media, value);
-                        int found = 0;
-                        for (int i = 0; i < num_media_tray_mappings; i++) {
-                            if (strcmp(media_tray_map[i].source, "auto") == 0) {
-                                found = 1;
-                                break;
-                            }
-                        }
-                        if (!found && num_media_tray_mappings < MAX_VALUES) {
-                            strncpy(media_tray_map[num_media_tray_mappings].media, value, MAX_ATTR_LEN - 1);
-                            strncpy(media_tray_map[num_media_tray_mappings].source, "auto", MAX_ATTR_LEN - 1);
-                            strncpy(media_tray_map[num_media_tray_mappings].trayName, "AUTO", MAX_ATTR_LEN - 1);
-                            strncpy(media_tray_map[num_media_tray_mappings].medianame, "Unknown", MAX_ATTR_LEN - 1);
-                            num_media_tray_mappings++;
-                        }
-                    } else if (strcmp(name, "printer-input-tray") == 0 && value_tag == 0x30) {
-                        char source[MAX_ATTR_LEN] = "";
-                        char trayName[MAX_ATTR_LEN] = "";
-                        char medianame[MAX_ATTR_LEN] = "Unknown";
-                        char media[MAX_ATTR_LEN] = "";
-                        int index = -1;
-
-                        char value_copy[512];
-                        strncpy(value_copy, value, sizeof(value_copy) - 1);
-                        value_copy[sizeof(value_copy) - 1] = '\0';
-
-                        char *token = strtok(value_copy, ";");
-                        while (token) {
-                            if (strncmp(token, "name=", 5) == 0) {
-                                strncpy(trayName, token + 5, MAX_ATTR_LEN - 1);
-                            } else if (strncmp(token, "tray-name=", 10) == 0) {
-                                strncpy(trayName, token + 10, MAX_ATTR_LEN - 1);
-                            } else if (strncmp(token, "medianame=", 10) == 0) {
-                                strncpy(medianame, token + 10, MAX_ATTR_LEN - 1);
-                            } else if (strncmp(token, "media=", 6) == 0) {
-                                strncpy(media, token + 6, MAX_ATTR_LEN - 1);
-                            } else if (strncmp(token, "index=", 6) == 0) {
-                                index = atoi(token + 6);
-                                if (index == 1) strncpy(source, "auto", MAX_ATTR_LEN - 1);
-                                else if (index == 2) strncpy(source, "by-pass-tray", MAX_ATTR_LEN - 1);
-                                else if (index == 3) strncpy(source, "tray-1", MAX_ATTR_LEN - 1);
-                                else if (index == 4) strncpy(source, "tray-2", MAX_ATTR_LEN - 1);
-
-                                if (trayName[0] == '\0') {
-                                    strncpy(trayName, source, MAX_ATTR_LEN - 1);
-                                }
-                            }
-                            token = strtok(NULL, ";");
-                        }
-
-                        int found = 0;
-                        for (int i = 0; i < num_media_tray_mappings; i++) {
-                            if (strcmp(media_tray_map[i].source, source) == 0) {
-                                strncpy(media_tray_map[i].trayName, trayName, MAX_ATTR_LEN - 1);
-                                strncpy(media_tray_map[i].medianame, medianame, MAX_ATTR_LEN - 1);
-                                found = 1;
-                                break;
-                            }
-                        }
-                        if (!found && num_media_tray_mappings < MAX_VALUES && media[0] != '\0') {
-                            strncpy(media_tray_map[num_media_tray_mappings].media, media, MAX_ATTR_LEN - 1);
-                            strncpy(media_tray_map[num_media_tray_mappings].source, source, MAX_ATTR_LEN - 1);
-                            strncpy(media_tray_map[num_media_tray_mappings].trayName, trayName, MAX_ATTR_LEN - 1);
-                            strncpy(media_tray_map[num_media_tray_mappings].medianame, medianame, MAX_ATTR_LEN - 1);
-                            num_media_tray_mappings++;
-                        }
-                    } else if (strcmp(name, "printer-state") == 0 &&
-                               value_tag == 0x23 && value_len == 4) {
-                        /* printer-state is an IPP enum (RFC 8011 5.4.11),
-                         * not the 0x21 'integer' tag. Fed into
-                         * mp_printer_status_label() and shown under the
-                         * ink/toner strips - see mp_draw_marker_strips(). */
-                        printer_state_value = (int)mp_ipp_decode_be32(
-                            (const UBYTE *)ipp_start + pos - value_len);
-                        printf("Printer state: %d\n", printer_state_value);
-                    } else if (strcmp(name, "printer-state-reasons") == 0 &&
-                               value_tag == 0x44) {
-                        /* 1setOf keyword (RFC 8011 5.4.12), same parallel-
-                         * array shape as marker-names/marker-colors/etc.
-                         * above - see mp_printer_status_label(). */
-                        store_value(printer_state_reasons,
-                                    &num_printer_state_reasons, value);
-                    } else if (strcmp(name, "print-color-mode-supported") == 0 && value_tag == 0x44) {
-                        store_value(supported_print_modes, &num_supported_print_modes, value);
-                        printf("Added print-color-mode-supported: %s\n", value); }
-                    else if (strcmp(name, "print-scaling-supported") == 0 && value_tag == 0x44) {
-                        store_value(supported_scaling, &num_supported_scaling, value);
-                        printf("Added print-scaling-supported: %s\n", value);
-                    } else if (strcmp(name, "sides-supported") == 0 &&
-                               value_tag == 0x44) {
-                        if (strcmp(value, "one-sided") == 0 ||
-                            strcmp(value, "two-sided-long-edge") == 0 ||
-                            strcmp(value, "two-sided-short-edge") == 0) {
-                            store_value(supported_sides, &num_supported_sides,
-                                        value);
-                            printf("Added sides-supported: %s\n", value);
-                        }
-                    } else if (strcmp(name, "operations-supported") == 0 &&
-                               value_tag == 0x23 && value_len == 4) {
-                        const UBYTE *raw =
-                            (const UBYTE *)ipp_start + pos - value_len;
-                        ULONG operation = ((ULONG)raw[0] << 24) |
-                                          ((ULONG)raw[1] << 16) |
-                                          ((ULONG)raw[2] << 8) |
-                                          (ULONG)raw[3];
-                        if (operation == 0x0005UL) supports_create_job = TRUE;
-                        if (operation == 0x0006UL) supports_send_document = TRUE;
-                    } else if (strcmp(name,
-                                      "multiple-document-jobs-supported") == 0 &&
-                               value_tag == 0x22 && value_len == 1) {
-                        const UBYTE *raw =
-                            (const UBYTE *)ipp_start + pos - value_len;
-                        supports_multiple_document_jobs = raw[0] ? TRUE : FALSE;
-                    } else if (strcmp(name,
-                                      "multiple-document-handling-supported") == 0 &&
-                               value_tag == 0x44 &&
-                               strcmp(value, "single-document") == 0) {
-                        supports_single_document_handling = TRUE;
-                    } else if (strcmp(name,
-                                      "pwg-raster-document-sheet-back") == 0 &&
-                               value_tag == 0x44) {
-                        if (strcmp(value, "normal") == 0 ||
-                            strcmp(value, "rotated") == 0 ||
-                            strcmp(value, "flipped") == 0 ||
-                            strcmp(value, "manual-tumble") == 0) {
-                            strncpy(pwg_sheet_back_value, value,
-                                    sizeof(pwg_sheet_back_value) - 1);
-                            pwg_sheet_back_value[
-                                sizeof(pwg_sheet_back_value) - 1] = '\0';
-                            printf("PWG sheet-back: %s\n",
-                                   pwg_sheet_back_value);
-                        }
-                    } else if ((strcmp(name, "printer-resolution-default") == 0 ||
-                                strcmp(name, "printer-resolution-supported") == 0 ||
-                                strcmp(name, "pwg-raster-document-resolution-supported") == 0) &&
-                               value_tag == 0x32 && value_len == 9) {
-                        mp_add_ipp_resolution((const UBYTE *)ipp_start + pos - value_len,
-                                              value_len);
-                    } else if (strcmp(name, "print-quality-supported") == 0 &&
-                               value_tag == 0x23 && value_len == 4) {
-                        /* print-quality-supported is an IPP enum (RFC 8011
-                         * 5.4.13, value tag 0x23), not the 0x21 'integer'
-                         * tag - and its value is a 4-byte big-endian binary
-                         * integer, not decimal text, so atoi() on it was
-                         * always wrong. */
-                        unsigned long quality = mp_ipp_decode_be32(
-                            (const UBYTE *)ipp_start + pos - value_len);
-                        const char *quality_name = NULL;
-
-                        switch (quality) {
-                            case 3: quality_name = "draft"; break;
-                            case 4: quality_name = "normal"; break;
-                            case 5: quality_name = "high"; break;
-                            default: break; /* ignore unknown enum values */
-                        }
-
-                        if (quality_name) {
-                            BOOL already_have = FALSE;
-                            int qi;
-                            for (qi = 0; qi < num_supported_quality; qi++) {
-                                if (strcmp(supported_quality[qi], quality_name) == 0) {
-                                    already_have = TRUE;
-                                    break;
-                                }
-                            }
-                            if (!already_have && num_supported_quality < MAX_QUALITIES) {
-                                strcpy(supported_quality[num_supported_quality++], quality_name);
-                                printf("Added print-quality-supported: %s\n", quality_name);
-                            }
-                        }
-                    } else if (strcmp(name, "document-format-supported") == 0 && value_tag == 0x49) {
-                        store_value(supported_formats, &num_supported_formats, value);
-                    } else if (strcmp(name, "jpeg-k-octets-supported") == 0) {
-                        jpeg_k_octets_reported = TRUE;
-                    } else if (strcmp(name, "jpeg-x-dimension-supported") == 0) {
-                        jpeg_x_dimension_reported = TRUE;
-                    } else if (strcmp(name, "jpeg-y-dimension-supported") == 0) {
-                        jpeg_y_dimension_reported = TRUE;
-                    } else if (strcmp(name, "printer-make-and-model") == 0 &&
-                               (value_tag == 0x41 || value_tag == 0x42)) {
-                        strncpy(printer_make_model, value, sizeof(printer_make_model) - 1);
-                        printer_make_model[sizeof(printer_make_model) - 1] = '\0';
-                    } else if (strcmp(name, "printer-icons") == 0 &&
-                               value_tag == 0x45 && printer_icon_uri[0] == '\0') {
-                        strncpy(printer_icon_uri, value, sizeof(printer_icon_uri) - 1);
-                        printer_icon_uri[sizeof(printer_icon_uri) - 1] = '\0';
-                    } else if (strcmp(name, "marker-names") == 0 &&
-                               (value_tag == 0x41 || value_tag == 0x42 ||
-                                value_tag == 0x44)) {
-                        store_value(marker_names, &num_marker_names, value);
-                    } else if (strcmp(name, "marker-colors") == 0 &&
-                               (value_tag == 0x41 || value_tag == 0x42 ||
-                                value_tag == 0x44)) {
-                        /* "#RRGGBB" (PWG5100.13) or CSS-style names
-                         * ("cyan", "multi-color", ...) depending on the
-                         * printer - resolved to a screen pen when drawn,
-                         * not here. */
-                        store_value(marker_colors, &num_marker_colors, value);
-                    } else if (strcmp(name, "marker-types") == 0 &&
-                               value_tag == 0x44) {
-                        store_value(marker_types, &num_marker_types, value);
-                    } else if (strcmp(name, "marker-levels") == 0 &&
-                               value_tag == 0x21 && value_len == 4) {
-                        /* Percent full, 0-100; RFC 3805 reserves negative
-                         * values (-1, -2, ...) to mean "unknown"/"some
-                         * value not currently reportable", not a real
-                         * level - store as-is and let the drawing code
-                         * treat negative as unknown rather than clamping
-                         * here and losing that distinction. */
-                        int level = (int)mp_ipp_decode_be32(
-                            (const UBYTE *)ipp_start + pos - value_len);
-                        store_int_value(marker_levels, &num_marker_levels, level);
-                    } else if (strcmp(name, "marker-low-levels") == 0 &&
-                               value_tag == 0x21 && value_len == 4) {
-                        int level = (int)mp_ipp_decode_be32(
-                            (const UBYTE *)ipp_start + pos - value_len);
-                        store_int_value(marker_low_levels, &num_marker_low_levels, level);
-                    } else if (strcmp(name, "marker-high-levels") == 0 &&
-                               value_tag == 0x21 && value_len == 4) {
-                        int level = (int)mp_ipp_decode_be32(
-                            (const UBYTE *)ipp_start + pos - value_len);
-                        store_int_value(marker_high_levels, &num_marker_high_levels, level);
-                    }
-                }
-
-                if (pos == attr_start_pos) {
-                    pos = ipp_len; // Force exit
-                    break;
-                }
-
-                if (num_supported_print_modes > 0) {
-                    // Ensure selected_print_mode is still valid
-                    int match_found = 0;
-                    for (int i = 0; i < num_supported_print_modes; i++) {
-                        if (strcmp(supported_print_modes[i], selected_print_mode) == 0) {
-                            print_mode = i;
-                            match_found = 1;
-                            break;
-                        }
-                    }
-                    if (!match_found) {
-                        strcpy(selected_print_mode, supported_print_modes[0]);
-                        print_mode = 0;
-                        printf("No match for saved print mode, defaulting to: %s\n", selected_print_mode);
-                    }
-                }
-
-                attributes_processed++;
-                if (window) {
-                    struct IntuiMessage *imsg;
-                    while ((imsg = GT_GetIMsg(window->UserPort))) {
-                        GT_ReplyIMsg(imsg);
-                    }
-                }
-            }
-
-            if (pos == group_start_pos) {
-                pos++;
-            }
-        } else {
-            continue;
-        }
-    }
-
-    if (attributes_processed >= max_attributes) {
-        printf("Reached maximum attribute limit (%d), aborting parsing\n", max_attributes);
-    }
-
-    /* A response that parses but yields nothing usable (no formats, no
-     * quality, no scaling, no media, no print modes, no make/model) is not
-     * a printer that genuinely supports nothing - every real IPP
-     * Everywhere/AirPrint printer reports at least some of these. Treat it
-     * as a failed query so perform_query_flow() retries the next
-     * port/attempt instead of caching an empty result. */
-    if (num_supported_formats == 0 && num_supported_quality == 0 &&
-        num_supported_scaling == 0 && num_supported_media == 0 &&
-        num_supported_print_modes == 0 && printer_make_model[0] == '\0') {
-        printf("Printer reported no usable capabilities - treating as a failed query\n");
-        snprintf(response, maxlen, "Printer reported no capabilities");
-        CloseSocket(sockfd);
-        free(name);
-        free(value);
-        operation_in_progress = FALSE;
-        return -1;
-    }
-
-    int media_index = 0;
-    for (int i = 0; i < num_supported_media_sources; i++) {
-        if (strcmp(supported_media_sources[i], "auto") == 0) continue;
-        if (media_index >= num_supported_media) break;
-        int found = 0;
-        for (int j = 0; j < num_media_tray_mappings; j++) {
-            if (strcmp(media_tray_map[j].source, supported_media_sources[i]) == 0) {
-                found = 1;
-                break;
-            }
-        }
-        if (!found && num_media_tray_mappings < MAX_VALUES) {
-            strncpy(media_tray_map[num_media_tray_mappings].media, supported_media[media_index], MAX_ATTR_LEN - 1);
-            strncpy(media_tray_map[num_media_tray_mappings].source, supported_media_sources[i], MAX_ATTR_LEN - 1);
-            strncpy(media_tray_map[num_media_tray_mappings].trayName, supported_media_sources[i], MAX_ATTR_LEN - 1);
-            strncpy(media_tray_map[num_media_tray_mappings].medianame, "Unknown", MAX_ATTR_LEN - 1);
-            num_media_tray_mappings++;
-        }
-        media_index++;
-    }
-
-    printf("Media-Tray Mappings:\n");
-    for (int i = 0; i < num_media_tray_mappings; i++) {
-        printf("- %s -> %s (%s), medianame=%s\n", media_tray_map[i].media, media_tray_map[i].source, media_tray_map[i].trayName, media_tray_map[i].medianame);
-    }
-    printf("Supported Sources:\n");
-    for (int i = 0; i < num_supported_media_sources; i++) {
-        printf("- %s\n", supported_media_sources[i]);
-    }
-    printf("Supported Print Modes:\n");
-    for (int i = 0; i < num_supported_print_modes; i++) {
-        printf("- %s\n", supported_print_modes[i]);
-    }
-
-    // Check if the current print mode is supported
-    const char *current_mode = print_mode == 0 ? "monochrome" : "color";
-    int mode_supported = 0;
-    for (int i = 0; i < num_supported_print_modes; i++) {
-        if (strcmp(supported_print_modes[i], current_mode) == 0) {
-            mode_supported = 1;
-            break;
-        }
-    }
-    if (!mode_supported) {
-        printf("Warning: Selected print mode '%s' is not supported by the printer.\n", current_mode);
-    }
-
-    // Cleanup
-    CloseSocket(sockfd);
-    free(name);
-    free(value);
-    operation_in_progress = FALSE;
-
-    if (window && vi) update_media_dropdown(window);
-    if (window) update_print_mode_dropdown(window);
-    if (window) update_scaling_dropdown(window);
-    ensure_quality_defaults();
-    if (window) update_quality_dropdown(window);
-    /* update_engine_dropdown() must run before update_dpi_dropdown(): it is
-     * what settles driver_engine_buffer on "pwg-raster" for a printer that
-     * advertises it (see mp_rebuild_engine_options_from_query()), and the
-     * DPI dropdown only offers the 300* compatibility entry when the engine
-     * buffer already reads "pwg-raster" at the time it is built. Building
-     * DPI first left a fresh Query showing plain "600 dpi" with no compat
-     * entry until the config was saved and the app reopened, when the
-     * cached-capabilities path (apply_cached_capabilities()) happened to
-     * call them in the correct order (issue #43). */
-    if (window) update_engine_dropdown(window, TRUE);
-    if (window) update_dpi_dropdown(window);
-    if (window) update_sides_dropdown(window);
-
-    if (printer_make_model[0]) {
-        printf("Printer: %s\n", printer_make_model);
-    } else {
-        printf("Printer did not report printer-make-and-model\n");
-    }
-
-    if (window) {
-        mp_update_model_display(window);
-        /* Preview the freshly-queried (not yet saved) model in the Unit
-         * dropdown's current entry, rather than waiting for Save. */
-        refresh_unit_dropdown(window);
-    }
-
-    if (num_supported_formats > 0) {
-        printf("Printer document formats (%d):\n", num_supported_formats);
-        for (int i = 0; i < num_supported_formats; i++) {
-            printf("- %s\n", supported_formats[i]);
-        }
-    } else {
-        printf("Printer did not report document-format-supported\n");
-    }
-
-    mp_warn_if_jpeg_nominal();
-
-    printf("query_printer_attributes completed\n");
-    return 0;
-}
-
-/* Shared by the Query button and the post-discovery "Use Selected" path:
- * tries 631 first (falling back to a user-typed port or 80), and on
- * success applies the fetched capabilities to the gadgets exactly like a
- * manual Query click. */
-static void perform_query_flow(struct Window *win, const char *ip_only, int port_hint,
-                               char *response, int response_size) {
-    /* 631 is the IANA-registered IPP port and the one real printers' full
-     * capability set lives on; port 80 is only ever a bonus/compat
-     * endpoint some printers also answer on, sometimes with a lesser or
-     * different response. When we don't have an explicit port (discovery
-     * always calls with port_hint 0, and manual entry without a ":port"
-     * does too), try 631 first so we don't latch onto an 80 response that
-     * "succeeds" but is missing capabilities like scaling. An explicit
-     * user-typed port is still tried first, ahead of the 631 fallback. */
-    int ports_to_try[2];
-    if (port_hint > 0) {
-        ports_to_try[0] = port_hint;
-        ports_to_try[1] = 631;
-    } else {
-        ports_to_try[0] = 631;
-        ports_to_try[1] = 80;
-    }
-    int i, attempt;
-    BOOL ok = FALSE;
-
-    // A scan can fail an individual attempt for purely transient network
-    // reasons (a slow/incomplete response - see query_printer_attributes).
-    // Retry a few times per port before moving on, rather than treating one
-    // flaky attempt as "the printer has no capabilities".
-    for (i = 0; i < 2 && !ok; i++) {
-        for (attempt = 0; attempt < 3 && !ok; attempt++) {
-            int qrc;
-            printf("Trying %s:%d (attempt %d/3)...\n", ip_only, ports_to_try[i], attempt + 1);
-            qrc = query_printer_attributes(ip_only, ports_to_try[i], response,
-                                           response_size);
-            if (qrc == 0) {
-                struct Gadget *ip_gadget;
-
-                snprintf(ip_buffer, sizeof(ip_buffer), "%s:%d", ip_only, ports_to_try[i]);
-
-                ip_gadget = glist;
-                while (ip_gadget && ip_gadget->GadgetID != GAD_IP_STRING) {
-                    ip_gadget = ip_gadget->NextGadget;
-                }
-                if (ip_gadget) {
-                    GT_SetGadgetAttrs(ip_gadget, win, NULL,
-                                      GTST_String, (ULONG)ip_buffer,
-                                      TAG_DONE);
-                }
-
-                if (save_capability_cache(ip_only, ports_to_try[i], driver_path_buffer))
-                    printf("Printer capabilities cached\n");
-                else
-                    printf("Warning: could not save printer capability cache\n");
-
-                apply_job_defaults_to_gadgets(win);
-                mp_check_any_engine_supported(win);
-                ok = TRUE;
-            } else {
-                printf("Query attempt %d/3 on %s:%d failed\n", attempt + 1, ip_only, ports_to_try[i]);
-                /* -2 = connect() itself couldn't be established (see
-                 * mp_connect_with_timeout). A genuinely dead endpoint
-                 * (nothing listening, no route) fails fast via
-                 * ECONNREFUSED/host-unreachable well before the timeout,
-                 * so it costs little to give it a second try - but some
-                 * Wi-Fi printers (HP OfficeJet/Envy confirmed - issue #30)
-                 * let their radio drop into power-save between jobs, and
-                 * the first real TCP SYN after that can be slow enough to
-                 * hit the connect timeout even though the printer is very
-                 * much there and answers promptly once its radio is
-                 * awake. Bailing to the next port after just one -2 used
-                 * to mean that single slow wake-up permanently cost this
-                 * port its shot, even though a second attempt right after
-                 * would very likely have connected. Two attempts before
-                 * moving on covers that case; a third would only slow
-                 * down reaching the fallback port for endpoints that are
-                 * actually dead. Retries stay worthwhile for -1 (the
-                 * connection succeeded but something after that was
-                 * flaky, e.g. a truncated response - see
-                 * query_printer_attributes). */
-                if (qrc == -2 && attempt > 0) break;
-            }
-        }
-    }
-
-    if (!ok) {
-        custom_printf("CLEAR");
-        custom_printf("Scan failed - please try Query again");
-        mp_clear_printer_icon();
-        mp_load_printer_icon_cache(FALSE);
-    } else {
-        mp_refresh_printer_icon();
-    }
-    /* Redraw either way: query_printer_attributes() already reset the
-     * marker-* arrays before this loop even on failure, so a failed
-     * re-query correctly clears a previous printer's ink levels off the
-     * panel instead of leaving them looking current. */
-    mp_draw_marker_strips();
-    mp_draw_sides_hint();
-    mp_draw_printer_icon();
-}
-
-/* Allocate the Query response only while a Query is running. Classic
- * systems may not have a contiguous 250 KiB block available even when
- * their total free memory is healthy, so retain the full buffer where
- * possible and fall back to still-useful 128 KiB or 64 KiB capacities.
- * query_printer_attributes() receives the actual capacity and therefore
- * cannot write as though a smaller fallback were still MAX_BUFFER bytes. */
-static char *mp_alloc_query_response(int *out_size) {
-    static const ULONG sizes[] = {
-        (ULONG)MAX_BUFFER, 131072UL, 65536UL
-    };
-    int i;
-
-    if (!out_size)
-        return NULL;
-    *out_size = 0;
-
-    for (i = 0; i < (int)(sizeof(sizes) / sizeof(sizes[0])); ++i) {
-        char *response = (char *)AllocVec(sizes[i], MEMF_ANY);
-        if (response) {
-            *out_size = (int)sizes[i];
-            if (sizes[i] < (ULONG)MAX_BUFFER)
-                printf("Using reduced %lu-byte Query response buffer\n",
-                       (unsigned long)sizes[i]);
-            return response;
-        }
-    }
-
-    printf("Could not allocate a Query response buffer (minimum 65536 bytes)\n");
-    return NULL;
-}
-
-static void perform_query_flow_allocated(struct Window *win,
-                                         const char *ip_only,
-                                         int port_hint) {
-    int response_size;
-    char *response = mp_alloc_query_response(&response_size);
-
-    if (!response)
-        return;
-
-    perform_query_flow(win, ip_only, port_hint, response, response_size);
-    FreeVec(response);
-}
-
-int send_pwg_print_job(const char *ip, int port, const char *media, const char *print_mode, unsigned char *pwg_data, int pwg_size) {
-    if (operation_in_progress) {
-        printf("Operation already in progress, please wait...\n");
-        return -1;
-    }
-    operation_in_progress = TRUE;
-
-    const char *selected_source = "auto";
-    for (int i = 0; i < num_media_tray_mappings; i++) {
-        if (strcmp(media_tray_map[i].media, media) == 0) {
-            selected_source = media_tray_map[i].source;
-            break;
-        }
-    }
-    printf("Selected media: %s, source: %s, print mode: %s\n", media, selected_source, print_mode);
-
-    struct sockaddr_in serv_addr;
-    int sockfd = -1;
-    unsigned char *ipp_payload = NULL;
-    int offset = 0;
-    char *http_header = NULL;
-    char *response_buffer = NULL;
-    int result = -1;
-
-    ipp_payload = malloc(2048);
-    if (!ipp_payload) {
-        printf("Failed to allocate memory for IPP payload\n");
-        operation_in_progress = FALSE;
-        return -1;
-    }
-    memset(ipp_payload, 0, 2048);
-
-    char uri[128];
-    snprintf(uri, sizeof(uri), "ipp://%s/ipp", ip);
-    int uri_len = strlen(uri);
-
-    ipp_payload[offset++] = 0x01; ipp_payload[offset++] = 0x01;
-    ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x02;
-    ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x01;
-
-    ipp_payload[offset++] = 0x01;
-    ipp_payload[offset++] = 0x47; ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x12;
-    memcpy(&ipp_payload[offset], "attributes-charset", 18); offset += 18;
-    ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x05;
-    memcpy(&ipp_payload[offset], "utf-8", 5); offset += 5;
-
-    ipp_payload[offset++] = 0x48; ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x1b;
-    memcpy(&ipp_payload[offset], "attributes-natural-language", 27); offset += 27;
-    ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x02;
-    memcpy(&ipp_payload[offset], "en", 2); offset += 2;
-
-    ipp_payload[offset++] = 0x45; ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x0b;
-    memcpy(&ipp_payload[offset], "printer-uri", 11); offset += 11;
-    ipp_payload[offset++] = (uri_len >> 8) & 0xFF;
-    ipp_payload[offset++] = uri_len & 0xFF;
-    memcpy(&ipp_payload[offset], uri, uri_len); offset += uri_len;
-
-    const char *job_name = "Amiga";
-    int job_name_len = strlen(job_name);
-    ipp_payload[offset++] = 0x42; ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x08;
-    memcpy(&ipp_payload[offset], "job-name", 8); offset += 8;
-    ipp_payload[offset++] = (job_name_len >> 8) & 0xFF;
-    ipp_payload[offset++] = job_name_len & 0xFF;
-    memcpy(&ipp_payload[offset], job_name, job_name_len); offset += job_name_len;
-
-    const char *doc_format = "image/pwg-raster";
-    int doc_format_len = strlen(doc_format);
-    ipp_payload[offset++] = 0x49; ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x0e;
-    memcpy(&ipp_payload[offset], "document-format", 14); offset += 14;
-    ipp_payload[offset++] = (doc_format_len >> 8) & 0xFF;
-    ipp_payload[offset++] = doc_format_len & 0xFF;
-    memcpy(&ipp_payload[offset], doc_format, doc_format_len); offset += doc_format_len;
-
-    ipp_payload[offset++] = 0x02;
-
-    int media_len = strlen(media);
-    ipp_payload[offset++] = 0x44;
-    ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x05;
-    memcpy(&ipp_payload[offset], "media", 5); offset += 5;
-    ipp_payload[offset++] = (media_len >> 8) & 0xFF;
-    ipp_payload[offset++] = media_len & 0xFF;
-    memcpy(&ipp_payload[offset], media, media_len); offset += media_len;
-
-    int source_len = strlen(selected_source);
-    ipp_payload[offset++] = 0x44;
-    ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x0c;
-    memcpy(&ipp_payload[offset], "media-source", 12); offset += 12;
-    ipp_payload[offset++] = (source_len >> 8) & 0xFF;
-    ipp_payload[offset++] = source_len & 0xFF;
-    memcpy(&ipp_payload[offset], selected_source, source_len); offset += source_len;
-
-
-    if (!print_mode || strlen(print_mode) == 0) {
-        print_mode = "monochrome";
-    }
-    int print_mode_len = strlen(print_mode);
-    ipp_payload[offset++] = 0x44;
-    ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x0f;
-    memcpy(&ipp_payload[offset], "print-color-mode", 17); offset += 17;
-    ipp_payload[offset++] = (print_mode_len >> 8) & 0xFF;
-    ipp_payload[offset++] = print_mode_len & 0xFF;
-    memcpy(&ipp_payload[offset], print_mode, print_mode_len); offset += print_mode_len;
-
-    int scaling_len = strlen(selected_scaling);
-    ipp_payload[offset++] = 0x44;
-    ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x0d;
-    memcpy(&ipp_payload[offset], "print-scaling", 13); offset += 13;
-    ipp_payload[offset++] = (scaling_len >> 8) & 0xFF;
-    ipp_payload[offset++] = scaling_len & 0xFF;
-    memcpy(&ipp_payload[offset], selected_scaling, scaling_len); offset += scaling_len;
-
-    int quality_value = 4;
-    if (strcmp(selected_quality, "draft") == 0) quality_value = 3;
-    else if (strcmp(selected_quality, "high") == 0) quality_value = 5;
-
-    ipp_payload[offset++] = 0x21;
-    ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x0d;
-    memcpy(&ipp_payload[offset], "print-quality", 13); offset += 13;
-    ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x04;
-    ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x00;
-    ipp_payload[offset++] = 0x00; ipp_payload[offset++] = quality_value;
-
-    ipp_payload[offset++] = 0x21; // enum
-    ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x12;
-    memcpy(&ipp_payload[offset], "printer-resolution", 18); offset += 18;
-    ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x06;
-    ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x01; // cross feed units = dpi
-    ipp_payload[offset++] = 0x01; ipp_payload[offset++] = 0x2c; // 300
-    ipp_payload[offset++] = 0x01; ipp_payload[offset++] = 0x2c; // 300
-    ipp_payload[offset++] = 0x03;
-
-    http_header = malloc(256);
-    if (!http_header) {
-        free(ipp_payload);
-        operation_in_progress = FALSE;
-        return -1;
-    }
-    snprintf(http_header, 256,
-        "POST /ipp HTTP/1.1\r\nHost: %s\r\nContent-Type: application/ipp\r\nContent-Length: %d\r\nConnection: close\r\n\r\n",
-        ip, offset + pwg_size);
-
-    sockfd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (sockfd < 0) {
-        free(http_header);
-        free(ipp_payload);
-        operation_in_progress = FALSE;
-        return -1;
-    }
-    printf("Sent HTTP header\n");
-    struct timeval timeout = {10, 0};
-    struct timeval send_timeout = {10, 0};
-    setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
-    setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, (char*)&send_timeout, sizeof(send_timeout));
-    memset(&serv_addr, 0, sizeof(serv_addr));
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_port = htons(port);
-    serv_addr.sin_addr.s_addr = inet_addr((STRPTR)ip);
-    if (connect(sockfd, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0) {
-        CloseSocket(sockfd);
-        free(http_header);
-        free(ipp_payload);
-        operation_in_progress = FALSE;
-        return -1;
-    }
-    printf("Sent IPP payload (%d bytes)\n", offset);
-    printf("T. contlen: %d \n (header: %d\n, pwg: %d)\n", offset + pwg_size, offset, pwg_size);
-    printf("Sending PWG data (%d bytes)...\n", pwg_size);
-    if (send(sockfd, http_header, strlen(http_header), 0) < 0 ||
-        send(sockfd, (char *)ipp_payload, offset, 0) < 0 ||
-        safe_send(sockfd, (char *)pwg_data, pwg_size) < 0) {
-        CloseSocket(sockfd);
-        free(http_header);
-        free(ipp_payload);
-        operation_in_progress = FALSE;
-        return -1;
-    }
-
-    free(http_header);
-    free(ipp_payload);
-
-    response_buffer = malloc(4096);
-    if (!response_buffer) {
-        CloseSocket(sockfd);
-        operation_in_progress = FALSE;
-        return -1;
-    }
-
-    {
-        int total_received = 0;
-        int header_start = 0;
-        int body_off = -1;
-        int attempt;
-
-        for (attempt = 0; attempt < 10; attempt++) {
-            ssize_t received = recv(sockfd, response_buffer + total_received,
-                                    4096 - 1 - total_received, 0);
-            if (received <= 0) break;
-            total_received += (int)received;
-            response_buffer[total_received] = '\0';
-            body_off = mp_http_find_body(response_buffer, total_received, header_start);
-            if (body_off < 0) continue;
-            {
-                int status = mp_http_status(response_buffer, total_received, header_start);
-                if (status >= 100 && status < 200) {
-                    header_start = body_off;
-                    body_off = -1;
-                    continue;
-                }
-            }
-            break;
-        }
-
-        if (body_off >= 0) {
-            char *ipp_start = response_buffer + body_off;
-            printf("IPP Status: 0x%02x%02x\n", ipp_start[2], ipp_start[3]);
-        } else {
-            printf("No response or receive timeout.\n");
-        }
-    }
-
-    free(response_buffer);
-    CloseSocket(sockfd);
-    operation_in_progress = FALSE;
-    return 0;
-}
-
-// Updated send_print_job to send the selected tray (media-source) and print mode
-int send_print_job(const char *ip, int port, const char *filename, const char *media, const char *print_mode) {
-    if (operation_in_progress) {
-        printf("Operation already in progress, please wait...\n");
-        return -1;
-    }
-    operation_in_progress = TRUE;
-
-    // Find the selected media's tray
-    const char *selected_source = "auto"; // Default fallback
-    for (int i = 0; i < num_media_tray_mappings; i++) {
-        if (strcmp(media_tray_map[i].media, media) == 0) {
-            selected_source = media_tray_map[i].source;
-            break;
-        }
-    }
-    printf("Selected media: %s, source: %s, print mode: %s\n", media, selected_source, print_mode);
-
-    struct sockaddr_in serv_addr;
-    int sockfd = -1;
-    unsigned char *ipp_payload = NULL;
-    int offset = 0;
-    unsigned char *file_data = NULL;
-    FILE *file = NULL;
-    char *http_header = NULL;
-    char *response_buffer = NULL; // Dynamically allocate
-    int result = -1;
-
-    // Allocate IPP payload dynamically
-    ipp_payload = malloc(2048);
-    if (!ipp_payload) {
-        printf("Failed to allocate memory for IPP payload\n");
-        operation_in_progress = FALSE;
-        return -1;
-    }
-    memset(ipp_payload, 0, 2048);
-
-    char uri[128];
-    snprintf(uri, sizeof(uri), "ipp://%s/ipp", ip);
-    int uri_len = strlen(uri);
-
-    // Open the file
-    file = fopen(filename, "rb");
-    if (!file) {
-        printf("Failed to open file: %s\n", filename);
-        free(ipp_payload);
-        operation_in_progress = FALSE;
-        return -1;
-    }
-
-    // Get file size
-    fseek(file, 0, SEEK_END);
-    long file_size = ftell(file);
-    fseek(file, 0, SEEK_SET);
-
-    // Allocate buffer for file data
-    file_data = malloc(file_size);
-
-    if (file_size <= 0) {
-        printf("Invalid or empty file\n");
-        fclose(file);
-        free(ipp_payload);
-        operation_in_progress = FALSE;
-        return -1;
-    }
-
-    if (!file_data) {
-        printf("Failed to allocate memory for file data\n");
-        fclose(file);
-        free(ipp_payload);
-        operation_in_progress = FALSE;
-        return -1;
-    }
-
-    // Read the file
-    fread(file_data, 1, file_size, file);
-    fclose(file);
-    file = NULL;
-
-    // Build IPP payload
-    ipp_payload[offset++] = 0x01; ipp_payload[offset++] = 0x01; // IPP version 1.1
-    ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x02; // Print-Job operation
-    ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x01; // Request ID
-
-    ipp_payload[offset++] = 0x01; // Operation attributes group
-    ipp_payload[offset++] = 0x47; ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x12;
-    memcpy(&ipp_payload[offset], "attributes-charset", 18); offset += 18;
-    ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x05;
-    memcpy(&ipp_payload[offset], "utf-8", 5); offset += 5;
-
-    ipp_payload[offset++] = 0x48; ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x1b;
-    memcpy(&ipp_payload[offset], "attributes-natural-language", 27); offset += 27;
-    ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x02;
-    memcpy(&ipp_payload[offset], "en", 2); offset += 2;
-
-    ipp_payload[offset++] = 0x45; ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x0b;
-    memcpy(&ipp_payload[offset], "printer-uri", 11); offset += 11;
-    ipp_payload[offset++] = (uri_len >> 8) & 0xFF;
-    ipp_payload[offset++] = uri_len & 0xFF;
-    memcpy(&ipp_payload[offset], uri, uri_len); offset += uri_len;
-
-    const char *job_name = "Amiga";
-    int job_name_len = strlen(job_name);
-    ipp_payload[offset++] = 0x42; ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x08;
-    memcpy(&ipp_payload[offset], "job-name", 8); offset += 8;
-    ipp_payload[offset++] = (job_name_len >> 8) & 0xFF;
-    ipp_payload[offset++] = job_name_len & 0xFF;
-    memcpy(&ipp_payload[offset], job_name, job_name_len); offset += job_name_len;
-
-    const char *doc_format = "image/jpeg";
-    int doc_format_len = strlen(doc_format);
-    ipp_payload[offset++] = 0x49; ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x0e;
-    memcpy(&ipp_payload[offset], "document-format", 14); offset += 14;
-    ipp_payload[offset++] = (doc_format_len >> 8) & 0xFF;
-    ipp_payload[offset++] = doc_format_len & 0xFF;
-    memcpy(&ipp_payload[offset], doc_format, doc_format_len); offset += doc_format_len;
-
-    ipp_payload[offset++] = 0x02; // Job Template Attributes group
-
-    int media_len = strlen(media);
-    ipp_payload[offset++] = 0x44; // keyword
-    ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x05;
-    memcpy(&ipp_payload[offset], "media", 5); offset += 5;
-    ipp_payload[offset++] = (media_len >> 8) & 0xFF;
-    ipp_payload[offset++] = media_len & 0xFF;
-    memcpy(&ipp_payload[offset], media, media_len); offset += media_len;
-
-    // Add media-source attribute
-    int source_len = strlen(selected_source);
-    ipp_payload[offset++] = 0x44; // keyword
-    ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x0c;
-    memcpy(&ipp_payload[offset], "media-source", 12); offset += 12;
-    ipp_payload[offset++] = (source_len >> 8) & 0xFF;
-    ipp_payload[offset++] = source_len & 0xFF;
-    memcpy(&ipp_payload[offset], selected_source, source_len); offset += source_len;
-/*
-    if (!print_mode || strlen(print_mode) == 0) {
-        printf("Invalid print mode (empty), falling back to 'monochrome'\n");
-        print_mode = "monochrome";
-    }
-    // Add print-color-mode attribute
-    int print_mode_len = strlen(print_mode);
-    ipp_payload[offset++] = 0x44; // keyword
-    ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x0f;
-    memcpy(&ipp_payload[offset], "print-color-mode", 17); offset += 17;
-    ipp_payload[offset++] = (print_mode_len >> 8) & 0xFF;
-    ipp_payload[offset++] = print_mode_len & 0xFF;
-    memcpy(&ipp_payload[offset], print_mode, print_mode_len); offset += print_mode_len;
-
-    //Scaling Options
-    int scaling_len = strlen(selected_scaling);
-    ipp_payload[offset++] = 0x44; // keyword (for print-scaling)
-    ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x0d;
-    memcpy(&ipp_payload[offset], "print-scaling", 13); offset += 13;
-    ipp_payload[offset++] = (scaling_len >> 8) & 0xFF;
-    ipp_payload[offset++] = scaling_len & 0xFF;
-    memcpy(&ipp_payload[offset], selected_scaling, scaling_len); offset += scaling_len;
-
-    // Quality Options
-    int quality_value = 4; // default to normal
-    if (strcmp(selected_quality, "draft") == 0) quality_value = 3;
-    else if (strcmp(selected_quality, "high") == 0) quality_value = 5;
-
-    ipp_payload[offset++] = 0x21; // enum
-    ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x0d;
-    memcpy(&ipp_payload[offset], "print-quality", 13); offset += 13;
-    ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x04;
-    ipp_payload[offset++] = 0x00; ipp_payload[offset++] = 0x00;
-    ipp_payload[offset++] = 0x00; ipp_payload[offset++] = quality_value;
-*/
-    ipp_payload[offset++] = 0x03; // End of attributes
-
-    http_header = malloc(256);
-    if (!http_header) {
-        printf("Failed to allocate memory for HTTP header\n");
-        free(file_data);
-        free(ipp_payload);
-        operation_in_progress = FALSE;
-        return -1;
-    }
-    snprintf(http_header, 256,
-        "POST /ipp HTTP/1.1\r\nHost: %s\r\nContent-Type: application/ipp\r\nContent-Length: %d\r\nConnection: close\r\n\r\n",
-        ip, offset + file_size);
-
-    printf("Sending JPEG to printer at %s...\n", ip);
-    sockfd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (sockfd < 0) {
-        printf("Socket creation failed.\n");
-        free(http_header);
-        free(file_data);
-        free(ipp_payload);
-        operation_in_progress = FALSE;
-        return -1;
-    }
-
-    struct timeval timeout = {10, 0}; // 10-second timeout
-    if (setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout)) < 0) {
-        printf("Failed to set socket timeout\n");
-        CloseSocket(sockfd);
-        free(http_header);
-        free(file_data);
-        free(ipp_payload);
-        operation_in_progress = FALSE;
-        return -1;
-    }
-
-    memset(&serv_addr, 0, sizeof(serv_addr));
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_port = htons(port);
-    serv_addr.sin_addr.s_addr = inet_addr((STRPTR)ip);
-    if (serv_addr.sin_addr.s_addr == INADDR_NONE) {
-        printf("Invalid IP address: %s\n", ip);
-        CloseSocket(sockfd);
-        free(http_header);
-        free(file_data);
-        free(ipp_payload);
-        operation_in_progress = FALSE;
-        return -1;
-    }
-
-    if (connect(sockfd, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0) {
-        printf("Failed to connect to printer.\n");
-        CloseSocket(sockfd);
-        free(http_header);
-        free(file_data);
-        free(ipp_payload);
-        operation_in_progress = FALSE;
-        return -1;
-    }
-
-    // Process GUI events
-    if (window) {
-        struct IntuiMessage *imsg;
-        while ((imsg = GT_GetIMsg(window->UserPort))) {
-            GT_ReplyIMsg(imsg);
-        }
-    }
-
-    // Send the data
-    if (send(sockfd, http_header, strlen(http_header), 0) < 0 ||
-        send(sockfd, (char *)ipp_payload, offset, 0) < 0 ||
-        send(sockfd, file_data, file_size, 0) < 0) {
-        printf("Failed sending data.\n");
-        CloseSocket(sockfd);
-        free(http_header);
-        free(file_data);
-        free(ipp_payload);
-        operation_in_progress = FALSE;
-        return -1;
-    }
-
-    free(http_header);
-    free(file_data);
-    free(ipp_payload);
-
-    printf("Waiting for response...\n");
-    // Dynamically allocate response_buffer
-    response_buffer = malloc(4096);
-    if (!response_buffer) {
-        printf("Failed to allocate memory for response buffer\n");
-        CloseSocket(sockfd);
-        operation_in_progress = FALSE;
-        return -1;
-    }
-
-    {
-        int total_received = 0;
-        int header_start = 0;
-        int body_off = -1;
-        int attempt;
-
-        for (attempt = 0; attempt < 10; attempt++) {
-            ssize_t received = recv(sockfd, response_buffer + total_received,
-                                    4096 - 1 - total_received, 0);
-            if (received <= 0) break;
-            total_received += (int)received;
-            response_buffer[total_received] = '\0';
-            body_off = mp_http_find_body(response_buffer, total_received, header_start);
-            if (body_off < 0) continue;
-            {
-                int status = mp_http_status(response_buffer, total_received, header_start);
-                if (status >= 100 && status < 200) {
-                    header_start = body_off;
-                    body_off = -1;
-                    continue;
-                }
-            }
-            break;
-        }
-
-        if (total_received == 0) {
-            printf("No response or receive timeout.\n");
-            CloseSocket(sockfd);
-            free(response_buffer);
-            operation_in_progress = FALSE;
-            return -1;
-        }
-
-        if (body_off >= 0) {
-            char *ipp_start = response_buffer + body_off;
-            printf("IPP Status: 0x%02x%02x\n", ipp_start[2], ipp_start[3]);
-        } else {
-            printf("Could not find IPP response payload.\n");
-        }
-    }
-
-    free(response_buffer);
-    CloseSocket(sockfd);
-    operation_in_progress = FALSE;
-    printf("send_print_job completed successfully\n");
-    return 0;
-}
-
-// Function to create all GadTools gadgets
-struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topborder) {
-    struct NewGadget ng;
-    struct Gadget *gad;
-
-    // Initialize the gadget list
-    gad = CreateContext(glistptr);
-    if (!gad) {
-        printf("Failed to create gadget context\n");
-        return NULL;
-    }
-
-    // Set up the NewGadget structure
-    ng.ng_TextAttr = &Topaz80;
-    ng.ng_VisualInfo = vi;
-    ng.ng_Flags = NG_HIGHLABEL;
-
-    // Unit selector - which saved printer profile (ENV:MintPRINT/UnitN) is
-    // being viewed/edited. Only Unit0 is what the driver actually prints
-    // with; switching here reloads the rest of the form from that unit's
-    // saved file.
-    ng.ng_LeftEdge = 64;
-    ng.ng_TopEdge = 3 + topborder;
-    ng.ng_Width = 328;
-    ng.ng_Height = 12;
-    ng.ng_GadgetText = (STRPTR)"Unit:";
-    ng.ng_GadgetID = GAD_UNIT_DROPDOWN;
-    gad = CreateGadget(CYCLE_KIND, gad, &ng,
-        GTCY_Labels, (ULONG)unit_dropdown_labels,
-        GTCY_Active, (ULONG)current_unit_index,
-        TAG_DONE);
-    if (!gad) {
-        printf("Failed to create unit dropdown\n");
-        return NULL;
-    }
-
-    // Copies the selected unit's saved settings over Unit0, the only slot
-    // the driver actually reads at print time - the practical way to
-    // "switch which printer is active" without touching driver code.
-    ng.ng_LeftEdge = 400;
-    ng.ng_Width = 92;
-    ng.ng_Height = 12;
-    ng.ng_TopEdge = 3 + topborder;
-    ng.ng_GadgetText = (STRPTR)"_Activate";
-    ng.ng_GadgetID = GAD_SET_ACTIVE_BUTTON;
-    ng.ng_Flags = 0;
-    gad = CreateGadget(BUTTON_KIND, gad, &ng,
-        GT_Underscore, '_',
-        TAG_DONE);
-    if (!gad) {
-        printf("Failed to create activate button\n");
-        return NULL;
-    }
-    ng.ng_Flags = NG_HIGHLABEL;
-
-    // IP string gadget
-    ng.ng_LeftEdge = 144;
-    ng.ng_TopEdge = 21 + topborder;
-    ng.ng_Width = 248;
-    ng.ng_Height = 12;
-    /* Not "...IP/Host": both this field and the driver resolve it with
-     * inet_addr() only, so a hostname like "printer.local" silently fails
-     * rather than being looked up. Label matches actual behaviour instead
-     * of implying DNS/mDNS name support that doesn't exist. */
-    ng.ng_GadgetText = (STRPTR)"_Printer IPv4:";
-    ng.ng_GadgetID = GAD_IP_STRING;
-    gad = CreateGadget(STRING_KIND, gad, &ng,
-        GTST_String, (ULONG)ip_buffer,
-        GTST_MaxChars, sizeof(ip_buffer) - 1,
-        GA_Immediate, TRUE,
-        GT_Underscore, '_',
-        GACT_RELVERIFY, TRUE,
-        TAG_DONE);
-    if (!gad) {
-        printf("Failed to create IP string gadget\n");
-        return NULL;
-    }
-
-
-
-    // Query button - shares the Printer Model row in the compact layout.
-    ng.ng_LeftEdge = 400;
-    ng.ng_Width = 92;
-    ng.ng_Height = 12;
-    ng.ng_TopEdge = 39 + topborder;
-    ng.ng_GadgetText = (STRPTR)"_Query";
-    ng.ng_GadgetID = GAD_QUERY_BUTTON;
-    ng.ng_Flags = 0;
-    gad = CreateGadget(BUTTON_KIND, gad, &ng,
-        GT_Underscore, '_',
-        TAG_DONE);
-    if (!gad) {
-        printf("Failed to create query button\n");
-        return NULL;
-    }
-
-    // Printer Model (read-only display) - shows printer-make-and-model
-    // from the last successful Query for this unit. Not user-editable;
-    // persisted via MODEL= in the unit's own config file on Save.
-    ng.ng_LeftEdge = 128;
-    ng.ng_TopEdge = 39 + topborder;
-    ng.ng_Width = 264;
-    ng.ng_Height = 12;
-    ng.ng_GadgetText = (STRPTR)"Printer Model:";
-    ng.ng_GadgetID = GAD_MODEL_DISPLAY;
-    gad = CreateGadget(TEXT_KIND, gad, &ng,
-        GTTX_Text, (ULONG)printer_make_model,
-        GTTX_Justification, GTJ_LEFT,
-        TAG_DONE);
-    if (!gad) {
-        printf("Failed to create model display\n");
-        return NULL;
-    }
-
-    // Driver IPP path
-    ng.ng_LeftEdge = 130;
-    ng.ng_TopEdge = 57 + topborder;
-    ng.ng_Width = 104;
-    ng.ng_Height = 12;
-    ng.ng_GadgetText = (STRPTR)"IPP _Path:";
-    ng.ng_GadgetID = GAD_IPP_PATH;
-    gad = CreateGadget(STRING_KIND, gad, &ng,
-        GTST_String, (ULONG)driver_path_buffer,
-        GTST_MaxChars, sizeof(driver_path_buffer) - 1,
-        GA_Immediate, TRUE,
-        GT_Underscore, '_',
-        GACT_RELVERIFY, TRUE,
-        TAG_DONE);
-    if (!gad) {
-        printf("Failed to create IPP path gadget\n");
-        return NULL;
-    }
-
-    // Discover button - shares the Printer IPv4 row in the compact layout.
-    // Preserve the previous TopEdge afterwards so this isolated button does
-    // not affect the state used by later gadget setup.
-    {
-        UWORD row2_top = ng.ng_TopEdge;
-        ng.ng_LeftEdge = 400;
-        ng.ng_TopEdge = 21 + topborder;
-        ng.ng_Width = 92;
-        ng.ng_Height = 12;
-        ng.ng_GadgetText = (STRPTR)"_Discover";
-        ng.ng_GadgetID = GAD_DISCOVER_BUTTON;
-        ng.ng_Flags = 0;
-        gad = CreateGadget(BUTTON_KIND, gad, &ng,
-            GT_Underscore, '_',
-            TAG_DONE);
-        if (!gad) {
-            printf("Failed to create discover button\n");
-            return NULL;
-        }
-        ng.ng_TopEdge = row2_top;
-    }
-
-    // Printer document engine: JPEG, PostScript, PWG Raster, PDF, or
-    // Apple Raster (URF).
-    // Printer Engine has the longest label in the left column; x=132 keeps
-    // a small left margin while leaving the compact ink panel free at x=320.
-    // Width 140 (was 180): the longest option text ("Apple Raster") is
-    // still comfortably inside that at Topaz80's 8px/char, and the box's
-    // right edge (130+140=270) now sits well clear of the ink panel at
-    // x=320 instead of crowding it at the old 310.
-    ng.ng_LeftEdge = 135;
-    ng.ng_TopEdge = 78 + topborder;
-    ng.ng_Width = 140;
-    ng.ng_Height = 12;
-    ng.ng_GadgetText = (STRPTR)"Printer Engine:";
-    ng.ng_GadgetID = GAD_ENGINE;
-    gad = CreateGadget(CYCLE_KIND, gad, &ng,
-        GTCY_Labels, (ULONG)engine_labels,
-        GTCY_Active, mp_engine_active_index(),
-        TAG_DONE);
-    if (!gad) {
-        printf("Failed to create printer engine gadget\n");
-        return NULL;
-    }
-
-    // Where job files spool: RAM (T:, as MintPRINT has always done) or a
-    // real hard drive device, for memory-tight systems - see
-    // mp_build_spool_options(). Same width/row as the old Debug slot so
-    // the stacked cycle gadgets stay visually aligned; Debug itself now
-    // lives on the button row next to Save.
-    ng.ng_LeftEdge = 135;
-    ng.ng_TopEdge = 95 + topborder;
-    ng.ng_Width = 140;
-    ng.ng_Height = 12;
-    ng.ng_GadgetText = (STRPTR)"Spooler:";
-    ng.ng_GadgetID = GAD_SPOOLER;
-    gad = CreateGadget(CYCLE_KIND, gad, &ng,
-        GTCY_Labels, (ULONG)mp_spool_label_ptrs,
-        GTCY_Active, mp_spool_active_index(),
-        TAG_DONE);
-    if (!gad) {
-        printf("Failed to create spooler gadget\n");
-        return NULL;
-    }
-
-    // Media dropdown - same width as Scaling below it now that the
-    // prettified labels ("A4 (Bypass Tray)") need far less room than the
-    // raw IPP keywords ("iso_a4_210x297mm (by-pass-tray)") did.
-    ng.ng_LeftEdge = 135;
-    ng.ng_TopEdge = 108 + topborder;
-    ng.ng_Width = 180;
-    ng.ng_Height = 12;
-    ng.ng_GadgetText = (STRPTR)"Media (Tray):";
-    ng.ng_GadgetID = GAD_MEDIA_DROPDOWN;
-    ng.ng_Flags = NG_HIGHLABEL;
-    gad = CreateGadget(CYCLE_KIND, gad, &ng,
-        GTCY_Labels, (ULONG)media_dropdown_items,
-        GTCY_Active, 0,
-        GA_Disabled, driver_media_buffer[0] ? FALSE : TRUE,
-        TAG_DONE);
-    if (!gad) {
-        printf("Failed to create media dropdown\n");
-        return NULL;
-    }
-    media_dropdown = gad;  // Save it globally
-
-    // Scaling dropdown
-    ng.ng_LeftEdge = 135;
-    ng.ng_TopEdge = 126 + topborder;
-    ng.ng_Width = 150;
-    ng.ng_Height = 12;
-    ng.ng_GadgetText = (STRPTR)"Scaling:";
-    ng.ng_GadgetID = GAD_SCALING_MODE;
-    gad = CreateGadget(CYCLE_KIND, gad, &ng,
-    GTCY_Labels, (ULONG)scaling_mode_labels,
-    GTCY_Active, 0,
-        GA_Disabled, driver_scaling_buffer[0] ? FALSE : TRUE,
-    TAG_DONE);
-
-    // Quality dropdown
-    ng.ng_LeftEdge = 135;
-    ng.ng_TopEdge = 144 + topborder;
-    ng.ng_Width = 150;
-    ng.ng_Height = 12;
-    ng.ng_GadgetText = (STRPTR)"Quality:";
-    ng.ng_GadgetID = GAD_QUALITY_MODE;
-    gad = CreateGadget(CYCLE_KIND, gad, &ng,
-        GTCY_Labels, (ULONG)quality_mode_labels,
-        GTCY_Active, 0,
-        GA_Disabled, driver_quality_buffer[0] ? FALSE : TRUE,
-        TAG_DONE);
-
-    // Capture DPI - shares the Quality row and is populated by Query from
-    // printer-resolution-supported/PWG raster resolution capabilities.
-    ng.ng_LeftEdge = 350;
-    ng.ng_Width = 100;
-    ng.ng_Height = 12;
-    ng.ng_TopEdge = 180 + topborder;
-    ng.ng_GadgetText = (STRPTR)"DPI:";
-    ng.ng_GadgetID = GAD_RESOLUTION;
-    gad = CreateGadget(CYCLE_KIND, gad, &ng,
-        GTCY_Labels, (ULONG)resolution_labels,
-        GTCY_Active, (ULONG)mp_dpi_active_index(driver_resolution),
-        GA_Disabled, num_supported_dpi > 0 ? FALSE : TRUE,
-        TAG_DONE);
-    if (!gad) {
-        printf("Failed to create DPI gadget\n");
-        return NULL;
-    }
-
-    // Print Mode radio buttons
-    ng.ng_LeftEdge = 135;
-    ng.ng_TopEdge = 162 + topborder;
-    ng.ng_Width = 150;
-    ng.ng_Height = 12;
-    ng.ng_GadgetText = (STRPTR)"Print Mode:";
-    ng.ng_GadgetID = GAD_PRINT_MODE;
-    gad = CreateGadget(CYCLE_KIND, gad, &ng,
-        GTCY_Labels, (ULONG)print_mode_labels,
-        GTCY_Active, 0,
-        GA_Disabled, driver_color_buffer[0] ? FALSE : TRUE,
-        TAG_DONE);
-    if (!gad) {
-        printf("Failed to create print mode radio buttons\n");
-        return NULL;
-    }
-
-    /* Duplex needs multiple Amiga pages in one PWG Raster document. Query
-     * enables these choices only for PWG Raster when the printer advertises
-     * the requested sides value. */
-    ng.ng_LeftEdge = 350;
-    ng.ng_Width = 150;
-    ng.ng_Height = 12;
-    ng.ng_TopEdge = 162 + topborder;
-    ng.ng_GadgetText = (STRPTR)"Sides:";
-    ng.ng_GadgetID = GAD_SIDES;
-    gad = CreateGadget(CYCLE_KIND, gad, &ng,
-        GTCY_Labels, (ULONG)mp_sides_label_ptrs,
-        GTCY_Active, mp_sides_active_index(),
-        GA_Disabled, TRUE,
-        TAG_DONE);
-    if (!gad) {
-        printf("Failed to create sides gadget\n");
-        return NULL;
-    }
-
-    // Test Print button
-    ng.ng_LeftEdge = 10;
-    ng.ng_TopEdge = 198 + topborder;
-    ng.ng_Width = 110;
-    ng.ng_Height = 12;
-    ng.ng_GadgetText = (STRPTR)"_Test Print";
-    ng.ng_GadgetID = GAD_PRINT_BUTTON;
-    gad = CreateGadget(BUTTON_KIND, gad, &ng,
-        GT_Underscore, '_',
-        TAG_DONE);
-    if (!gad) {
-        printf("Failed to create print button\n");
-        return NULL;
-    }
-
-    // Enable/disable diagnostic logs and retained rendered jobs. Shares
-    // the button row's spare space between Test Print and Save; the
-    // cycle's own label text ("Debug On"/"Debug Off") is self-explanatory
-    // so it needs no separate GadgetText prefix, unlike the stacked
-    // Printer Engine/Spooler cycles above.
-    ng.ng_LeftEdge = 160;
-    ng.ng_TopEdge = 198 + topborder;
-    ng.ng_Width = 110;
-    ng.ng_Height = 12;
-    ng.ng_GadgetText = NULL;
-    ng.ng_GadgetID = GAD_DEBUG;
-    gad = CreateGadget(CYCLE_KIND, gad, &ng,
-        GTCY_Labels, (ULONG)debug_labels,
-        GTCY_Active, driver_debug ? 1 : 0,
-        TAG_DONE);
-    if (!gad) {
-        printf("Failed to create debug gadget\n");
-        return NULL;
-    }
-
-    // Save button - same action as File -> Save Driver Settings.
-    ng.ng_LeftEdge = 304;
-    ng.ng_Width = 90;
-    ng.ng_TopEdge = 198 + topborder;
-    ng.ng_Height = 12;
-    ng.ng_GadgetText = (STRPTR)"_Save";
-    ng.ng_GadgetID = GAD_SAVE_BUTTON;
-    gad = CreateGadget(BUTTON_KIND, gad, &ng,
-        GT_Underscore, '_',
-        TAG_DONE);
-    if (!gad) {
-        printf("Failed to create save button\n");
-        return NULL;
-    }
-
-    // Exit button
-    ng.ng_LeftEdge = 408;
-    ng.ng_Width = 90;
-    ng.ng_TopEdge = 198 + topborder;
-    ng.ng_Height = 12;
-    ng.ng_GadgetText = (STRPTR)"_Exit";
-    ng.ng_GadgetID = GAD_EXIT_BUTTON;
-    gad = CreateGadget(BUTTON_KIND, gad, &ng,
-        GT_Underscore, '_',
-        TAG_DONE);
-    if (!gad) {
-        printf("Failed to create exit button\n");
-        return NULL;
-    }
-
-    // Keep spooled jobs - only meaningful, and only enabled, once Spooler
-    // names a real hard drive (see mp_spool_keep_available()); the
-    // GAD_SPOOLER handler below disables and unticks this live the moment
-    // Spooler is switched back to RAM.
-    //
-    // PLACETEXT_RIGHT is required here: CHECKBOX_KIND's own default
-    // placement is PLACETEXT_LEFT (label to the LEFT of the box, unlike
-    // BUTTON_KIND/CYCLE_KIND above), which at this gadget's LeftEdge=10
-    // - flush against the window's own left edge - draws the label
-    // entirely off-window, leaving what looks like an unlabelled
-    // checkbox.
-    ng.ng_LeftEdge = 10;
-    ng.ng_TopEdge = 180 + topborder;
-    ng.ng_Width = 160;
-    ng.ng_Height = 12;
-    ng.ng_GadgetText = (STRPTR)"Keep Jobs (HDD)";
-    ng.ng_GadgetID = GAD_SPOOL_KEEP;
-    ng.ng_Flags = PLACETEXT_RIGHT;
-    gad = CreateGadget(CHECKBOX_KIND, gad, &ng,
-        GTCB_Checked, (ULONG)(mp_spool_keep_available() && driver_spool_keep),
-        GA_Disabled, (ULONG)(mp_spool_keep_available() ? FALSE : TRUE),
-        TAG_DONE);
-    if (!gad) {
-        printf("Failed to create keep-spooled-jobs checkbox\n");
-        return NULL;
-    }
-
-    // Opens the Spooler management window listing tracked jobs - see
-    // mp_spool_win_open(). Unlike run_discovery_selection(), it is
-    // non-modal: it returns immediately and process_window_events()'s
-    // main loop drives it from then on, so both windows stay usable.
-    ng.ng_LeftEdge = 175;
-    ng.ng_TopEdge = 180 + topborder;
-    ng.ng_Width = 130;
-    ng.ng_Height = 12;
-    ng.ng_Flags = 0;
-    ng.ng_GadgetText = (STRPTR)"_View Spooler";
-    ng.ng_GadgetID = GAD_VIEW_SPOOL;
-    gad = CreateGadget(BUTTON_KIND, gad, &ng,
-        GT_Underscore, '_',
-        TAG_DONE);
-    if (!gad) {
-        printf("Failed to create view spool button\n");
-        return NULL;
-    }
-
-    return gad;
-}
-
-// Function to process window events using GadTools message handling
-void process_window_events(struct Window *win) {
-    struct IntuiMessage *imsg;
-    ULONG imsgClass;
-    UWORD imsgCode;
-    struct Gadget *gad;
-    BOOL terminated = FALSE;
-    char ip_only[64];
-    int port = -1;
-
-    while (!terminated) {
-        ULONG window_signal = 1L << win->UserPort->mp_SigBit;
-        ULONG wait_mask = window_signal;
-        ULONG received_signals;
-
-        if (test_print_job.active && test_print_job.port)
-            wait_mask |= 1L << test_print_job.port->mp_SigBit;
-        /* Spooler window folded into the same Wait() as the main window's
-         * own port, not a separate nested event loop - see
-         * mp_spool_win_process()'s own comment for why: that is what
-         * keeps this window and the Spooler window both live for input
-         * at once instead of one blocking the other. */
-        if (g_spool_win)
-            wait_mask |= 1L << g_spool_win->UserPort->mp_SigBit;
-
-        received_signals = Wait(wait_mask);
-        if (test_print_job.active && test_print_job.port &&
-            (received_signals & (1L << test_print_job.port->mp_SigBit))) {
-            mp_test_print_complete(win);
-        }
-        if (g_spool_win &&
-            (received_signals & (1L << g_spool_win->UserPort->mp_SigBit))) {
-            mp_spool_win_process();
-        }
-        if (!(received_signals & window_signal))
-            continue;
-
-        imsg = GT_GetIMsg(win->UserPort);
-        while (!terminated && imsg) {
-            gad = (struct Gadget *)imsg->IAddress;
-            imsgClass = imsg->Class;
-            imsgCode = imsg->Code;
-            /* IAddress is only actually a struct Gadget* for gadget-related
-             * classes - deliberately NOT dereferencing gad->GadgetID here
-             * for other classes (e.g. IDCMP_REFRESHWINDOW), where it can be
-             * something else entirely. */
-
-            GT_ReplyIMsg(imsg);
-
-            switch (imsgClass) {
-                case IDCMP_GADGETUP:
-                    switch (gad->GadgetID) {
-                        case GAD_UNIT_DROPDOWN:
-                        {
-                            ULONG selected = (ULONG)imsgCode;
-                            if (selected < (ULONG)MAX_UNITS && (int)selected != current_unit_index) {
-                                current_unit_index = (int)selected;
-                                custom_printf("CLEAR");
-                                reload_current_unit(win);
-                            }
-                        }
-                        break;
-
-                        case GAD_SET_ACTIVE_BUTTON:
-                        {
-                            custom_printf("CLEAR");
-
-                            if (current_unit_index == 0) {
-                                custom_printf("Unit0 is already the active printer.\n");
-                            } else if (!unit_file_exists(current_unit_index)) {
-                                custom_printf("Unit%d has no saved settings yet - nothing to activate.\n",
-                                              current_unit_index);
-                            } else {
-                                char src_env[64], src_envarc[64];
-                                char dst_env[64], dst_envarc[64];
-                                BOOL ok;
-
-                                unit_config_path(current_unit_index, FALSE, src_env, sizeof(src_env));
-                                unit_config_path(current_unit_index, TRUE, src_envarc, sizeof(src_envarc));
-                                unit_config_path(0, FALSE, dst_env, sizeof(dst_env));
-                                unit_config_path(0, TRUE, dst_envarc, sizeof(dst_envarc));
-
-                                ok = ensure_config_dir((CONST_STRPTR)"ENV:MintPRINT") &&
-                                     ensure_config_dir((CONST_STRPTR)"ENVARC:MintPRINT") &&
-                                     mp_copy_file((CONST_STRPTR)src_env, (CONST_STRPTR)dst_env) &&
-                                     mp_copy_file((CONST_STRPTR)src_envarc, (CONST_STRPTR)dst_envarc);
-
-                                if (ok) {
-                                    char src_cache_env[64], src_cache_envarc[64];
-                                    char dst_cache_env[64], dst_cache_envarc[64];
-
-                                    /* Best-effort: carry the cached capabilities over too, so
-                                     * Unit0 doesn't need a fresh Query. Fine if there is none. */
-                                    unit_cache_path(current_unit_index, FALSE, src_cache_env, sizeof(src_cache_env));
-                                    unit_cache_path(current_unit_index, TRUE, src_cache_envarc, sizeof(src_cache_envarc));
-                                    unit_cache_path(0, FALSE, dst_cache_env, sizeof(dst_cache_env));
-                                    unit_cache_path(0, TRUE, dst_cache_envarc, sizeof(dst_cache_envarc));
-                                    mp_copy_file((CONST_STRPTR)src_cache_env, (CONST_STRPTR)dst_cache_env);
-                                    mp_copy_file((CONST_STRPTR)src_cache_envarc, (CONST_STRPTR)dst_cache_envarc);
-
-                                    /* Carry the processed printer artwork too. */
-                                    {
-                                        char src_icon_env[96], src_icon_envarc[96];
-                                        char dst_icon_env[96], dst_icon_envarc[96];
-                                        ensure_config_dir((CONST_STRPTR)"ENV:MintPRINT/Art");
-                                        ensure_config_dir((CONST_STRPTR)"ENVARC:MintPRINT/Art");
-                                        unit_icon_cache_path(current_unit_index, FALSE, src_icon_env, sizeof(src_icon_env));
-                                        unit_icon_cache_path(current_unit_index, TRUE, src_icon_envarc, sizeof(src_icon_envarc));
-                                        unit_icon_cache_path(0, FALSE, dst_icon_env, sizeof(dst_icon_env));
-                                        unit_icon_cache_path(0, TRUE, dst_icon_envarc, sizeof(dst_icon_envarc));
-                                        mp_copy_file((CONST_STRPTR)src_icon_env, (CONST_STRPTR)dst_icon_env);
-                                        mp_copy_file((CONST_STRPTR)src_icon_envarc, (CONST_STRPTR)dst_icon_envarc);
-                                    }
-
-                                    custom_printf("Unit%d copied to Unit0 - it is now the active printer.\n",
-                                                  current_unit_index);
-                                    current_unit_index = 0;
-                                    reload_current_unit(win);
-                                    refresh_unit_dropdown(win);
-                                } else {
-                                    custom_printf("Could not copy Unit%d to Unit0.\n", current_unit_index);
-                                }
-                            }
-                        }
-                        break;
-
-                        case GAD_MEDIA_DROPDOWN:
-                        {
-                            ULONG selected = (ULONG)imsgCode;
-                            if (selected < (ULONG)num_media_tray_mappings) {
-                                strncpy(driver_media_buffer,
-                                        media_tray_map[selected].media,
-                                        sizeof(driver_media_buffer) - 1);
-                                driver_media_buffer[sizeof(driver_media_buffer) - 1] = '\0';
-                                strncpy(driver_source_buffer,
-                                        media_tray_map[selected].source,
-                                        sizeof(driver_source_buffer) - 1);
-                                driver_source_buffer[sizeof(driver_source_buffer) - 1] = '\0';
-                                printf("Selected index = %lu, value = %s\n",
-                                       selected, media_tray_map[selected].media);
-                            } else {
-                                printf("Invalid selection index = %lu\n", selected);
-                            }
-                        }
-                        break;
-
-                        case GAD_IP_STRING:
-                        {
-                            char *current_ip;
-                            GT_RefreshWindow(win, NULL);
-                            current_ip = mp_string_gadget_value(gad);
-                            printf("Got pointer: %p\n", current_ip);
-                            if (current_ip) {
-                                printf("Raw IP string from gadget: '%s'\n", current_ip);
-                                strncpy(ip_buffer, current_ip, sizeof(ip_buffer) - 1);
-                                ip_buffer[sizeof(ip_buffer) - 1] = '\0';
-                                printf("IP buffer after update: '%s'\n", ip_buffer);
-                            } else {
-                                printf("Failed to retrieve IP string from gadget\n");
-                            }
-                        }
-                        break;
-                        case GAD_IPP_PATH:
-                        {
-                            char *path = mp_string_gadget_value(gad);
-                            if (path) {
-                                strncpy(driver_path_buffer, path,
-                                        sizeof(driver_path_buffer) - 1);
-                                driver_path_buffer[sizeof(driver_path_buffer) - 1] = '\0';
-                            }
-                        }
-                        break;
-
-                        case GAD_DEBUG:
-                            driver_debug = imsgCode ? TRUE : FALSE;
-                            break;
-
-                        case GAD_SPOOLER:
-                        {
-                            ULONG selected = (ULONG)imsgCode;
-                            if (selected < (ULONG)mp_spool_option_count) {
-                                strncpy(driver_spool_buffer,
-                                        mp_spool_value_storage[selected],
-                                        sizeof(driver_spool_buffer) - 1);
-                                driver_spool_buffer[
-                                    sizeof(driver_spool_buffer) - 1] = '\0';
-                            }
-                            mp_update_spool_keep_gadget(win);
-                        }
-                        break;
-
-                        case GAD_SPOOL_KEEP:
-                            driver_spool_keep = imsgCode ? TRUE : FALSE;
-                            break;
-
-                        case GAD_VIEW_SPOOL:
-                            mp_spool_win_open(win);
-                            break;
-
-                        case GAD_QUALITY_MODE:
-                        {
-                            ULONG selected = (ULONG)imsgCode;
-                            if (selected < (ULONG)num_supported_quality) {
-                                strncpy(selected_quality, supported_quality[selected],
-                                        sizeof(selected_quality) - 1);
-                                selected_quality[sizeof(selected_quality) - 1] = '\0';
-                                strncpy(driver_quality_buffer, supported_quality[selected],
-                                        sizeof(driver_quality_buffer) - 1);
-                                driver_quality_buffer[sizeof(driver_quality_buffer) - 1] = '\0';
-                            }
-                        }
-                        break;
-
-                        case GAD_PRINT_MODE:
-                        {
-                            ULONG selected = (ULONG)imsgCode;
-                            print_mode = selected;
-                            if (selected < num_supported_print_modes) {
-                                strncpy(selected_print_mode, supported_print_modes[selected], MAX_ATTR_LEN - 1);
-                                selected_print_mode[MAX_ATTR_LEN - 1] = '\0';
-                                strncpy(driver_color_buffer, supported_print_modes[selected],
-                                        sizeof(driver_color_buffer) - 1);
-                                driver_color_buffer[sizeof(driver_color_buffer) - 1] = '\0';
-                                printf("Print mode set to: %s\n", selected_print_mode);
-                            }
-                        }
-                        break;
-
-                        case GAD_ENGINE:
-                        {
-                            ULONG selected = (ULONG)imsgCode;
-                            if (selected < (ULONG)mp_engine_count) {
-                                strncpy(driver_engine_buffer,
-                                        mp_engine_value_map[selected],
-                                        sizeof(driver_engine_buffer) - 1);
-                                driver_engine_buffer[
-                                    sizeof(driver_engine_buffer) - 1] = '\0';
-                                driver_engine_explicit = TRUE;
-                                update_sides_dropdown(win);
-                                update_dpi_dropdown(win);
-                                mp_draw_sides_hint();
-                            }
-                        }
-                        break;
-
-                        case GAD_SIDES:
-                        {
-                            ULONG selected = (ULONG)imsgCode;
-                            if (selected < (ULONG)mp_sides_option_count) {
-                                strncpy(driver_sides_buffer,
-                                        mp_sides_value_storage[selected],
-                                        sizeof(driver_sides_buffer) - 1);
-                                driver_sides_buffer[
-                                    sizeof(driver_sides_buffer) - 1] = '\0';
-                                printf("Sides set to: %s\n", driver_sides_buffer);
-                                mp_draw_sides_hint();
-                            }
-                        }
-                        break;
-
-                        case GAD_RESOLUTION:
-                        {
-                            ULONG selected = (ULONG)imsgCode;
-                            if (selected < (ULONG)mp_dpi_options.count) {
-                                driver_resolution =
-                                    mp_dpi_options.values[selected];
-                                driver_resolution_explicit = TRUE;
-                                if (mp_dpi_options.compatibility[selected])
-                                    printf("DPI set to 300 compatibility mode (not printer-reported)\n");
-                                else
-                                    printf("DPI set to %d\n", driver_resolution);
-                            }
-                        }
-                        break;
-
-                        case GAD_SCALING_MODE:
-                        {
-                            ULONG selected = (ULONG)imsgCode;
-                            if (selected < (ULONG)num_supported_scaling) {
-                                strncpy(selected_scaling, supported_scaling[selected], MAX_ATTR_LEN - 1);
-                                selected_scaling[MAX_ATTR_LEN - 1] = '\0';
-                                strncpy(driver_scaling_buffer, supported_scaling[selected],
-                                        sizeof(driver_scaling_buffer) - 1);
-                                driver_scaling_buffer[sizeof(driver_scaling_buffer) - 1] = '\0';
-                                printf("Scaling mode set to: %s\n", selected_scaling);
-                            }
-                        }
-                        break;
-
-                        case GAD_QUERY_BUTTON:
-                        {
-                            GT_RefreshWindow(win, NULL);
-                        
-                            // Get IP string from gadget
-                            struct Gadget *ip_gadget = glist;
-                            while (ip_gadget && ip_gadget->GadgetID != GAD_IP_STRING) {
-                                ip_gadget = ip_gadget->NextGadget;
-                            }
-                        
-                            if (ip_gadget) {
-                                char *ip_string = mp_string_gadget_value(ip_gadget);
-                                if (ip_string) {
-                                    strncpy(ip_buffer, ip_string, sizeof(ip_buffer) - 1);
-                                    ip_buffer[sizeof(ip_buffer) - 1] = '\0';
-                                    printf("IP buffer updated to: '%s'\n", ip_buffer);
-                                }
-                            }
-                        
-                            // Parse IP and optional port
-                            if (!parse_ip_and_port(ip_buffer, ip_only, sizeof(ip_only), &port)) {
-                                /* Report the bad address and keep the window
-                                 * open - this used to "return;", which exits
-                                 * process_window_events()'s entire event loop
-                                 * (and leaks the response buffer below it),
-                                 * closing Settings instead of just failing
-                                 * this one Query attempt. */
-                                printf("Invalid IP format: '%s'\n", ip_buffer);
-                                break;
-                            }
-                        
-                            // Try default + fallback ports, apply capabilities on success
-                            perform_query_flow_allocated(win, ip_only, port);
-                        }
-                        break;
-
-                        case GAD_DISCOVER_BUTTON:
-                        {
-                            struct DiscoveredPrinter found[MAX_DISCOVERY_RESULTS];
-                            int found_count;
-                            char chosen_ip[16];
-
-                            GT_RefreshWindow(win, NULL);
-                            printf("CLEAR");
-
-                            found_count = discover_printers_on_lan(found, MAX_DISCOVERY_RESULTS);
-
-                            if (found_count <= 0) {
-                                printf("No printers found via SSDP or mDNS.\n");
-                                printf("Enter the printer IP manually and press Query.\n");
-                            } else {
-                                printf("Found %d candidate device(s).\n", found_count);
-                                if (run_discovery_selection(win, found, found_count, chosen_ip, sizeof(chosen_ip))) {
-                                    struct Gadget *disc_ip_gadget = glist;
-
-                                    strncpy(ip_buffer, chosen_ip, sizeof(ip_buffer) - 1);
-                                    ip_buffer[sizeof(ip_buffer) - 1] = '\0';
-
-                                    while (disc_ip_gadget && disc_ip_gadget->GadgetID != GAD_IP_STRING) {
-                                        disc_ip_gadget = disc_ip_gadget->NextGadget;
-                                    }
-                                    if (disc_ip_gadget) {
-                                        GT_SetGadgetAttrs(disc_ip_gadget, win, NULL,
-                                                          GTST_String, (ULONG)ip_buffer,
-                                                          TAG_DONE);
-                                    }
-
-                                    perform_query_flow_allocated(win, chosen_ip, 0);
-                                } else {
-                                    printf("Discovery selection cancelled.\n");
-                                }
-                            }
-                        }
-                        break;
-
-                        case GAD_PRINT_BUTTON:
-                        {
-                            GT_RefreshWindow(win, NULL);
-                            mintprint_test_page(win);
-                        }
-                        break;
-
-                        case GAD_SAVE_BUTTON:
-                            if (save_driver_config(win))
-                                printf("MintPRINT Unit%d saved to ENV: and ENVARC:\n", current_unit_index);
-                            else
-                                printf("Failed to save MintPRINT Unit%d settings\n", current_unit_index);
-                            break;
-
-                        case GAD_EXIT_BUTTON:
-                            terminated = TRUE;
-                            break;
-                    }
-                    break;
-
-                case IDCMP_CLOSEWINDOW:
-                    terminated = TRUE;
-                    break;
-
-                case IDCMP_REFRESHWINDOW:
-                    GT_BeginRefresh(win);
-                    GT_EndRefresh(win, TRUE);
-                    /* GT_BeginRefresh/EndRefresh only repaints GadTools
-                     * gadgets - the status box is hand-drawn and needs its
-                     * own replay here, or it looks emptied out any time
-                     * something forces a refresh (e.g. Printer Prefs
-                     * opening on top of this window and closing again). */
-                    redraw_output_box();
-                    mp_draw_marker_strips();
-                    mp_draw_sides_hint();
-                    mp_draw_printer_icon();
-                    break;
-
-                    case IDCMP_MENUPICK:
-                    {
-                        ULONG code = imsg->Code;
-                        while (code != MENUNULL) {
-                            UWORD menu_num = MENUNUM(code);
-                            UWORD item_num = ITEMNUM(code);
-                    
-                            if (menu_num == 0) { // File menu
-                                switch (item_num) {
-                                    case 0: // Save Settings
-                                        save_print_mode();
-                                        if (save_driver_config(win))
-                                            printf("MintPRINT Unit%d saved to ENV: and ENVARC:\n", current_unit_index);
-                                        else
-                                            printf("Failed to save MintPRINT Unit%d settings\n", current_unit_index);
-                                        break;
-
-                                    case 1: // Load Settings
-                                        reload_current_unit(win);
-                                        break;
-
-                                    case 3: // About MintPRINT...
-                                        show_about(win);
-                                        break;
-
-                                    case 5: // Quit
-                                        terminated = TRUE;
-                                        break;
-                                }
-                            } else if (menu_num == 1) { // Help menu
-                                switch (item_num) {
-                                    case 0: // MintPrint Settings Help...
-                                        mp_launch_help_guide();
-                                        break;
-                                }
-                            }
-
-                            code = MENUNULL; // Only handling one menu item per event
-                        }
-                    }
-                    break;
-                    
-                    
-            }
-
-            imsg = GT_GetIMsg(win->UserPort);
-        }
-    }
-
-    if (test_print_job.active)
-        mp_test_print_cancel(win);
-
-    /* The main window is closing (or the app is quitting) - an orphaned
-     * Spooler window left open would keep its UserPort registered with
-     * Intuition after this Task exits, which is not safe. Close it the
-     * same way its own Close button would. */
-    if (g_spool_win)
-        mp_spool_win_close();
-}
-
-static BOOL mp_open_tcp_stack(void) {
-    LONG probe_socket;
-
-    /* Match the minimum version used by the printer driver. Opening the
-     * library alone is not quite enough: a stale/incomplete installation can
-     * expose bsdsocket.library while still being unable to create sockets. */
-    SocketBase = OpenLibrary("bsdsocket.library", 4);
-    if (!SocketBase) return FALSE;
-
-    probe_socket = socket(AF_INET, SOCK_STREAM, 0);
-    if (probe_socket < 0) {
-        CloseLibrary(SocketBase);
-        SocketBase = NULL;
-        return FALSE;
-    }
-
-    CloseSocket(probe_socket);
-    return TRUE;
-}
-
-static void mp_show_tcp_stack_required(void) {
-    struct EasyStruct es;
-
-    es.es_StructSize = sizeof(struct EasyStruct);
-    es.es_Flags = 0;
-    es.es_Title = (UBYTE *)"MintPrint Settings";
-    es.es_TextFormat = (UBYTE *)
-        "MintPRINT needs a running TCP/IP stack.\n\n"
-        "bsdsocket.library V4 could not be opened, or it could not\n"
-        "create a socket. Start or install Roadshow, AmiTCP, Miami,\n"
-        "or another compatible TCP/IP stack, then run MintPRINT again.\n\n"
-        "No printer settings or driver files have been changed.";
-    es.es_GadgetFormat = (UBYTE *)"Exit";
-    EasyRequest(NULL, &es, NULL);
-}
-
-// Main function
-int main(void) {
-    UWORD topborder;
-
-    /* Open libraries with version checks.
-     *
-     * EXPERIMENTAL: pinned at v37 (AmigaOS 2.04, where gadtools.library was
-     * introduced) rather than the v39 (AmigaOS 3.0) this used to require.
-     * intuition.library/graphics.library/gadtools.library all existed at
-     * v37; the driver-side library opens (dos.library/graphics.library in
-     * driver/driver_core.c and driver/command_table.c) already only ever
-     * asked for v37. GT_SetGadgetAttrs, the GTCY_ tags, and GetVisualInfo()
-     * below are all v36+ gadtools.library API. The one caller-side v39-only
-     * call this file makes, ObtainBestPenA() (graphics.library v39,
-     * marker-colour ink strip), is separately guarded at its call site -
-     * see there.
-     *
-     * NOT YET PHYSICALLY CONFIRMED on real AmigaOS 2.0/2.04 hardware or
-     * emulation - unlike every other AmigaOS-version claim in this codebase,
-     * which only gets made after a real test (see README.md's changelog and
-     * docs/OS31_SUPPORT.md for that convention). This is exactly that
-     * pending test; a v37-class system may still hit some other v38+-only
-     * behaviour this audit missed. */
-    IntuitionBase = (struct IntuitionBase *)OpenLibrary("intuition.library", 37);
-    if (!IntuitionBase) {
-        printf("Failed to open intuition.library\n");
-        return 1;
-    }
-
-    GfxBase = (struct GfxBase *)OpenLibrary("graphics.library", 37);
-    if (!GfxBase) {
-        printf("Failed to open graphics.library\n");
-        CloseLibrary((struct Library *)IntuitionBase);
-        return 1;
-    }
-
-    GadToolsBase = OpenLibrary("gadtools.library", 37);
-    if (!GadToolsBase) {
-        printf("Requires V37 gadtools.library\n");
-        CloseLibrary((struct Library *)GfxBase);
-        CloseLibrary((struct Library *)IntuitionBase);
-        return 1;
-    }
-
-    if (!mp_open_tcp_stack()) {
-        printf("A working bsdsocket.library V4 TCP/IP stack is required\n");
-        mp_show_tcp_stack_required();
-        CloseLibrary(GadToolsBase);
-        CloseLibrary((struct Library *)GfxBase);
-        CloseLibrary((struct Library *)IntuitionBase);
-        return 1;
-    }
-
-    /* Same topaz.font size (8) GadTools already opens for every gadget in
-     * this window via ng_TextAttr - not the separate size-6 variant this
-     * used to request, which a real-hardware report tied to WordWorth
-     * having been run: RectFill (the status box's border/background)
-     * kept drawing fine, only Text() using this font produced nothing,
-     * consistent with that specific font variant's glyph data being the
-     * one thing broken rather than this window/RastPort in general. */
-    font = OpenFont(&Topaz80);
-    if (!font) {
-        printf("Failed to open Topaz font\n");
-        CloseLibrary(SocketBase);
-        CloseLibrary(GadToolsBase);
-        CloseLibrary((struct Library *)GfxBase);
-        CloseLibrary((struct Library *)IntuitionBase);
-        return 1;
-    }
-
-    // Lock the default public screen
-    screen = LockPubScreen(NULL);
-    if (!screen) {
-        printf("Could not lock public screen\n");
-        CloseFont(font);
-        CloseLibrary(SocketBase);
-        CloseLibrary(GadToolsBase);
-        CloseLibrary((struct Library *)GfxBase);
-        CloseLibrary((struct Library *)IntuitionBase);
-        return 1;
-    }
-
-    // Get visual info
-    vi = GetVisualInfo(screen, TAG_DONE);
-    if (!vi) {
-        printf("Failed to get visual info\n");
-        UnlockPubScreen(NULL, screen);
-        CloseFont(font);
-        CloseLibrary(SocketBase);
-        CloseLibrary(GadToolsBase);
-        CloseLibrary((struct Library *)GfxBase);
-        CloseLibrary((struct Library *)IntuitionBase);
-        return 1;
-    }
-
-    // Calculate top border
-    topborder = screen->WBorTop + (screen->Font->ta_YSize + 1);
-    g_topborder = topborder;
-    /* Cycle label pointers already target process-lifetime static storage.
-     * seed_saved_option_labels() populated those arrays above. */
-    // Load the same Unit0 profile used by DEVS:Printers/MintPRINT.
-    load_driver_config();
-    mp_build_spool_options();
-    seed_saved_option_labels();
-
-    // Load print mode from ENV:
-    load_print_mode();
-
-    // Seed the Unit dropdown's labels from whatever is saved on disk.
-    refresh_unit_dropdown(NULL);
-
-    // Create gadgets
-    if (!createAllGadgets(&glist, vi, topborder)) {
-        printf("Failed to create gadgets\n");
-        FreeVisualInfo(vi);
-        UnlockPubScreen(NULL, screen);
-        CloseFont(font);
-        CloseLibrary(SocketBase);
-        CloseLibrary(GadToolsBase);
-        CloseLibrary((struct Library *)GfxBase);
-        CloseLibrary((struct Library *)IntuitionBase);
-        return 1;
-    }
-
-    // Open window
-    window = OpenWindowTags(NULL,
-        WA_Title, (ULONG)"MintPrint Settings",
-        WA_Gadgets, (ULONG)glist,
-        WA_AutoAdjust, TRUE,
-        WA_Width, 520,
-        WA_MinWidth, 520,
-        /* Keep the compact historical height. OUTPUT_TOP is positioned so
-         * the complete hand-drawn status box remains inside this 314px
-         * RastPort, with no unused strip below it. */
-        WA_InnerHeight, 314,
-        WA_MinHeight, 314,
-        WA_DragBar, TRUE,
-        WA_DepthGadget, TRUE,
-        WA_Activate, TRUE,
-        WA_CloseGadget, TRUE,
-        WA_SizeGadget, TRUE,
-        WA_SimpleRefresh, TRUE,
-        WA_NewLookMenus, TRUE,
-        WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW | STRINGIDCMP | BUTTONIDCMP | CYCLEIDCMP| IDCMP_MENUPICK,
-        WA_PubScreen, (ULONG)screen,
-        TAG_DONE);
-
-    if (!window) {
-        printf("Failed to open window\n");
-        FreeGadgets(glist);
-        FreeVisualInfo(vi);
-        UnlockPubScreen(NULL, screen);
-        CloseFont(font);
-        CloseLibrary(SocketBase);
-        CloseLibrary(GadToolsBase);
-        CloseLibrary((struct Library *)GfxBase);
-        CloseLibrary((struct Library *)IntuitionBase);
-        return 1;
-    }
-
-    /* Draw the status box's empty border immediately, rather than leaving
-     * it invisible until the first status line happens to draw it. */
-    custom_printf("CLEAR");
-    mp_draw_marker_strips();
-    mp_draw_sides_hint();
-
-    // Set the initial state of the print mode radio buttons
-    struct Gadget *print_mode_gadget = glist;
-    while (print_mode_gadget && print_mode_gadget->GadgetID != GAD_PRINT_MODE) {
-        print_mode_gadget = print_mode_gadget->NextGadget;
-    }
-    if (print_mode_gadget) {
-        GT_SetGadgetAttrs(print_mode_gadget, window, NULL,
-                          GTCY_Active, print_mode,
-                          TAG_DONE);
-    }
-
-    menu = CreateMenus(menu_template, TAG_DONE);
-    if (menu) {
-        LayoutMenus(menu, vi,
-            GTMN_NewLookMenus, TRUE,           // Enable standard white/grey look
-            GTMN_FrontPen, 1,                  // Text pen (usually black)
-            GTNM_BackPen, 0,                   // Background pen (usually white)
-            TAG_DONE);
-        SetMenuStrip(window, menu);
-    } else {
-        printf("Failed to create menus\n");
-    }
-
-    // Refresh window
-    GT_RefreshWindow(window, NULL);
-
-    // Offer to install DEVS:Printers/MintPRINT if it is missing.
-    check_and_offer_driver_install(window);
-
-    if (load_capability_cache_for_current_endpoint()) {
-        apply_cached_capabilities(window);
-        printf("Loaded cached printer capabilities\n");
-    } else {
-        apply_saved_option_state(window);
-        /* apply_saved_option_state() itself never logs anything - without
-         * this, a startup where the capability cache doesn't match the
-         * current host/port/path (deleted, never queried yet, or the
-         * endpoint changed) leaves the status box completely silent, which
-         * reads as "broken" rather than "nothing cached yet". */
-        printf("No cached capabilities for this endpoint - press Query\n");
-    }
-
-    /* Refresh live printer state (especially ink/toner levels) on startup
-     * when this unit already has a saved endpoint. Reuse exactly the same
-     * Query flow as the button so port fallback, capability updates, cache
-     * refresh and marker redraw behaviour stay in one place. A new/blank
-     * install has an empty ip_buffer and deliberately does nothing here. */
-    if (ip_buffer[0]) {
-        char startup_ip[64];
-        int startup_port = -1;
-
-        if (parse_ip_and_port(ip_buffer, startup_ip,
-                              sizeof(startup_ip), &startup_port)) {
-            printf("Refreshing saved printer status on startup: %s\n", ip_buffer);
-            perform_query_flow_allocated(window, startup_ip, startup_port);
-        } else {
-            printf("Saved printer address '%s' is invalid - skipping startup Query\n",
-                   ip_buffer);
-        }
-    }
-
-    /* check_and_offer_driver_install() above can pop an EasyRequest on top
-     * of this window before the event loop below has even started, so any
-     * IDCMP_REFRESHWINDOW that dialog's close generates sits unhandled
-     * until process_window_events() gets around to it - by which point
-     * the hand-drawn status box (see redraw_output_box()'s comment) may
-     * already have been damaged and repainted with nothing in it. One
-     * final synchronous repaint here, after all of the above startup
-     * activity has settled and immediately before the window is actually
-     * shown to the user, doesn't depend on that event ever arriving in
-     * time. */
-    redraw_output_box();
-    mp_draw_marker_strips();
-    mp_draw_sides_hint();
-
-    // Process events
-    process_window_events(window);
-
-    // Save print mode before exiting
-    save_print_mode();
-
-    // Cleanup
-    // Ensure operation_in_progress is reset
-    operation_in_progress = FALSE;
-
-    // Process any remaining messages in the window's UserPort
-    if (window) {
-        struct IntuiMessage *imsg;
-        while ((imsg = GT_GetIMsg(window->UserPort))) {
-            GT_ReplyIMsg(imsg);
-        }
-    }
-
-    mp_free_sides_hint_images();
-
-    /* Correct GadTools teardown order: first detach menus and close the
-     * window, then free gadgets, then release the label backing memory.
-     */
-    if (window && menu) {
-        ClearMenuStrip(window);
-    }
-
-    if (window) {
-        CloseWindow(window);
-        window = NULL;
-    }
-
-    if (glist) {
-        FreeGadgets(glist);
-        glist = NULL;
-    }
-
-    /* Cycle gadget labels are static process-lifetime storage. */
-    cleanup_dropdown_labels();
-
-    if (menu) {
-        FreeMenus(menu);
-        menu = NULL;
-    }
-
-    /*
-     * GadTools VisualInfo belongs to the screen it was obtained from.
-     * It must be released while the public-screen lock is still held.
-     *
-     * The old order did UnlockPubScreen() first and only then called
-     * FreeVisualInfo().  That leaves GadTools using screen-related state
-     * after our guarantee that the Screen pointer is still valid has gone,
-     * and is particularly unfriendly to the classic OS3.1 libraries.
-     *
-     * Correct lifetime:
-     *   FreeGadgets / FreeMenus
-     *   FreeVisualInfo
-     *   UnlockPubScreen
-     */
-    if (vi) {
-        FreeVisualInfo(vi);
-        vi = NULL;
-    }
-
-    /* Ink/toner bar pens are held across redraws (see mp_marker_pens[]
-     * near mp_draw_marker_strips()) rather than released immediately after
-     * drawing, so they must be explicitly freed here too - this is a
-     * SHARED public screen, and leaving pens allocated on it past exit
-     * would permanently tie up a few of its colour registers. */
-    mp_release_marker_pens();
-
-    if (screen) {
-        UnlockPubScreen(NULL, screen);
-        screen = NULL;
-    }
-
-    // Close the font only after GadTools no longer has VisualInfo using it.
-    if (font) {
-        CloseFont(font);
-        font = NULL;
-    }
-
-    // Close libraries in reverse order of opening
-    mp_clear_printer_icon();
-    if (SocketBase) {
-        CloseLibrary(SocketBase);
-        SocketBase = NULL;
-    }
-    if (GadToolsBase) {
-        CloseLibrary(GadToolsBase);
-        GadToolsBase = NULL;
-    }
-    if (GfxBase) {
-        CloseLibrary((struct Library *)GfxBase);
-        GfxBase = NULL;
-    }
-    if (IntuitionBase) {
-        CloseLibrary((struct Library *)IntuitionBase);
-        IntuitionBase = NULL;
-    }
-
-    return 0;
-}
+YªçŠx-®éÜj×¢ëiºÚ+Š§j[h‘éÜ¢éí×~´ß„èµ©hºÚn¶X§zÍKÊˆZ[š[Ù][™ÜÈ
+›Ü›Y\›HTU\İM‹˜ÈÈ“Z[’S•™Y™\™[˜Ù\ÈŠK‚ˆÙ]\İ\İÕRH›ÜˆHU”Î”š[\œËÓZ[’S•š]™\ˆSˆš[\‚ˆ\ØÛİ™\KTØ\Xš[]H]Y\Kš]™\ˆ[œİ[ÜÙ[Xİ[\‹[™ˆ\‹Z›ØˆY˜][ÈY][™Ëˆ
+‹Â‹ÊˆZ[’S•ÕRHİXš[\ÙYˆ›È]™HŞXÛK[X™[œ™Y\ÎÈØY™HX\™İÛ‹ˆ
+‹Â‹ÊˆZ[’S•™YœÈÎNˆÛÛ\XİY™\ÜÈ›İÈ[™İ]\ËX›Şš]ˆ
+‹Â‹ÊˆZ[’S•™YœÈÎˆØ\Xš[]HØXÚH[™İ]]X\™XH^[İ]Û\Úˆ
+‹Â‹Êˆ[ZYØHTš[R›Øˆ›İİ\HÚ]ÕRBˆÛÛ™šYİ\™\È[™\İÈZ[’S•	ÜÈTØİ[Y[[™Ú[™\ÂˆÛÛ\[HÚ]ˆMËX[ZYØ[ÜËYØØÈYÈ[ÈT]\İLH\]\İLK˜È[[ZYØH[ÛØÚÙ][BˆUÒSÓÓRS‘ÎˆYÈQ‘ˆOˆ‘ĞˆOˆÑÈOˆTš[[™Èİ\ÜÈT]\İMH
+‹Â‚‚ˆÚ[˜ÛYH›İËÙ^XËš‚ˆÚ[˜ÛYH^XËÙ^XØ˜\ÙKš‚ˆÚ[˜ÛYH^XËÛXœ˜\šY\Ëš‚ˆÚ[˜ÛYH^XËÛY[[ÜKšˆÊˆQSQ—ĞS–H›ÜˆÔË[˜]]™H™\ÜÛœÙHY™™\œÈ
+‹ÂˆÚ[˜ÛYHİ\KšˆËÈ›ÜˆÛİÙ\Š
+BˆÚ[˜ÛYH›İËÙÜËš‚ˆÚ[˜ÛYHÜËÙÜËš‚ˆÚ[˜ÛYHÜËÙÜÙ^[œËšˆËÈ›ÜˆİXİÜÓ\İÓ—ÑU’PÑTÈ
+ÜÛÛ\ˆ]Xİ[ÛŠBˆÚ[˜ÛYH^XËÛ\İËšˆËÈ›ÜˆİXİ\İÜİXİ›ÙH
+ÜÛÛ\ˆ›ØˆTÕ’QU×ÒÒS‘
+BˆÚ[˜ÛYHÜËÙÜİYÜËšˆËÈ›ÜˆÖT×Ğ\Ş[˜Ú
+Ş\İ[UYÜÊB‚‹ÊˆH
+Y[ŠH›İXİ[Ûˆš]H›İXİ	ÜÈÔT•ÑQ›YÜË™\Ù[Ú[˜ÙBˆ
+ˆ[ZYØSÔÈ‹Œ
+\È›Ú™Xİ	ÜÈİÛˆZ[š[][JHİYÚ›İ[Ø^\ÈYš[™YBˆ
+ˆ[ˆÛ\ˆ‘ÉÜÈÜËÙÜËš‹ˆİX\™Y˜]\ˆ[ˆ\Üİ[YYˆ
+‹ÂˆÚY›™Yˆ’P‘—ÒQS‚ˆÙYš[™H’P‘—ÒQSˆˆÙ[™Y‚ˆÚ[˜ÛYH›İËÚ[Z][Û‹š‚ˆÚ[˜ÛYH›İËÙØYÛÛËš‚ˆÚ[˜ÛYH›İËÙÜ˜\XÜËš‚\YYˆÛ™ÈÜÚ^™WİÂˆÚ[˜ÛYHÛX‹Ø[X—Ü›İÜËš‚ˆÚ[˜ÛYH›İËØœÙÛØÚÙ]š‚ˆÚ[˜ÛYH[Z][Û‹Ú[Z][Û‹š‚ˆÚ[˜ÛYH[Z][Û‹ÙØYÙ]Û\ÜËš‚ˆÚ[˜ÛYHXœ˜\šY\ËÙØYÛÛËš‚ˆÚ[˜ÛYHÜ˜\XÜËÙÙš‚ˆÚ[˜ÛYHÜ˜\XÜËÜ˜\İÜš‚ˆÚ[˜ÛYHÜ˜\XÜËÙ\Ü^Z[™›Ëš‚ˆÚ[˜ÛYH]šXÙ\ËÜš[\‹š‚ˆÚ[˜ÛYHİ\™Ëš‚ˆÚ[˜ÛYHİš[™Ëš‚ˆÚ[˜ÛYHİ[Ëš‚ˆÚ[˜ÛYHİX‹š‚ˆÚ[˜ÛYH˜ÛšˆËÈ›Üˆ×Ó“Ó“ĞÒÂˆÚ[˜ÛYHŞ\ËÚ[ØİšˆËÈ›Üˆ’SÓ’SÈ
+\ØÛÛ›™XİİÚ]İ[Y[İ]
+BˆÚ[˜ÛYH\œ››ËšˆËÈ›ÜˆUSQQÕU
+\ØÛÛ›™XİİÚ]İ[Y[İ]
+HHRS”“ÑÔ‘TÔÂˆËÈ[™XYH™\ÛÛ™YšXHœÙÛØÚÙ]š™Y›Ü™H\È[˜ÛYBˆËÈ^\İYÛÈUSQQÕUÚİ[ÛË][˜ÛÛ™š\›YYÛ‚ˆËÈ\ÈÜXÚYšXÈ‘ÈÚ]İ]H™X[Z[ˆÚ[˜ÛYHšY™‹[ØY\‹š‚ˆÚ[˜ÛYHšÜ™\ÜÛœÙKš‚ˆÚ[˜ÛYH™WÛÜ[ÛœËš‚ˆÚ[˜ÛYH›YYXWÜÚ^™Kš‚ˆÚ[˜ÛYH˜ÛÛ™šYËš‚ˆÚ[˜ÛYHš\ØÛY[š‚ˆÚ[˜ÛYHš\Ù[[Kš‚ˆÚ[˜ÛYH›Ù\™Ëš‚‚‹Êˆ[İ]\ËÜ›ÙÜ™\ÜÈİ]]ÛÙ\ÈÈHÛ‹\ØÜ™Y[ˆİ]\È›Ş™]™\ˆBˆ
+ˆÛÛœÛÛHHH[™\Ù\ˆX^H]™H][˜ÚY\Èœ›ÛHÛÜšØ™[˜ÚÚ\™Bˆ
+ˆ\™H\È›ÈÛÛœÛÛHÈÙYH][‹ˆİ\İÛWÜš[Š
+H]Ù[ˆ\ÈYš[™Yˆ
+ˆ\\ˆİÛˆ
+]˜]ÜÈ[ÈHÛ‹\ØÜ™Y[ˆİ]]›Ş
+NÈ›ÜØ\™YXÛ\™Bˆ
+ˆ][™™Y\™Xİš[Š
+HÈ]\™K™Y›Ü™H[HÙˆ\Èš[IÜÈİÛ‚ˆ
+ˆš[Š
+HØ[ËÛÈ]™\HÛ™HÙˆ[H[™È[ˆH›ŞÛÛœÚ\İ[Kˆ
+‹Â›ÚYİ\İÛWÜš[ŠÛÛœİÚ\ˆ
+™›Ü›X]‹‹ŠNÂˆÙYš[™Hš[ˆİ\İÛWÜš[‚‚™^\›ˆİXİÙ˜\ÙH
+‘Ù˜\ÙNÂ™^\›ˆİXİ^XĞ˜\ÙH
+”Ş\Ğ˜\ÙNÂˆÙYš[™HPVÕSQTÈÌ‚ˆÙYš[™HPVĞU—ÓSˆˆÙYš[™HPVĞ•Q‘‘TˆMŒ‹Êˆ›İLˆH›Ş	ÜÈ›Û\ÈÜ^
+ÙYH™Y˜]×Ûİ]]Ø›Ş
+
+JKÚ]š[™Âˆ
+ˆH[™HZYÚÙˆ—ÖTÚ^™J
+JÌLLK™Kˆ›ÜˆH›Ş	ÜÈ^\™XK‚ˆ
+ˆĞWÒ[›™\’ZYÚ
+ÙYHXZ[Š
+JH\È\š]™Yœ›ÛHÕUUÕÔ[™\ÈÛİ[ˆ
+ˆÜXÚYšXØ[HÛÈH›Ş	ÜÈ›İÛH›Ü™\ˆ[Ø^\È[™È›\ÚÚ]Bˆ
+ˆÚ[™İÉÜÈİÛˆ›İÛHYÙHHÚ[™Ú[™ÈZ]\ˆÛ™HÚ]İ]Hİ\‚ˆ
+ˆ™Z[›ÙXÙ\ÈZ]\ˆXYÜXÙH™[İÈH›ŞÜˆH›Ü™\ˆ\ÚY\İˆ
+ˆHÚ[™İÉÜÈYÙKˆ
+‹ÂˆÙYš[™HPVÓÕUUÓS‘TÈ‹ÊˆHXYÈİ]]›Ş\ÈÕUUÓQ•‹“ÕUUÔ’QÒÚYHH]HXZ[‚ˆ
+ˆÚ[™İÉÜÈLŒÚY]	ÜÈLÜˆŒHÚ\œÈÙˆÜ^
+ØÚ\ŠK‚ˆ
+ˆPVÓÕUUÓS‘WÓS‘Õ[˜ÛY\ÈH\›Z[˜][™È•SÛÈŒˆİÜ™\È]ˆ
+ˆ[ÜİŒHš\ÚX›HÚ\˜Xİ\œËˆ™KXÚXÚÈ\ÈYØZ[œİÕUUÓQ•Âˆ
+ˆÕUUÔ’QÒYˆHÚ[™İÈÚYÚ[™Ù\ÈYØZ[‹ˆ
+‹ÂˆÙYš[™HPVÓÕUUÓS‘WÓS‘ÕŒ‚ˆÙYš[™HPVÔ’S•ÓSÑTÈˆÙYš[™HPVÔUPSUQTÈBˆÙYš[™HQS•WÒQÑ’SHBˆÙYš[™HQS•WÒQÑ’SWÔĞU‘H‚ˆÙYš[™HQS•WÒQÑ’SWÔURUÂ‚‹ËÈØYÙ]QÂˆÙYš[™HĞQÒTÔÕ’S‘ÈBˆÙYš[™HĞQÑ’SWÔÕ’S‘È‚ˆÙYš[™HĞQÔUQT–WĞ•UÓˆÂˆÙYš[™HĞQÔ’S•Ğ•UÓˆˆÙYš[™HĞQÑVUĞ•UÓˆBˆÙYš[™HĞQÓQQPWÑ“ÔÕÓˆ‚ˆÙYš[™HĞQÔ’S•ÓSÑHÂˆÙYš[™HĞQÔĞĞSS‘×ÓSÑHˆÙYš[™HĞQÔUPSUWÓSÑHBˆÙYš[™HĞQÒTÔULˆÙYš[™HĞQÑP•QÈLBˆÙYš[™HĞQÑS‘ÒS‘HL‚ˆÙYš[™HĞQÔĞU‘WĞ•UÓˆLÂˆÙYš[™HĞQÑTĞÓÕ‘T—Ğ•UÓˆMˆÙYš[™HĞQÕS’UÑ“ÔÕÓˆMBˆÙYš[™HĞQÔÑUĞPÕU‘WĞ•UÓˆM‚ˆÙYš[™HĞQÓSÑSÑTÔVHMÂˆÙYš[™HĞQÔ‘TÓÓUSÓˆNˆÙYš[™HĞQÔÒQTÈNBˆÙYš[™HĞQÔÔÓÓTˆŒˆÙYš[™HĞQÔÔÓÓÒÑQTŒBˆÙYš[™HĞQÕ’QU×ÔÔÓÓŒ‚‚‹ÊˆÜÛÛ\ˆX[˜YÙ[Y[Ú[™İÈØYÙ]QÈ
+Ù\\˜]HÚ[™İËÙØYÙ]\İZÙBˆ
+ˆH\ØÛİ™\HÙ[Xİ[ÛˆX[ÙÉÜÈĞQÑTĞ×ÊˆX›İ™JKˆ
+‹ÂˆÙYš[™HĞQÔÔÓÓÒ“Ğ—ÓTÕBˆÙYš[™HĞQÔÔÓÓÔ‘Q”‘TÒ‚ˆÙYš[™HĞQÔÔÓÓÑSUHÂˆÙYš[™HĞQÔÔÓÓĞÓÔÑHˆÙYš[™HĞQÔÔÓÓÔ‘U–HBˆÙYš[™HĞQÔÔÓÓĞÓÔQTÈ‚ˆÙYš[™HĞQÔÔÓÓÕS’UÂ‚‹ÊˆÛÜY\ÈX[ÙÈØYÙ]QÈ
+Ù\\˜]HÚ[™İËÙØYÙ]\İYØZ[ŠKˆ
+‹ÂˆÙYš[™HĞQÔÔÓÓĞÓÔQT×Ñ’QSBˆÙYš[™HĞQÔÔÓÓĞÓÔQT×ÓÒÈ‚ˆÙYš[™HĞQÔÔÓÓĞÓÔQT×ĞĞSÑSÂ‚‹ËÈ\ØÛİ™\HÙ[Xİ[ÛˆX[ÙÈØYÙ]QÈ
+Ù\\˜]HÚ[™İËÙØYÙ]\İ
+BˆÙYš[™HĞQÑTĞ×ĞÖPÓHBˆÙYš[™HĞQÑTĞ×ÕTÑH‚ˆÙYš[™HĞQÑTĞ×ĞĞSÑSÂ‚ˆÙYš[™HPVÑTĞÓÕ‘T–WÔ‘TÕSÈM‚‚œİXİ\ØÛİ™\™Yš[\ˆÂˆÚ\ˆ\ÌM—NÂˆÚ\ˆX™[ÎNÂŸNÂ‚‹Êˆ\İš[]\İİ]]™HHØYÙ]Ø[˜XÚÈ]İ\È]ˆÙY\[™ÈBˆ
+ˆ˜\İÜš]X\[™SÈ™\]Y\İ\™H]Èš[\‹™]šXÙH[ˆ\Ş[˜Ú›Û›İ\ÛBˆ
+ˆÚ[HH›Ü›X[ØYÛÛÈ]™[ÛÜÛÛ[Y\ÈÙ\šXÚ[™ÈHÚ[™İËˆ
+‹ÂœİXİT\İš[›ØˆÂˆİXİ\ÙÔÜ
+œÜÂˆİXİSÑ”™\H
+œ™\]Y\İÂˆİXİš]X\
+˜š]X\ÂˆİXİš]X\š]X\ÜİÜ˜YÙNÂˆİXİÛÛÜ“X\
+˜ÛÛÜ›X\ÂˆİXİ˜\İÜ˜\İÜÂˆ“ÓÓš]X\ÛX[X[Âˆ“ÓÓ]šXÙWÛÜ[Âˆ“ÓÓXİ]™NÂŸNÂ‚œİ]XÈİXİT\İš[›Øˆ\İÜš[Ú›ØÂ‚‹ËÈØ]™Yš[\ˆ›Ùš[\ÎˆS•“Z[’S•Õ[š]‹ˆ[š]
+PVÕS’UËLJKˆÛ›B‹ËÈ[š]\ÈÚ]Hš]™\ˆXİX[H™XYÈ]š[[YNÈHİ\œÈ\™B‹ËÈİÚ]ÚX›HÕRK\ÚYH›Ùš[\È
+K™Ëˆ›ÜˆHÙXÛÛ™İ\™™]ÛÜšÈš[\ŠK‚ˆÙYš[™HPVÕS’UÈ‚‹ÊˆH™]È^[È™[İÈH\İš[ÑXYËÔØ]™KÑ^]›İÈ
+ŒMŠÌLˆ[ˆ
+ˆ]Ù[ˆ™[İÈÙY\ÜÛÛY›ØœËÕšY]ÈÜÛÛ\ˆ]NN
+H›Üˆ]™[ˆÜXÚ[™ÈHÙYBˆ
+ˆĞWÒ[›™\’ZYÚ[ˆXZ[Š
+H›ÜˆÚH˜Z\Ú[™È\È[ÛÈ˜Z\Ù\È]ˆBˆ
+ˆ›Ş	ÜÈ›İÛH›Ü™\ˆÚ]È]ÕUUÕÔ
+ÈH
+PVÓÕUUÓS‘TÈ[™\È]ˆ
+ˆLÙYH™[İË\ÈHœ›Ü™\ŠK[™ĞWÒ[›™\’ZYÚ\ÈÙ\\]X[ˆ
+ˆÈ]ÛÈH›Ş	ÜÈ›Ü™\ˆÚ]È›\ÚÚ]HÚ[™İÉÜÈİÛˆ›İÛBˆ
+ˆYÙH[œİXYÙˆX]š[™ÈXYÜXÙH™[İÈ]ˆ
+‹ÂˆÙYš[™HÕUUÕÔŒÌˆËÈ™[İÈ\İš[ÈXYÈÈØ]™HÈ^]›İÂˆÙYš[™HÕUUÓQ•LˆÙYš[™HÕUUÔ’QÒ
+Ú[™İËO•ÚYHŒ
+B‚‹ËÈYš[™HHTÑQXXÜ›È›ÜˆĞĞÂˆÙYš[™HTÑQ×Ø]šX]W×Ê
+\ÙY
+JBˆÙYš[™HRS•’S•ÔÑUS‘Ô×Õ‘T”ÒSÓˆŒKŒËŒ‚ˆÙYš[™HRS•’S•Ñ’U‘T—ÑTÕ
+
+ÓÓ”ÕÔÕ”ŠH‘U”Î”š[\œËÓZ[’S•ŠB‚‹ÊˆZ[š[Ù][™ÜÈ›İÈÚ\È\ÈHÚ[™ÛH˜]Ù\ˆÛÛZ[š[™È›İ[™Yˆ
+ˆš]™\ˆZ[È[™\ˆš]™\œËË[™XÚÜÈHÛ™HX]Ú[™È\ÈXXÚ[™IÜÂˆ
+ˆš[\‹™]šXÙHÙ[™\˜][Ûˆ]]ÛX]XØ[HHÙYH\Ùš]™\—ÜÜ˜×Ü]
+
+H™X\‚ˆ
+ˆHİ\ˆš]™\‹Z[œİ[[\œËˆHXXÜ›È\È[˜İ[Û‹[ZÙHÛÈ]™\Bˆ
+ˆ\ÙHÚ]H
+[˜ÛY[™ÈÛ™\ÈX\›Y\ˆ[ˆ\Èš[H[ˆH[˜İ[Û‚ˆ
+ˆYš[š][Ûˆ]Ù[ŠH™KY]˜[X]\ÈH]Xİ[Ûˆ˜]\ˆ[ˆØXÚ[™ÈBˆ
+ˆİ[H]ˆ
+‹ÂˆÙYš[™HRS•’S•Ñ’U‘T—ÔÔÈ
+\Ùš]™\—ÜÜ˜×Ü]
+
+JBœİ]XÈÓÓ”ÕÔÕ”ˆ\Ùš]™\—ÜÜ˜×Ü]
+›ÚY
+NÂ‚‹ÊˆHš]™\‰ÜÈİÛˆZ[™\œÚ[Û‹™XYİ]Ùˆ]È‰‘TˆZ[’S•ˆ
+ˆ™\œÚ[Û‹™]š\Ú[Ûˆˆİš[™ÈHÙYH\Ü™XYÙš]™\—İ™\œÚ[ÛŠ
+H™X\ˆBˆ
+ˆİ\ˆš]™\‹Z[œİ[[\œÈ›ÜˆİËˆHZ[ˆİXİ
+›İ\İBˆ
+ˆ›ÜØ\™YXÛ\™YÜ\]YH\JH™XØ]\ÙHØ[\œÈZÙHH\İYÙH™[İÂˆ
+ˆ™YY]\ÈH˜[YK›İ\İHÚ[\‹ˆ
+‹ÂœİXİTš]™\•™\œÚ[ÛˆÂˆUÓÔ‘™\œÚ[ÛÂˆUÓÔ‘™]š\Ú[ÛÂŸNÂœİ]XÈ“ÓÓ\Ü™XYÙš]™\—İ™\œÚ[ÛŠÓÓ”ÕÔÕ”ˆ]İXİTš]™\•™\œÚ[Ûˆ
+›İ]
+NÂ‚‹Êˆš\ÚX›H›İÈ[ZYØSÔÉÜÈ™\œÚ[ÛˆÛÛ[X[™[™[ˆHX›İ]™\]Y\İ\‹ˆ
+‹Âœİ]XÈÛÛœİÚ\ˆTÑQZ[š[İ™\œÚ[Û–×HBˆ‰‘TˆZ[š[Ù][™ÜÈˆRS•’S•ÔÑUS‘Ô×Õ‘T”ÒSÓˆˆ
+KŒŒŒŠHÂ‚‹ËÈÚ[\H^[œÚ[ÛˆÚXÚÂ“ÓÓ\×Ù^[œÚ[ÛŠÛÛœİÚ\ˆ
+™š[[˜[YKÛÛœİÚ\ˆ
+™^
+HÂˆÛÛœİÚ\ˆ
+™İHİœ˜ÚŠš[[˜[YK	Ë‰ÊNÂˆYˆ
+Yİ
+H™]\›ˆSÑNÂˆ™]\›ˆİ˜Ø\ÙXÛ\
+İ^
+HOHÂŸB‹Ê‚ˆ
+ˆÛ\ÜÚXÈ[ZYØSÔÈÈX›š^İXÚÈ™\]Y\İ‚ˆ
+‚ˆ
+ˆH‰ÕPÒÎˆˆÛÛÚÚYH\È\ÙY[Ûˆ™]Ù\ˆ[ZYØSÔÈİ\\ÛÙK]Û\ÜÚXÂˆ
+ˆMÈ[ZYØSÔÈ›ÙÜ˜[\ÈZ[Ú]HĞĞËÛX›š^[[YH\ÙHH×ÜİXÚÂˆ
+ˆ˜\šXX›KˆÙY\HMˆÚPˆX\™Ú[ˆ\ØÛİ™\KØYÚZ[œÈ›İYÚˆ
+ˆ\œÚ[™Ë›Ùš[HZYÜ˜][Û‹ØXÚKÚXÛÛˆ[™[™Ë[™ØYÛÛÈ™\]Y\İ\œÎÂˆ
+ˆ™YXÚ[™È\ÈÈLÚPˆØ]\ÙYH[^YYLHY[[ÜK[\İ˜Z[\™HÛ‚ˆ
+ˆÛ\ÜÚXÈÔÈ‹\İ[™Ëˆ^\˜Ú\ÙH]Y\K\ØÛİ™\‹Y[™\İš[Û‚ˆ
+ˆ™X[[ZYØSÔÈ\™Ø\™H™Y›Ü™H™YXÚ[™È\ÈYØZ[‹‚ˆ
+‚ˆ
+ˆMˆÚPˆHŒŒM]\Ë‚ˆ
+‹Â[œÚYÛ™YÛ™È×ÜİXÚÈHŒŒMSÂ‚‹ÊˆÙY\HÛÛÚÚYH\È\›[\ÜÈY]Y]H›Üˆ™]Ù\ˆİ\\ÛÙHÛËˆ
+‹Âœİ]XÈÛÛœİÚ\ˆTÑQZ[—ÜİXÚÖ×HH‰ÕPÒÎŒŒŒMÂ‚‹ËÈİXİ\™HÈX\YYXHÚ^™\ÈÈ˜^\È
+\]YÈ[˜ÛYH˜^H˜[YH[™YYX[˜[YJBœİXİYYXU˜^SX\ÂˆÚ\ˆYYXVÓPVĞU—ÓS—NÈËÈK™Ë‹š\Û×ØMÌŒLMÛ[H‚ˆÚ\ˆÛİ\˜ÙVÓPVĞU—ÓS—NÈËÈK™Ë‹˜K\\ÜË]˜^H‚ˆÚ\ˆ˜^S˜[YVÓPVĞU—ÓS—NÈËÈK™Ë‹“TVH‚ˆÚ\ˆYYX[˜[YVÓPVĞU—ÓS—NÈËÈK™Ë‹’S’Ò‘U‚ŸNÂ‚‹ËÈÛØ˜[È›Üˆ\œÙYØ\Xš[]Y\Â˜Ú\ˆİ\ÜYÙ›Ü›X]ÖÓPVÕSQT×VÓPVĞU—ÓS—NÂš[[WÜİ\ÜYÙ›Ü›X]ÈHÂ“ÓÓœY×ØÛÛœİ˜Z[×Ü]Y\šYYHSÑNÂ“ÓÓœY×Ú×ÛØİ]×Ü™\ÜYHSÑNÂ“ÓÓœY×ŞÙ[Y[œÚ[Û—Ü™\ÜYHSÑNÂ“ÓÓœY×ŞWÙ[Y[œÚ[Û—Ü™\ÜYHSÑNÂ‚˜Ú\ˆİ\ÜYÛYYXVÓPVÕSQT×VÓPVĞU—ÓS—NÂš[[WÜİ\ÜYÛYYXHHÂ‚˜Ú\ˆİ\ÜYÛİ]]Û[Ù\ÖÓPVÕSQT×VÓPVĞU—ÓS—NÂš[[WÜİ\ÜYÛİ]]Û[Ù\ÈHÂ‚˜Ú\ˆİ\ÜYÜÚY\ÖÓPVÕSQT×VÓPVĞU—ÓS—NÂš[[WÜİ\ÜYÜÚY\ÈHÂ“ÓÓİ\Ü×ØÜ™X]WÚ›ØˆHSÑNÂ“ÓÓİ\Ü×ÜÙ[™ÙØİ[Y[HSÑNÂ“ÓÓİ\Ü×Û][\WÙØİ[Y[Ú›ØœÈHSÑNÂ“ÓÓİ\Ü×ÜÚ[™ÛWÙØİ[Y[Ú[™[™ÈHSÑNÂ˜Ú\ˆÙ×ÜÚY]Ø˜XÚ×İ˜[YVÓPVĞU—ÓS—HH››Ü›X[Â‚˜Ú\ˆİ\ÜYÜØØ[[™ÖÓPVÕSQT×VÓPVĞU—ÓS—NÂš[[WÜİ\ÜYÜØØ[[™ÈHÂ‚š[İ\ÜYÛÜšY[][ÛœÖÓPVÕSQT×NÂš[[WÜİ\ÜYÛÜšY[][ÛœÈHÂ‚˜Ú\ˆİ\ÜYÜš[Û[Ù\ÖÓPVÕSQT×VÓPVĞU—ÓS—NÂš[[WÜİ\ÜYÜš[Û[Ù\ÈHÂ‚ˆÙYš[™HTÓPVÑWÓÔSÓ”ÈTÑWÓPVÓÔSÓ”Âš[İ\ÜYÙVÓTÓPVÑWÓÔSÓ”×NÂš[[WÜİ\ÜYÙHHÂœİ]XÈİXİTSÜ[ÛœÈ\ÙWÛÜ[ÛœÈHÂˆÈÌKÈKKÌŸNÂ‚˜Ú\ˆ
+œš[Û[ÙWÛÜ[ÛœÖÓPVÔ’S•ÓSÑT×NÂš[[WÜš[Û[Ù\ÈHÂœİ]XÈÚ\ˆ[š]X[Üš[Û[ÙWİ˜[YVÓPVĞU—ÓS—HH“›İ]XİYÂœİ]XÈÕ”ˆ[š]X[Üš[Û[ÙV×HHÈ[š]X[Üš[Û[ÙWİ˜[YK•SNÂ˜Ú\ˆÙ[XİYÜš[Û[ÙVÓPVĞU—ÓS—HH›[Û›ØÚ›ÛYHÈËÈY˜][˜[˜XÚÂ˜Ú\ˆÙ[XİYÜØØ[[™ÖÓPVĞU—ÓS—HH˜]]ÈÈËÈY˜][œİ]XÈÚ\ˆ[š]X[ÜØØ[[™×İ˜[YVÓPVĞU—ÓS—HH“›İ]XİYÂœİ]XÈÕ”ˆ[š]X[ÜØØ[[™×Û[ÙV×HHÈ[š]X[ÜØØ[[™×İ˜[YK•SNÂ‹ÊˆZ[’S•İX›HŞXÛHØYÙ]X™[İÜ˜YÙH
+ÔÌËŒK\ØY™JK‚ˆ
+‚ˆ
+ˆÛ\ÜÚXÈØYÛÛÈ\È]XÚ\Y\ˆÚ[ˆÕÖWÓX™[ÈÙY\ÈHØ[YH\œ˜^Bˆ
+ˆY™\ÜÈ›ÜˆHÛÛ\]HY™][YHÙˆH]™HÖPÓWÒÒS‘ØYÙ]ˆX\›Y\‚ˆ
+ˆ™\œÚ[ÛœÈ™\X]YH[ØÕ™XÉÙ™]È\œ˜^\È\š[™È]Y\KÔØ]™H[™™]\™Ù]Yˆ
+ˆH]™HØYÙ]Ëˆ]Ûİ[X]™HŒÍÈØYÛÛÈÚ]İ[H›ÛÚÚÙY\[™Ëˆ
+ˆ›ÙXÚ[™È[^YYY[[ÜH[\ÈÜˆH\™ØÚÈ\š[™ÈH]\ˆ]Y\KÑ^]‚ˆ
+‚ˆ
+ˆÙY\›İHÚ[\ˆ\œ˜^\È[™Z\ˆ^˜XÚÚ[™È[ˆİ]XÈİÜ˜YÙK‚ˆ
+ˆ]Y\H™]Üš]\ÈHÛÛ[È[‹\XÙH[™™KX\Y\ÈHĞSQHÚ[\‹‚ˆ
+‹ÂˆÙYš[™HTÓQQPWÓP‘SÓSˆ
+PVĞU—ÓSˆ
+ÈÌŠBˆÙYš[™HTÕS’UÓP‘SÓSˆL‚œİ]XÈÚ\ˆ\ÛYYXWÛX™[ÜİÜ˜YÙVÓPVÕSQTÈ
+ÈWVÓTÓQQPWÓP‘SÓS—NÂœİ]XÈÕ”ˆ\ÛYYXWÛX™[ÜœÖÓPVÕSQTÈ
+È—NÂ‚œİ]XÈÚ\ˆ\ÜØØ[[™×ÛX™[ÜİÜ˜YÙVÓPVÕSQTÈ
+ÈWVÓPVĞU—ÓS—NÂœİ]XÈÕ”ˆ\ÜØØ[[™×ÛX™[ÜœÖÓPVÕSQTÈ
+È—NÂ‚œİ]XÈÚ\ˆ\Üš[Û[ÙWÛX™[ÜİÜ˜YÙVÓPVÕSQTÈ
+ÈWVÓPVĞU—ÓS—NÂœİ]XÈÕ”ˆ\Üš[Û[ÙWÛX™[ÜœÖÓPVÕSQTÈ
+È—NÂ‚œİ]XÈÚ\ˆ\Ü]X[]WÛX™[ÜİÜ˜YÙVÓPVÕSQTÈ
+ÈWVÌÌ—NÂœİ]XÈÕ”ˆ\Ü]X[]WÛX™[ÜœÖÓPVÕSQTÈ
+È—NÂ‚œİ]XÈÚ\ˆ\ÙWÛX™[ÜİÜ˜YÙVÓTÓPVÑWÓÔSÓ”È
+ÈWVÌM—NÂœİ]XÈÕ”ˆ\ÙWÛX™[ÜœÖÓTÓPVÑWÓÔSÓ”È
+È—NÂ‚ˆÙYš[™HTÓPVÔÒQT×ÓÔSÓ”ÈÂœİ]XÈÚ\ˆ\ÜÚY\×ÛX™[ÜİÜ˜YÙVÓTÓPVÔÒQT×ÓÔSÓ”×VÌNÂœİ]XÈÚ\ˆ\ÜÚY\×İ˜[YWÜİÜ˜YÙVÓTÓPVÔÒQT×ÓÔSÓ”×VÓPVĞU—ÓS—NÂœİ]XÈÕ”ˆ\ÜÚY\×ÛX™[ÜœÖÓTÓPVÔÒQT×ÓÔSÓ”È
+ÈWNÂœİ]XÈ[\ÜÚY\×ÛÜ[Û—ØÛİ[HNÂ‚‹ÊˆÜÛÛ\ˆŞXÛHØYÙ]İÜ˜YÙHHØ[YHİ]XË\İÜ˜YÙKÙš^YX\œ˜^KXY™\ÜÂˆ
+ˆ\ØÚ\[™H\È\ÜÚY\×ÊˆX›İ™H
+ÙYHš]™\—ÜÜÛÛØY™™\‰ÜÈİÛˆÛÛ[Y[ˆ
+ˆYš[™YÚ]Hİ\ˆ\œÚ\İY[š]Y™™\œÈ™[İË›ÜˆÚJKˆZ[ˆ
+ˆÛ˜ÙH]İ\\H\ØZ[ÜÜÛÛÛÜ[ÛœÊ
+Hœ›ÛH\ÈXXÚ[™IÜÈÔÂˆ
+ˆ]šXÙH\İ™]™\ˆ™X[ØØ]YÚ[HHØYÙ]\È]™Kˆ
+‹ÂˆÙYš[™HTÓPVÔÔÓÓÓÔSÓ”ÈHÊˆSH
+È\È]XİY\™š]™H]šXÙ\È
+‹Âœİ]XÈÚ\ˆ\ÜÜÛÛÛX™[ÜİÜ˜YÙVÓTÓPVÔÔÓÓÓÔSÓ”×VÌNÂœİ]XÈÚ\ˆ\ÜÜÛÛİ˜[YWÜİÜ˜YÙVÓTÓPVÔÔÓÓÓÔSÓ”×VÓPVĞU—ÓS—NÂœİ]XÈÕ”ˆ\ÜÜÛÛÛX™[ÜœÖÓTÓPVÔÔÓÓÓÔSÓ”È
+ÈWNÂœİ]XÈ[\ÜÜÛÛÛÜ[Û—ØÛİ[HNÂ‚œİ]XÈÚ\ˆ\İ[š]ÛX™[ÜİÜ˜YÙVÓPVÕS’U×VÓTÕS’UÓP‘SÓS—NÂœİ]XÈÕ”ˆ\İ[š]ÛX™[ÜœÖÓPVÕS’UÈ
+ÈWNÂ‚”Õ”ˆ
+œØØ[[™×Û[ÙWÛX™[ÈH\ÜØØ[[™×ÛX™[ÜœÎÂ˜Ú\ˆÙ[XİYÜ]X[]VÌM—HH˜]]ÈÈËÈY˜][˜Ú\ˆİ\ÜYÜ]X[]VÓPVÔUPSUQT×VÌM—NÂš[[WÜİ\ÜYÜ]X[]HHÂ”Õ”ˆ
+œ]X[]WÛ[ÙWÛX™[ÈH\Ü]X[]WÛX™[ÜœÎÂœİ]XÈÚ\ˆ[š]X[Ü]X[]Wİ˜[YVÌÌ—HH“›İ]XİYÂœİ]XÈÕ”ˆ[š]X[Ü]X[]WÛ[ÙV×HHÈ[š]X[Ü]X[]Wİ˜[YK•SNÂ‹ËÈYYXH›ÜİÛˆİ]B˜Ú\ˆ
+œÙ[XİYÛYYXHH•SÂœİXİØYÙ]
+›YYXWÙ›ÜİÛˆH•SÂ”Õ”ˆ
+›YYXWÙ›ÜİÛ—Ú][\ÈH\ÛYYXWÛX™[ÜœÎÂ“ÓÓ\×ÛYYXWÜ™XYHHSÑNÂœİXİY[H
+›Y[HH•SÂœİXİYYXU˜^SX\YYXWİ˜^WÛX\ÓPVÕSQT×NÂš[[WÛYYXWİ˜^WÛX\[™ÜÈHÂ‚‹ËÈ˜Y[È]ÛˆX™[È›Üˆš[[ÙB”Õ”ˆ
+œš[Û[ÙWÛX™[ÈH\Üš[Û[ÙWÛX™[ÜœÎÂ‚œİ]XÈÚ\ˆ[š]X[ÛYYXWİ˜[YVÌMŒHH“›İ]XİYÂœİ]XÈÕ”ˆ[š]X[ÛYYXWÛX™[Ö×HHÈ[š]X[ÛYYXWİ˜[YK•SNÂ‚‚‚œİ]XÈİXİ™]ÓY[HY[Wİ[\]V×HHÂˆÈ“WÕUK
+Õ”ŠH‘š[H‹KˆÈ“WÒUSK
+Õ”ŠH”Ø]™Hš]™\ˆÙ][™ÜÈ‹KˆÈ“WÒUSK
+Õ”ŠH”™[ØYš]™\ˆÙ][™ÜÈ‹KˆÈ“WÒUSK“WĞT“P‘SKˆÈ“WÒUSK
+Õ”ŠHX›İ]Z[’S•‹‹ˆ‹KˆÈ“WÒUSK“WĞT“P‘SKˆÈ“WÒUSK
+Õ”ŠH”]Z]‹KˆÈ“WÕUK
+Õ”ŠH’[‹KˆÈ“WÒUSK
+Õ”ŠH“Z[š[Ù][™ÜÈ[‹‹ˆ‹KˆÈ“WÑS‘•SBŸNÂ‹ËÈÛØ˜[˜\šXX›HÈİÜ™HHš[[ÙH
+H›XÚÈ[™Ú]KHHÛÛÜŠBš[š[Û[ÙHHÈËÈY˜][È›XÚÈ[™Ú]B‚‹ËÈ[\ˆÈİÜ™H˜[Y\È[È\İÂ›ÚYİÜ™Wİ˜[YJÚ\ˆ\İÓPVÕSQT×VÓPVĞU—ÓS—K[
+˜Ûİ[ÛÛœİÚ\ˆ
+˜[YJHÂˆYˆ
+
+˜Ûİ[HPVÕSQTÊH™]\›Âˆİ›˜ÜJ\İÊ˜Ûİ[K˜[YKPVĞU—ÓSˆHJNÂˆ\İÊ˜Ûİ[VÓPVĞU—ÓSˆHWHH	×	ÎÂˆ
+
+˜Ûİ[
+JÊÎÂŸB‚›ÚYİÜ™WÚ[İ˜[YJ[\İÓPVÕSQT×K[
+˜Ûİ[[˜[
+HÂˆYˆ
+
+˜Ûİ[HPVÕSQTÊH™]\›Âˆ\İÊ
+˜Ûİ[
+JÊ×HH˜[ÂŸB‚œİ]XÈ›ÚY\ØYÜİ\ÜYÙJ[JHÂˆ[NÂ‚ˆYˆ
+HOHÌ	‰ˆHOHŒ
+H™]\›Âˆ›Üˆ
+HHÈH[WÜİ\ÜYÙNÈ
+ÊÚJHÂˆYˆ
+İ\ÜYÙVÚWHOHJH™]\›ÂˆBˆYˆ
+[WÜİ\ÜYÙHTÓPVÑWÓÔSÓ”ÊBˆİ\ÜYÙVÛ[WÜİ\ÜYÙJÊ×HHNÂŸB‚œİ]XÈ[\Û›Ü›X[\ÙWÚ\ÙJSÓ‘È™\ÛÛ][Û‹P–UH[š]ÊHÂˆSÓ‘ÈHH™\ÛÛ][ÛÂ‚ˆYˆ
+[š]ÈOH
+HÂˆÊˆTÛHOˆKˆÛ\˜[˜Ù\È™[İÈXœÛÜ˜ˆH[YÙ\ˆ›İ[™[™Âˆ
+ˆ\ÙYHš[\œÈ›ÜˆLNÛKÌŒÍ™ÛH
+›İYÚHÌÍŒJKˆ
+‹ÂˆHH
+™\ÛÛ][Ûˆ
+ˆMS
+ÈLS
+HÈLSÂˆH[ÙHYˆ
+[š]ÈOHÊHÂˆ™]\›ˆÂˆB‚ˆYˆ
+HHMUS	‰ˆHHÌUS
+H™]\›ˆÌÂˆYˆ
+HHNMUS	‰ˆHHŒUS
+H™]\›ˆŒÂˆ™]\›ˆÂŸB‚œİ]XÈ›ÚY\ØYÚ\Ü™\ÛÛ][ÛŠÛÛœİP–UH
+œ˜]Ë[˜[YWÛ[ŠHÂˆSÓ‘È™\ÎÂˆSÓ‘È\™\ÎÂˆ[NÂˆ[YNÂ‚ˆYˆ
+\˜]È˜[YWÛ[ˆOHJH™]\›Â‚ˆ™\ÈH
+
+SÓ‘Ê\˜]ÖÌH
+H
+
+SÓ‘Ê\˜]ÖÌWHMŠHˆ
+
+SÓ‘Ê\˜]ÖÌ—H
+H
+SÓ‘Ê\˜]ÖÌ×NÂˆ\™\ÈH
+
+SÓ‘Ê\˜]ÖÍH
+H
+
+SÓ‘Ê\˜]ÖÍWHMŠHˆ
+
+SÓ‘Ê\˜]ÖÍ—H
+H
+SÓ‘Ê\˜]ÖÍ×NÂˆHH\Û›Ü›X[\ÙWÚ\ÙJ™\Ë˜]ÖÎJNÂˆYHH\Û›Ü›X[\ÙWÚ\ÙJ\™\Ë˜]ÖÎJNÂ‚ˆÊˆHš]™\ˆİ\œ™[H\ÈÛ™HHÙ][™È›Üˆ›İ^\ËÛÈÈ›İˆ
+ˆY™\\ÙH\Ş[[Y]šXÈš[\ˆ™\ÛÛ][ÛœÈ]Ø[››İ™\™\Ù[ˆ
+‹ÂˆYˆ
+H	‰ˆHOHYJHÂˆ\ØYÜİ\ÜYÙJJNÂˆš[Š”š[\ˆİ\ÜÈ	YWˆ‹JNÂˆBŸB‚œİ]XÈ[\ÙWØXİ]™WÚ[™^
+[JHÂˆ[NÂ‚ˆ›Üˆ
+HHÈH\ÙWÛÜ[ÛœË˜Ûİ[È
+ÊÚJHÂˆYˆ
+\ÙWÛÜ[ÛœË˜[Y\ÖÚWHOHJH™]\›ˆNÂˆBˆ™]\›ˆÂŸB‚‹ÊˆYš[™YÚ]Hİ\ˆ\œÚ\İY[š]Y™™\œÈ™[İËˆ
+‹Â™^\›ˆÚ\ˆš]™\—ÜÚY\×ØY™™\–ÓPVĞU—ÓS—NÂ™^\›ˆÚ\ˆš]™\—Ù[™Ú[™WØY™™\–ÌÌ—NÂ™^\›ˆÚ\ˆš]™\—ÜÜÛÛØY™™\–ÓPVĞU—ÓS—NÂ™^\›ˆ“ÓÓš]™\—ÜÜÛÛÚÙY\Â‚œİ]XÈ“ÓÓ\Üİ\ÜYÜÚYJÛÛœİÚ\ˆ
+˜[YJHÂˆ[NÂ‚ˆYˆ
+]˜[YJH™]\›ˆSÑNÂˆ›Üˆ
+HHÈH[WÜİ\ÜYÜÚY\ÎÈ
+ÊÚJHÂˆYˆ
+İ˜Û\
+İ\ÜYÜÚY\ÖÚWK˜[YJHOH
+H™]\›ˆ•QNÂˆBˆ™]\›ˆSÑNÂŸB‚œİ]XÈ“ÓÓ\Ù\^İ˜[œÜÜÜİ\ÜY
+›ÚY
+HÂˆ[NÂˆÛÛœİÚ\ˆ
+™›Ü›X]ÛZ[YNÂ‚ˆÊˆZ[’S•\^\ÈÛ™H][K\YÙHÑÈ˜\İ\ˆÜˆ\H˜\İ\ˆ
+T‘ŠBˆ
+ˆØİ[Y[[ˆÛ™HÜ™[˜\Hš[R›Ø‹ˆ\ÈÛÜšÜÈÛˆš[\œÈİXÚ\Âˆ
+ˆHœ›İ\ˆQËRLÌÈ]Y™\\ÙH\^]^XÚ]H™Z™Xİˆ
+ˆ][KYØİ[Y[T›ØœËˆ
+‹ÂˆYˆ
+İ˜Û\
+š]™\—Ù[™Ú[™WØY™™\‹œÙË\˜\İ\ˆŠHOH
+Bˆ›Ü›X]ÛZ[YHHš[XYÙKÜÙË\˜\İ\ˆÂˆ[ÙHYˆ
+İ˜Û\
+š]™\—Ù[™Ú[™WØY™™\‹\™ˆŠHOH
+Bˆ›Ü›X]ÛZ[YHHš[XYÙKİ\™ˆÂˆ[ÙBˆ™]\›ˆSÑNÂˆ›Üˆ
+HHÈH[WÜİ\ÜYÙ›Ü›X]ÎÈ
+ÊÚJHÂˆYˆ
+İ˜Û\
+İ\ÜYÙ›Ü›X]ÖÚWK›Ü›X]ÛZ[YJHOH
+Bˆ™]\›ˆ•QNÂˆBˆ™]\›ˆSÑNÂŸB‚œİ]XÈSÓ‘È\ÜÚY\×ØXİ]™WÚ[™^
+›ÚY
+HÂˆ[NÂ‚ˆ›Üˆ
+HHÈH\ÜÚY\×ÛÜ[Û—ØÛİ[È
+ÊÚJHÂˆYˆ
+İ˜Û\
+š]™\—ÜÚY\×ØY™™\‹\ÜÚY\×İ˜[YWÜİÜ˜YÙVÚWJHOH
+Bˆ™]\›ˆ
+SÓ‘ÊZNÂˆBˆ™]\›ˆÂŸB‚œİ]XÈSÓ‘È\ÜÜÛÛØXİ]™WÚ[™^
+›ÚY
+HÂˆ[NÂ‚ˆ›Üˆ
+HHÈH\ÜÜÛÛÛÜ[Û—ØÛİ[È
+ÊÚJHÂˆYˆ
+İ˜Û\
+š]™\—ÜÜÛÛØY™™\‹\ÜÜÛÛİ˜[YWÜİÜ˜YÙVÚWJHOH
+Bˆ™]\›ˆ
+SÓ‘ÊZNÂˆBˆ™]\›ˆÂŸB‚‹Êˆ’ÙY\ÜÛÛY›ØœÈˆÛ›HYX[œÈ[][™ÈÛ˜ÙH›Øˆš[\ÈXİX[HÜÛÛˆ
+ˆÈH™X[š]™HHSHÙY\ÈZ[’S•	ÜÈÜšYÚ[˜[›][Ø^\ËBˆ
+ˆİ™\Üš][ˆ™Z]š[İ\ˆ™YØ\™\ÜÈ
+ÙYHš]™\—ØÛÜ™K˜ÉÜÈ\Ú›Ø—Ø™YÚ[Š
+JKˆ
+ˆÛÈHXÚØ›Ş\È\ØX›Y[™›Ü˜ÙYÙ™ˆÚ[™]™\ˆš]™\—ÜÜÛÛØY™™\‚ˆ
+ˆ\È[\HÜˆ”SH‹ˆ
+‹Âœİ]XÈ“ÓÓ\ÜÜÛÛÚÙY\Ø]˜Z[X›J›ÚY
+HÂˆ™]\›ˆš]™\—ÜÜÛÛØY™™\–ÌH	‰ˆİ˜Û\
+š]™\—ÜÜÛÛØY™™\‹”SHŠHOHÂŸB‚‹ÊˆÜ[]\ÈHÜÛÛ\ˆŞXÛHØYÙ]	ÜÈÚÚXÙ\Îˆ”SHˆ
+[™^[Ø^\Âˆ
+ˆ™\Ù[
+H\ÈÛ™H’
+ŠHˆ[H\ˆˆ\™š]™H]šXÙH\Âˆ
+ˆXXÚ[™IÜÈÔÈ]šXÙH\İXİX[H\È[İ[YHHİ[™\™[ZYØBˆ
+ˆQKÔĞÔÒH\][Ûˆ˜[Z[™ÈÛÛ™[[Ûˆ
+H˜[YKX˜\ÙY]\š\İXË›İBˆ
+ˆ\™Ø\™HÚXÚÎˆHÛÛ›Û\ˆ\Ú[™ÈÛÛYHİ\ˆ˜[Z[™ÈØÚ[YKK™ËˆBˆ
+ˆ™[™Ü‹\ÜXÚYšXÈÑ‹ÔÑY\\‹Ú[›İÚİÈ\\™JKˆØ[YÛ˜ÙH]ˆ
+ˆİ\\™Y›Ü™HHÚ[™İËÙØYÙ]È^\İHÙYHHİ]XË\İÜ˜YÙBˆ
+ˆÛÛ[Y[X›İ™Hš]™\—ÜÜÛÛØY™™\‹ˆØÚÑÜÓ\İ
+
+KÕ[“ØÚÑÜÓ\İ
+
+HZÙBˆ
+ˆHÔÈ\İ	ÜÈİÛˆ[\›˜[Ù[X\Ü™KÛÈ›È›Ü˜šY
+
+H\È™YYY\›İ[™ˆ
+ˆHØ[ËˆÛÓ˜[YH\ÈHÔ”Õˆ
+[™İ\™Yš^Y›İˆ
+ˆ•S]\›Z[˜]Y
+K[˜ÙHQŠ
+H[™[ˆ^XÚ][™İ˜]\ˆ[ˆBˆ
+ˆZ[ˆİš[™ÈÛÜKˆ
+‹Âœİ]XÈ›ÚY\ØZ[ÜÜÛÛÛÜ[ÛœÊ›ÚY
+HÂˆİXİÜÓ\İ
+™Âˆ[Ûİ[HÂ‚ˆ\ÜÜÛÛÛX™[ÜœÖÌHH\ÜÜÛÛÛX™[ÜİÜ˜YÙVÌNÂˆİ˜ÜJ\ÜÜÛÛÛX™[ÜİÜ˜YÙVÌK”SHŠNÂˆİ˜ÜJ\ÜÜÛÛİ˜[YWÜİÜ˜YÙVÌK”SHŠNÂˆÛİ[HNÂ‚ˆHØÚÑÜÓ\İ
+—ÑU’PÑTÈ—Ô‘PQ
+NÂˆÚ[H
+Ûİ[TÓPVÔÔÓÓÓÔSÓ”È	‰‚ˆ
+H™^ÜÑ[J—ÑU’PÑTÊJHOH•S
+HÂˆP–UH
+˜›˜[YHH
+P–UH
+ŠPQŠO™ÛÓ˜[YJNÂˆP–UH›[ÂˆÚ\ˆ˜[YVÌÌ—NÂˆP–UHNÂ‚ˆYˆ
+X›˜[YJHÛÛ[YNÂˆ›[ˆH›˜[YVÌNÂˆYˆ
+›[ˆˆÚ^™[ÙŠ˜[YJHHJH›[ˆH
+P–UJJÚ^™[ÙŠ˜[YJHHJNÂˆ›Üˆ
+HHÈH›[È
+ÊÚJH˜[YVÚWHH
+Ú\ŠX›˜[YVÚH
+ÈWNÂˆ˜[YVØ›[—HH	×	ÎÂ‚ˆYˆ
+›[ˆHˆ	‰ˆ
+˜[YVÌHOH	Ñ	È˜[YVÌHOH	Ù	ÊH	‰‚ˆ
+˜[YVÌWHOH	Ò	È˜[YVÌWHOH	Ú	ÊJHÂˆÛœš[Š\ÜÜÛÛÛX™[ÜİÜ˜YÙVØÛİ[KˆÚ^™[ÙŠ\ÜÜÛÛÛX™[ÜİÜ˜YÙVÌJKˆ’
+	\ÎŠH‹˜[YJNÂˆ\ÜÜÛÛÛX™[ÜœÖØÛİ[HH\ÜÜÛÛÛX™[ÜİÜ˜YÙVØÛİ[NÂˆÛœš[Š\ÜÜÛÛİ˜[YWÜİÜ˜YÙVØÛİ[KˆÚ^™[ÙŠ\ÜÜÛÛİ˜[YWÜİÜ˜YÙVÌJK‰\Îˆ‹˜[YJNÂˆ
+ÊØÛİ[ÂˆBˆBˆ[“ØÚÑÜÓ\İ
+—ÑU’PÑTÈ—Ô‘PQ
+NÂ‚ˆ\ÜÜÛÛÛX™[ÜœÖØÛİ[HH•SÂˆ\ÜÜÛÛÛÜ[Û—ØÛİ[HÛİ[ÂŸB‚‹ËÈYYXHÚ^™H[\‚“ÓÓ\œÙWÛYYXWÙ[Y[œÚ[ÛœÊÛÛœİÚ\ˆ
+›YYXWÜİ‹[
+[
+JHÂˆÛÛœİÚ\ˆ
+™[WÜ\Hİ˜ÚŠYYXWÜİ‹	×ÉÊNÂˆYˆ
+Y[WÜ\
+H™]\›ˆSÑNÂ‚ˆ[ËÂˆYˆ
+ÜØØ[™Š[WÜ\
+ÈK‰Y	Y[H‹	Ë	š
+HOHŠHÂˆ
+HÈ
+ˆLÈËÈÛÛ™\[HÈ[™™YÈÙˆ[Bˆ
+HH
+ˆLÂˆ™]\›ˆ•QNÂˆBˆ™]\›ˆSÑNÂŸB‚›ÚY[œİ\™WÜ]X[]WÙY˜][Ê
+HÂˆYˆ
+[WÜİ\ÜYÜ]X[]HOH
+HÂˆÊˆÈ›İ[™[˜YÚYÚİ\ÜÚ[ˆHš[\ˆÛZ]È\Âˆ
+ˆØ\Xš[]KˆHØ[\İ[™ÈÍÈÛ›HXØÙ\È›Ü›X[Y]HÛˆ
+ˆ™YK]˜[YH˜[˜XÚÈÙ[XİY˜Y[™XYHHTÙ\™\‚ˆ
+ˆ™]\›ˆİXØÙ\ÜÙ[[ÚËZYÛ›Ü™Y[Ü‹\İXœİ]]YX]šX]\Ëˆ
+‹Âˆš[Š“›Èš[\]X[]K\İ\ÜY™]\›™YÈ\Ú[™ÈØY™H›Ü›X[]X[]K—ˆŠNÂˆİ˜ÜJİ\ÜYÜ]X[]VÌK››Ü›X[ŠNÂˆ[WÜİ\ÜYÜ]X[]HHNÂˆBŸB‚‹ËÒ[\ˆÈ\œÙHT[™Üœ›ÛHÕRBš[\œÙWÚ\Ø[™ÜÜ
+ÛÛœİÚ\ˆ
+š[œ]Ú\ˆ
+š\Ûİ][\Û[‹[
+œÜÛİ]
+HÂˆÚ\ˆ
+˜ÛÛÛˆHİ˜ÚŠ[œ]	Î‰ÊNÂˆYˆ
+ÛÛÛŠHÂˆ[[ˆHÛÛÛˆH[œ]ÂˆYˆ
+[ˆH\Û[ŠH™]\›ˆÂˆİ›˜ÜJ\Ûİ][œ][ŠNÂˆ\Ûİ]Û[—HH	×	ÎÂˆ
+œÜÛİ]H]ÚJÛÛÛˆ
+ÈJNÂˆH[ÙHÂˆİ›˜ÜJ\Ûİ][œ]\Û[ˆHJNÂˆ\Ûİ]Ú\Û[ˆHWHH	×	ÎÂˆ
+œÜÛİ]HLNÈËÈ›ÈÜÜXÚYšYYˆBˆ™]\›ˆNÂŸB‚‚‹ËÔØY™HÙ[™]Bš[ØY™WÜÙ[™
+[ÛØÚÙ™ÛÛœİ›ÚY
+˜Y‹[[ŠHÂˆÛÛœİÚ\ˆ
+˜YˆH
+ÛÛœİÚ\ˆ
+Š]˜YÂˆ[İ[ÜÙ[HÂˆ[][\HÂ‚ˆÚ[H
+İ[ÜÙ[[ŠHÂˆ[Ú[š×ÜÚ^™HH
+[ˆHİ[ÜÙ[ˆMŠHÈMˆˆ
+[ˆHİ[ÜÙ[
+NÂˆ[Ù[HÙ[™
+ÛØÚÙ™
+Ú\ˆ
+ŠXYˆ
+Èİ[ÜÙ[Ú[š×ÜÚ^™K
+NÂˆ][\
+ÊÎÂ‚ˆYˆ
+Ù[H
+HÂˆš[Š—–ÈWHÙ[™
+
+H˜Z[Y]	Y]\È
+][\	Y
+Wˆ‹İ[ÜÙ[][\
+NÂˆ\œ›ÜŠœÙ[™ŠNÂˆ™]\›ˆLNÂˆB‚ˆİ[ÜÙ[
+ÏHÙ[Â‚ˆËÈ›ÙÜ™\ÜÈ˜\ˆ
+]™\HĞˆÜˆÛˆš[š\Ú
+BˆYˆ
+
+İ[ÜÙ[	HMLÍˆOH
+H
+İ[ÜÙ[OH[ŠJHÂˆš[Š–Ê×HÙ[	YÈ	Y]\È
+	Y	IJWˆ‹İ[ÜÙ[[‹
+İ[ÜÙ[
+ˆL
+HÈ[ŠNÂˆBˆB‚ˆš[Š–ÓÒ×Hš[š\ÚYÙ[™[™È	Y]\ÈİXØÙ\ÜÙ[Wˆ‹İ[ÜÙ[
+NÂˆ™]\›ˆİ[ÜÙ[ÂŸB‚‹ËÈÛØ˜[˜\šXX›\È›ÜˆÕRBœİXİÚ[™İÈ
+Ú[™İÈH•SÂœİXİØYÙ]
+™Û\İH•SÂœİXİXœ˜\H
+”ÛØÚÙ]˜\ÙHH•SÂœİXİXœ˜\H
+‘ØYÛÛĞ˜\ÙHH•SÂœİXİ[Z][Û˜\ÙH
+’[Z][Û˜\ÙHH•SÂœİXİÙ˜\ÙH
+‘Ù˜\ÙHH•SÂ˜Ú\ˆ\ØY™™\–ÌM—HHˆÂ˜Ú\ˆš]™\—Ü]ØY™™\–ÎM—HH‹Ú\Üš[Â“ÓÓš]™\—ÙXYÈHSÑNÂœİ]XÈÕ”ˆXY×ÛX™[Ö×HHÈ‘XYÈÙ™ˆ‹‘XYÈÛˆ‹•SNÂ‹ÊˆØ\\™H™\ÛÛ][Ûˆš]™\‹™]šXÙH™\ÜÈÈH\[™™[™\œÈ]‚ˆ
+ˆŒH]XY\\È˜\İ\ˆÚ^™KÔSH\ÙH›ÜˆH™X[]X[]HØZ[ÈÌBˆ
+ˆ
+[™^
+Hİ^\ÈHY˜][ÛÈ^\İ[™È\Ù\œÈÙYH›È™Z]š[İ\ˆÚ[™ÙKˆ
+‹Â”Õ”ˆ
+œ™\ÛÛ][Û—ÛX™[ÈH\ÙWÛX™[ÜœÎÂœİ]XÈÚ\ˆ[š]X[ÙWİ˜[YVÌM—HHŒÌHÂš[š]™\—Ü™\ÛÛ][ÛˆHÌÂ‹Êˆ\İ[™İZ\Ú\ÈHØ]™Yİ\Ù\‹\Ù[XİYÌH˜[YHœ›ÛHH[œØ]™YY˜][‚ˆ
+ˆ[ˆ^XÚ]˜[YHX^HÙ[XİHX\šÙYÛÛ\]Xš[]H[NÈHœ™\Ú]Y\Bˆ
+ˆİ\Ú\ÙHÙY\È[ˆXİX[H™\ÜY™\ÛÛ][Ûˆ\ÈHY˜][ˆ
+‹Âœİ]XÈ“ÓÓš]™\—Ü™\ÛÛ][Û—Ù^XÚ]HSÑNÂ˜Ú\ˆš]™\—Ù[™Ú[™WØY™™\–ÌÌ—HHšœYÈÂ‹ÊˆØ[YHÛÛ™[[Ûˆ\Èš]™\—Ü™\ÛÛ][Û—Ù^XÚ]X›İ™Nˆ\İ[™İZ\Ú\ÈBˆ
+ˆØ]™Yİ\Ù\‹\Ù[XİY[™Ú[™Hœ›ÛHH[œØ]™YšœYÈˆÛÛ\[YZ[ˆY˜][‚ˆ
+ˆÚ]İ]\ËHœ™\Úš[\ˆ]İ\ÜÈ›İ”QÈ[™ÑÈ˜\İ\‚ˆ
+ˆÚ[[Hİ^YYÛˆ”QÈ›Ü™]™\ˆHÑÈ˜\İ\ˆØ\ÈÛ›H]™\ˆXÚÙYY‚ˆ
+ˆ”QÈØ\Û‰İY™\\ÙY][
+\Ü™XZ[Ù[™Ú[™WÛÜ[Ûœ×Ùœ›ÛWÜ]Y\J
+Bˆ
+ˆÙY\ÈÚ]]™\‰ÜÈ[™XYH[ˆš]™\—Ù[™Ú[™WØY™™\ˆ\ÈÛ™È\È]	ÜÈİ[ˆ
+ˆİ\ÜY
+Kˆ”QÈ
+[™‹ÚXÚ™]\Ù\ÈHØ[YH”QÈ[˜ÛÙ\ˆHÙYBˆ
+ˆ—İÜš]\‹˜ÊHÛÜİÈ™X[ÕÜ]X[^˜][ÛˆÛÜšÈ\ˆ^[ÛˆÜÙ‚ˆ
+ˆš[\‹™]šXÙIÜÈST”Ô•ØØ[K]\ÈÑÈ˜\İ\ˆ\ÈHÚX\XÚĞš]Ë\İ[Bˆ
+ˆXÚËˆ™X[È\™Ø\™H
+\ÜİYHÌÌÙ™šXÙR™]MHÛˆ[ˆ	ÌŒ
+H™[ˆ
+ˆ]Ø\\™XİNˆ]Y™\\Ù\È›İ›Ü›X]ËY˜][YÈ”QÈ[]Ø^Kˆ
+ˆ[™\İš[Ø\ÈÛİÈ[›İYÚÈÛÚÈ[™Ëˆ
+‹Âœİ]XÈ“ÓÓš]™\—Ù[™Ú[™WÙ^XÚ]HSÑNÂ‹Êˆ[ˆ^XÚ]K\[›™Y[™Ú[™H
+ÙYHX›İ™JH\È[X™\˜][H™]™\ˆÚ[[Bˆ
+ˆİ™\œšY[ˆH]İ^Z[™ÈÛˆ”QÈÛ˜ÙHHš[\ˆ\ÈÛÛ™š\›YYÈİ\Üˆ
+ˆÑÈ˜\İ\ˆ\Èİ[™\HZÙ[HHZ\İZÙH›Ø›ÙHYX[ÈXZÙH
+[ˆÛˆ
+ˆØ]™YÛÛ™šYÈœ›ÛH™Y›Ü™HÑÈ˜\İ\ˆ™XØ[YHHY˜][ÜˆHİ˜^Bˆ
+ˆÛXÚÈÛˆH[™Ú[™HŞXÛHØYÙ]
+K›İH[X™\˜]HÚÚXÙHÈÙY\ˆ
+ˆ^Z[™È”QÉÜÈ\‹\^[ÕÛÜİˆ\ÚÈÛ˜ÙH\ˆš[\ˆ\ˆÙ\ÜÚ[Û‹ˆ
+ˆšYÚY\ˆH]™H]Y\HÛÛ™š\›\ÈÑÈ˜\İ\ˆİ\Ü˜]\ˆ[‚ˆ
+ˆZ]\ˆ˜YÙÚ[™ÈÛˆ]™\H]Y\HÛXÚÈÜˆÚ[[HİÚ]Ú[™Èİ]œ›ÛBˆ
+ˆ[™\ˆÛÛY[Û™HÚÈ™X[HYYX[ˆÈXÚÈ”QËˆ™\Ù][Û™ÜÚYBˆ
+ˆš]™\—Ù[™Ú[™WÙ^XÚ]Ú[™]™\ˆH[š]	ÜÈÛÛ™šYÈ\È
+™J[ØYYˆ
+‹Âœİ]XÈ“ÓÓš]™\—Ù[™Ú[™WÜÙ×ÛÙ™™\—ÜÚİÛˆHSÑNÂˆÙYš[™HTÑS‘ÒS‘WÓPVB‚œİ]XÈÛÛœİÚ\ˆ
+›\Ù[™Ú[™WØ[ÛX™[ÖÓTÑS‘ÒS‘WÓPVHHÂˆ’”QÈ‹”ÜİØÜš\‹”ÑÈ˜\İ\ˆ‹”ˆ‹\H˜\İ\ˆ‚ŸNÂœİ]XÈÛÛœİÚ\ˆ
+›\Ù[™Ú[™WØ[İ˜[Y\ÖÓTÑS‘ÒS‘WÓPVHHÂˆšœYÈ‹œÜİØÜš\‹œÙË\˜\İ\ˆ‹œˆ‹\™ˆ‚ŸNÂœİ]XÈÛÛœİÚ\ˆ
+›\Ù[™Ú[™WØ[ÛZ[Y\ÖÓTÑS‘ÒS‘WÓPVHHÂˆš[XYÙKÚœYÈ‹˜\XØ][Û‹ÜÜİØÜš\‹š[XYÙKÜÙË\˜\İ\ˆ‹˜\XØ][Û‹Üˆ‹ˆš[XYÙKİ\™ˆ‚ŸNÂ‚‹Êˆ\È\œ˜^HY™\ÜÈİ^\Èš^Y›ÜˆHY™][YHÙˆHØYÛÛÈŞXÛKˆ
+‹Âœİ]XÈÕ”ˆ[™Ú[™WÛX™[ÖÓTÑS‘ÒS‘WÓPV
+ÈWHHÂˆ’”QÈ‹”ÜİØÜš\‹”ÑÈ˜\İ\ˆ‹”ˆ‹\H˜\İ\ˆ‹•SŸNÂ‚‹ÊˆX\ÈHİ\œ™[K]š\ÚX›HŞXÛH[™^ÈZ[’S•	ÜÈ[\›˜[˜[YKˆ
+‹Âœİ]XÈÛÛœİÚ\ˆ
+›\Ù[™Ú[™Wİ˜[YWÛX\ÓTÑS‘ÒS‘WÓPVHHÂˆšœYÈ‹œÜİØÜš\‹œÙË\˜\İ\ˆ‹œˆ‹\™ˆ‚ŸNÂœİ]XÈ[\Ù[™Ú[™WØÛİ[HTÑS‘ÒS‘WÓPVÂ˜Ú\ˆš]™\—ÛYYXWØY™™\–ÓPVĞU—ÓS—HHˆÂ˜Ú\ˆš]™\—ÜÛİ\˜ÙWØY™™\–ÓPVĞU—ÓS—HHˆÂ˜Ú\ˆš]™\—ØÛÛÜ—ØY™™\–ÓPVĞU—ÓS—HHˆÂ˜Ú\ˆš]™\—Ü]X[]WØY™™\–ÓPVĞU—ÓS—HHˆÂ˜Ú\ˆš]™\—ÜØØ[[™×ØY™™\–ÓPVĞU—ÓS—HHˆÂ˜Ú\ˆš]™\—ÜÚY\×ØY™™\–ÓPVĞU—ÓS—HHˆÂ‹ÊˆÚ\™HHš]™\ˆÜÛÛÈ›Øˆš[\Îˆ”SHˆ
+Y˜][HÚ]]™\ˆˆ\Âˆ
+ˆ\ÜÚYÛ™YË›Ü›X[HSNˆÛˆHİØÚÈŞ\İ[JHÜˆH™X[\™š]™Bˆ
+ˆ]šXÙHİXÚ\È‘ˆ‹›ÜˆY[[ÜK]YÚŞ\İ[\ÈÚ\™H]™[ˆ‰ÜÈ\İX[ˆ
+ˆSNˆ˜XÚÚ[™È\ÈØØ\˜ÙKˆÙYH\ØZ[ÜÜÛÛÛÜ[ÛœÊ
+IÜÈÛÛ[Y[
+X›İ™Kˆ
+ˆÚ]H™\İÙˆHÜÛÛ\ˆØYÙ]	ÜÈİ]XÈİÜ˜YÙJH›ÜˆİÈ]Âˆ
+ˆÚÚXÙ\È\™HÜ[]Yˆ
+‹Â˜Ú\ˆš]™\—ÜÜÛÛØY™™\–ÓPVĞU—ÓS—HH”SHÂ‹ÊˆÙY\È]™\H\™Yš]™K\ÜÛÛY›Øˆ[™\ˆH[š\]YH™]Z[™Y˜[YH
+ÙYBˆ
+ˆš]™\—ØÛÜ™K˜ÉÜÈ\Ú›Ø—Ø™YÚ[Š
+JH›ÜˆHÜÛÛ\ˆX[˜YÙ[Y[Ú[™İÈÂˆ
+ˆ\İˆÛ›HYX[š[™Ù[H[™Û›H[˜X›Y[ˆHÕRHHÚ[‚ˆ
+ˆš]™\—ÜÜÛÛØY™™\ˆ˜[Y\ÈH™X[]šXÙNÈÙYH\ÜÜÛÛÚÙY\Ø]˜Z[X›J
+Bˆ
+ˆ[™]ÈĞQÔÔÓÓÒÑQTØ][™È™[İËˆ
+‹Â“ÓÓš]™\—ÜÜÛÛÚÙY\HSÑNÂš[İ\œ™[İ[š]Ú[™^HÂ˜Ú\ˆš[\—ÛXZÙWÛ[Ù[ÌLHHˆÂ˜Ú\ˆš[\—ÚXÛÛ—İ\šVÌM—HHˆÂ‚ˆÙYš[™HTÔ’S•T—ÒPÓÓ—ÓQ•‹ÊˆÔÔÒV‘Hš[H[Ø\™]ÙY[ˆH[šËİÛ™\ˆ[™[X›İ™H
+]Âˆ
+ˆ›İÛH›İÈ\ÈTÓPT’ÑT—ĞT‘PWĞ“ÕÓKLMJH[™HÚY\ËÔ]X[]H›İÂˆ
+ˆ™[İÈ
+ÜYÙHMŒŠKˆH\ÛÜšÈ\È[X™\˜][HÙ\X›İ™H]›İÂˆ
+ˆÛˆH[\‹Y›ÛÔÈ‹ØÜ™Y[œËˆ
+‹ÂˆÙYš[™HTÔ’S•T—ÒPÓÓ—ÕÔLNBˆÙYš[™HTÔ’S•T—ÒPÓÓ—ÔÒV‘H‚ˆÙYš[™HTÔ’S•T—ÒPÓÓ—ÕST•“Z[’S•\š[\‹ZXÛÛ‹š[YÈ‚ˆÙYš[™HTÔ’S•T—ÒPÓÓ—ÔVSÈ
+TÔ’S•T—ÒPÓÓ—ÔÒV‘H
+ˆTÔ’S•T—ÒPÓÓ—ÔÒV‘JBˆÙYš[™HTÔ’S•T—ÒPÓÓ—ÓPVÔÓÕTÑWÑSHLœİ]XÈP–UH\Üš[\—ÚXÛÛ—Ü™Ø˜VÓTÔ’S•T—ÒPÓÓ—ÔVSÈ
+ˆNÂœİ]XÈP–UH\Üš[\—ÚXÛÛ—Ü[œÖÓTÔ’S•T—ÒPÓÓ—ÔVS×NÂœİ]XÈP–UH\Üš[\—ÚXÛÛ—ÛX\ÚÖÓTÔ’S•T—ÒPÓÓ—ÔVS×NÂœİ]XÈ“ÓÓ\Üš[\—ÚXÛÛ—İ˜[YHSÑNÂœİ]XÈ“ÓÓ\Üš[\—ÚXÛÛ—Ü[œ×İ˜[YHSÑNÂ‚‹Êˆ[šËİÛ™\ˆİ]\È
+‘ÈÎHš[\ˆRPˆÈÑÍLLŒLÈ›X\šÙ\‹Jˆ‚ˆ
+ˆ]šX]\ÊKˆXXÚÙˆX\šÙ\‹[˜[Y\ËÛX\šÙ\‹XÛÛÜœËÛX\šÙ\‹]\\ËÂˆ
+ˆX\šÙ\‹[]™[ËÛX\šÙ\‹[İË[]™[ËÛX\šÙ\‹ZYÚ[]™[È\È]ÈİÛˆÙ\\˜]Bˆ
+ˆ\Ù]ÙˆT]šX]K\œš]š[™È\ÈHÛÛœÙXİ]]™H[ˆÙˆ˜[Y\È
+Ø[YBˆ
+ˆÚ\H\Èİ\ÜYÛYYXKÜİ\ÜYÜÚY\ËÙ]ËˆX›İ™JH˜]\ˆ[‚ˆ
+ˆ[\›X]™YHÛÈ^IÜ™HÙ\\È\˜[[\œ˜^\È\™KXXÚÚ]]Âˆ
+ˆİÛˆÛİ[[™ÛÛXš[™YH[™^Y\Ø\™È
+ÙYH\ÛX\šÙ\—ØÛİ[
+
+Bˆ
+ˆ™X\ˆH˜]Ú[™ÈÛÙJH˜]\ˆ[ˆ\ÈÛ™H\œ˜^HÙˆİXİËˆ
+‹ÂˆÙYš[™HPVÓPT’ÑT”ÈPVÕSQTÂ˜Ú\ˆX\šÙ\—Û˜[Y\ÖÓPVÓPT’ÑT”×VÓPVĞU—ÓS—NÂš[[WÛX\šÙ\—Û˜[Y\ÈHÂ˜Ú\ˆX\šÙ\—ØÛÛÜœÖÓPVÓPT’ÑT”×VÓPVĞU—ÓS—NÂš[[WÛX\šÙ\—ØÛÛÜœÈHÂ˜Ú\ˆX\šÙ\—İ\\ÖÓPVÓPT’ÑT”×VÓPVĞU—ÓS—NÂš[[WÛX\šÙ\—İ\\ÈHÂš[X\šÙ\—Û]™[ÖÓPVÓPT’ÑT”×NÂš[[WÛX\šÙ\—Û]™[ÈHÂš[X\šÙ\—Ûİ×Û]™[ÖÓPVÓPT’ÑT”×NÂš[[WÛX\šÙ\—Ûİ×Û]™[ÈHÂš[X\šÙ\—ÚYÚÛ]™[ÖÓPVÓPT’ÑT”×NÂš[[WÛX\šÙ\—ÚYÚÛ]™[ÈHÂ‚‹Êˆš[\ˆİ]\È
+‘ÈLHKŒLHš[\‹\İ]HÈKŒL‚ˆ
+ˆš[\‹\İ]K\™X\ÛÛœÊK™YXÙYÈÛ™HÚÜÛÜ™Ü˜\ÙHÚİÛˆ™^Âˆ
+ˆH[šËİÛ™\ˆİš\ÈHÙYH\Üš[\—Üİ]\×ÛX™[
+
+H™X\ˆH˜]Ú[™Âˆ
+ˆÛÙKˆ]™K[Û›KØ[YH\ÈHX\šÙ\‹JˆšY[ÈX›İ™Nˆ™\Ù][Û™ÜÚYH[Kˆ
+ˆ™]™\ˆÜš][ˆÈHØ\Xš[]HØXÚHš[Kˆš[\—Üİ]Wİ˜[YH\ÈBˆ
+ˆ˜]ÈT[[H
+ÈYK›ØÙ\ÜÚ[™ËHİÜY
+NÈYX[œÈ››İ]Y\šYYˆ
+ˆY]‹ˆš[\‹\İ]K\™X\ÛÛœÈ\È]Ù[ˆH\Ù]ÙˆÙ^]ÛÜ™ÛÈ]™YYÈBˆ
+ˆØ[YH\˜[[X\œ˜^H™X]Y[\ÈX\šÙ\—Û˜[Y\ËÛX\šÙ\—ØÛÛÜœËÙ]Ëˆ
+‹Âš[š[\—Üİ]Wİ˜[YHHÂ˜Ú\ˆš[\—Üİ]WÜ™X\ÛÛœÖÓPVÓPT’ÑT”×VÓPVĞU—ÓS—NÂš[[WÜš[\—Üİ]WÜ™X\ÛÛœÈHÂ‚”Õ”ˆ
+[š]Ù›ÜİÛ—ÛX™[ÈH\İ[š]ÛX™[ÜœÎÂ‹ÊˆZ[’S•™YœÈÍˆ]Y\šYY›ØˆY˜][È\™HØ]™Y[È[š]ˆ
+‹Â‹ÊˆZ[’S•™YœÈÍÎˆØ]™Y\İ]HXÙZÛ\œËÚÜİ[™Ë^[İ][™[™Ú[™HÙ[XİÜ‹ˆ
+‹Â˜Ú\ˆš[WØY™™\–ÌM—HH•R\İšœÈÂ˜Ú\ˆİ]]ØY™™\–ÓPVÓÕUUÓS‘T×VÓPVÓÕUUÓS‘WÓS‘ÕNÂ˜Ú\ˆİ\ÜYÛYYXWÜÛİ\˜Ù\ÖÓPVÕSQT×VÓPVĞU—ÓS—NÂš[[WÜİ\ÜYÛYYXWÜÛİ\˜Ù\ÈHÂš[İ]]Û[™HHÂœİXİØÜ™Y[ˆ
+œØÜ™Y[ˆH•SÂ›ÚY
+šHH•SÂœİXİ^›Û
+™›ÛH•SÂ‹ÊˆÙ]Û˜ÙH[ˆXZ[Š
+Hœ›ÛHHØ[YHĞ›Ü•ÜÑ›ÛOWÖTÚ^™HØ[İ[][Û‚ˆ
+ˆÜ™X]P[ØYÙ]Ê
+IÜÈÜ›Ü™\ˆˆ\˜[Y]\ˆ\Ù\ËÛÈH[šË\İš\[™[ˆ
+ˆ
+˜]ÛˆÙ\\˜][Hœ›ÛHØYÛÛËY\ˆHÚ[™İÈ[™XYH^\İÊH[™\Âˆ
+ˆ]È›İÜÈ\Ú]HØYÙ]›İÜÈ[œİXYÙˆ™XÛÛ\][™È]ÈİÛˆİY\ÜËˆ
+‹Âœİ]XÈUÓÔ‘×İÜ›Ü™\ˆHÂ“ÓÓÜ\˜][Û—Ú[—Ü›ÙÜ™\ÜÈHSÑNÂ‚‹ËÈ›ÛYš[š][Û‚œİXİ^]ˆÜ^HÂˆÜ^‹™›Û‹ˆˆˆŸNÂ‚‹ËÈØ]™Hš[[ÙHÈS•‚›ÚYØ]™WÜš[Û[ÙJ›ÚY
+HÂˆ”ˆš[HHÜ[Š‘S•’TÔš[\—Ôš[[ÙH‹SÑWÓ‘UÑ’SJNÂˆYˆ
+š[JHÂˆ”š[Šš[K‰\×ˆ‹
+SÓ‘Ê\Ù[XİYÜš[Û[ÙJNÂˆÛÜÙJš[JNÂˆBŸB‚‹ËÈØYš[[ÙHœ›ÛHS•‚›ÚYØYÜš[Û[ÙJ›ÚY
+HÂˆ”ˆš[HHÜ[Š‘S•’TÔš[\—Ôš[[ÙH‹SÑWÓÓ’SJNÂˆYˆ
+š[JHÂˆÚ\ˆY™™\–ÍNÂˆYˆ
+‘Ù]Êš[KY™™\‹Ú^™[ÙŠY™™\ŠJJHÂˆY™™\–Üİ˜ÜÜŠY™™\‹——ˆŠWHHÈËÈİš\™]Û[™Bˆİ›˜ÜJÙ[XİYÜš[Û[ÙKY™™\‹PVĞU—ÓSˆHJNÂˆÙ[XİYÜš[Û[ÙVÓPVĞU—ÓSˆHWHH	×	ÎÂ‚ˆËÈX]Ú]˜XÚÈÈH[™^ˆ›Üˆ
+[HHÈH[WÜİ\ÜYÜš[Û[Ù\ÎÈJÊÊHÂˆYˆ
+İ˜Û\
+İ\ÜYÜš[Û[Ù\ÖÚWKÙ[XİYÜš[Û[ÙJHOH
+HÂˆš[Û[ÙHHNÂˆœ™XZÎÂˆBˆBˆBˆÛÜÙJš[JNÂˆBŸB‚‚œİ]XÈİXİØYÙ]
+™š[™ÙØYÙ]ØWÚY
+UÓÔ‘Y
+HÂˆİXİØYÙ]
+™ÈHÛ\İÂˆÚ[H
+È	‰ˆËO‘ØYÙ]QOHY
+HÈHËO“™^ØYÙ]Âˆ™]\›ˆÎÂŸB‚‹ÊˆŒÍÈVÒÒS‘Ù\È›İ™[XX›H\˜\ÙHH™]š[İ\È^Ú[ˆÕÕ^ˆ
+ˆÚ[™Ù\ËˆÛX\ˆÛ›HHØYÙ]	ÜÈ˜[YH™Xİ[™ÛHš\œİÈH\ØÜš\]™Bˆ
+ˆ”š[\ˆ[Ù[ˆˆX™[Ú]Èİ]ÚYH\È›Ş[™\ÈY[İXÚY‚ˆ
+ˆ\È\È\›[\ÜÈÛˆŒÎJÈ[™ÙY\ÈÛ™HÚ\™Y^Xİ]X›Kˆ
+‹Âœİ]XÈ›ÚY\İ\]WÛ[Ù[Ù\Ü^JİXİÚ[™İÈ
+Ú[ŠHÂˆİXİØYÙ]
+™ÎÂˆİXİ˜\İÜ
+œœÂˆP–UHÛØ\[Â‚ˆYˆ
+]Ú[ˆ]Ú[‹O””Ü
+Bˆ™]\›ÂˆÈHš[™ÙØYÙ]ØWÚY
+ĞQÓSÑSÑTÔVJNÂˆYˆ
+YÊBˆ™]\›Â‚ˆœHÚ[‹O””ÜÂˆÛØ\[ˆHœO‘™Ô[ÂˆÙ]T[Šœ
+NÂˆ™Xİš[
+œËO“YYÙKËO•ÜYÙKˆËO“YYÙH
+ÈËO•ÚYHKˆËO•ÜYÙH
+ÈËO’ZYÚHJNÂˆÙ]T[ŠœÛØ\[ŠNÂ‚ˆÕÔÙ]ØYÙ]]œÊËÚ[‹•SˆÕÕ^
+SÓ‘Ê\š[\—ÛXZÙWÛ[Ù[ˆQ×ÑÓ‘JNÂŸB‚œİ]XÈ›ÚYš[WØÛÛ™šY×Û[™JÚ\ˆ
+œÊHÂˆÚ^™WİÂˆYˆ
+\ÊH™]\›ÂˆˆHİ›[ŠÊNÂˆÚ[H
+ˆ	‰ˆ
+ÖÛˆHWHOH	×‰ÈÖÛˆHWHOH	×‰ÈˆÖÛˆHWHOH	È	ÈÖÛˆHWHOH	×	ÊJHÂˆÖËK[—HH	×	ÎÂˆBŸB‚œİ]XÈ“ÓÓ[œİ\™WØÛÛ™šY×Ù\ŠÓÓ”ÕÔÕ”ˆ˜[YJHÂˆ”ˆØÚÎÂ‚ˆØÚÈHØÚÊ˜[YKPĞÑTÔ×Ô‘PQ
+NÂˆYˆ
+ØÚÊHÂˆ[“ØÚÊØÚÊNÂˆ™]\›ˆ•QNÂˆB‚ˆØÚÈHÜ™X]Q\Š˜[YJNÂˆYˆ
+[ØÚÊH™]\›ˆSÑNÂˆ[“ØÚÊØÚÊNÂˆ™]\›ˆ•QNÂŸB‚‹Êˆ]™\H\™Yš]™HÜÛÛ\ˆØØ][ÛˆÙY\È]È›Øˆš[\È[ˆHYXØ]Yˆ
+ˆTÔÓÓ˜]Ù\ˆÛˆ]]šXÙH˜]\ˆ[ˆÛÜÙH]H›Û[YIÜÈ›ÛİBˆ
+ˆÙYH\ØZ[ÜÜÛÛÜ]
+
+KÛ\ØZ[İ^ÜÜÛÛÜ]
+
+H
+š]™\—ØÛÜ™K˜ËÂˆ
+ˆÛÛ[X[™İX›K˜ÊKÚXÚÜÛÛ\™H[œİXYÙˆˆÛ˜ÙHÔÓÓH˜[Y\ÈBˆ
+ˆ™X[]šXÙKˆX\šÙYY[ˆ
+›İXİ	ÜÈš]H™\İYY™›Üˆ[ˆÛ\‚ˆ
+ˆš[\Ş\İ[H]YÛ›Ü™\È]\İX]™\ÈH˜]Ù\ˆš\ÚX›K›İ[™Âˆ
+ˆœ™XZÜÊH[™Ú]™[ˆ›Èš[™›ÈXÛÛ‹HØ[YHØ^HH™[X\ÙHZ[	ÜÈİÛ‚ˆ
+ˆš]™\ˆš[˜\šY\È[X™\˜][HÛÈÚ]İ]Û™HH\È\ÈHÛÜšÚ[™Âˆ
+ˆ\™XİÜK›İÛÛY][™ÈYX[È™HÜ[™YÜˆİX›KXÛXÚÙYˆØ[Yˆ
+ˆÛ˜ÙH\ˆØ]™Kœ›ÛHØ]™WÙš]™\—ØÛÛ™šYÊ
+H™[İÎÈH˜Z[\™H\™HÙ\Û‰İˆ
+ˆ›ØÚÈØ]š[™ÈH™\İÙˆ[š]HHš]™\ˆÚ[Ú[\H˜Z[ÈÜ[‚ˆ
+ˆ]È›Øˆš[H]š[[YH[™ÙÈÚKØ[YH\È[Hİ\ˆZ\ÜÚ[™Âˆ
+ˆ\İ[˜][Û‹ˆ
+‹Âœİ]XÈ›ÚY\Ù[œİ\™WÚY[—ÜÜÛÛÙ\ŠÛÛœİÚ\ˆ
+™]šXÙJHÂˆÚ\ˆ]ÓPVĞU—ÓSˆ
+ÈM—NÂˆ”ˆØÚÎÂ‚ˆYˆ
+Y]šXÙHY]šXÙVÌHİ˜Û\
+]šXÙK”SHŠHOH
+H™]\›Â‚ˆÛœš[Š]Ú^™[ÙŠ]
+K‰\ÓTÔÓÓ‹]šXÙJNÂ‚ˆØÚÈHØÚÊ
+ÓÓ”ÕÔÕ”Š\]PĞÑTÔ×Ô‘PQ
+NÂˆYˆ
+ØÚÊHÂˆ[“ØÚÊØÚÊNÂˆH[ÙHÂˆØÚÈHÜ™X]Q\Š
+ÓÓ”ÕÔÕ”Š\]
+NÂˆYˆ
+[ØÚÊHÂˆš[ŠÛİ[›İÜ™X]HÜÛÛ\™XİÜH	\×ˆ‹]
+NÂˆ™]\›ÂˆBˆ[“ØÚÊØÚÊNÂˆB‚ˆÙ]›İXİ[ÛŠ
+ÓÓ”ÕÔÕ”Š\]’P‘—ÒQSŠNÂŸB‚œİ]XÈ›ÚY[š]ØÛÛ™šY×Ü]
+[Y“ÓÓ[˜\˜ËÚ\ˆ
+›İ][İ]ÜÚ^™JHÂˆÛœš[Šİ]İ]ÜÚ^™K‰\Î“Z[’S•Õ[š]	Y‹[˜\˜ÈÈ‘S•TÈˆˆ‘S•ˆ‹Y
+NÂŸB‚œİ]XÈ›ÚY[š]ØØXÚWÜ]
+[Y“ÓÓ[˜\˜ËÚ\ˆ
+›İ][İ]ÜÚ^™JHÂˆÛœš[Šİ]İ]ÜÚ^™K‰\Î“Z[’S•Õ[š]	Y˜ØXÚH‹[˜\˜ÈÈ‘S•TÈˆˆ‘S•ˆ‹Y
+NÂŸB‚œİ]XÈ›ÚY[š]ÚXÛÛ—ØØXÚWÜ]
+[Y“ÓÓ[˜\˜ËÚ\ˆ
+›İ][İ]ÜÚ^™JHÂˆÛœš[Šİ]İ]ÜÚ^™K‰\Î“Z[’S•Ğ\Õ[š]	Y›\XÈ‹ˆ[˜\˜ÈÈ‘S•TÈˆˆ‘S•ˆ‹Y
+NÂŸB‚œİ]XÈ“ÓÓ[š]Ùš[WÙ^\İÊ[Y
+HÂˆ”ˆØÚÎÂˆÚ\ˆ]ÍNÂ‚ˆ[š]ØÛÛ™šY×Ü]
+YSÑK]Ú^™[ÙŠ]
+JNÂˆØÚÈHØÚÊ
+ÓÓ”ÕÔÕ”Š\]PĞÑTÔ×Ô‘PQ
+NÂˆYˆ
+[ØÚÊHÂˆ[š]ØÛÛ™šY×Ü]
+Y•QK]Ú^™[ÙŠ]
+JNÂˆØÚÈHØÚÊ
+ÓÓ”ÕÔÕ”Š\]PĞÑTÔ×Ô‘PQ
+NÂˆBˆYˆ
+ØÚÊHÂˆ[“ØÚÊØÚÊNÂˆ™]\›ˆ•QNÂˆBˆ™]\›ˆSÑNÂŸB‚‹ÊˆYZÜÈ\İHSÑSH[™Hİ]ÙˆHØ]™Y[š]š[KÚ]İ]\İ\˜š[™Âˆ
+ˆ[HÙˆH]™HÕRKÙš]™\‹XÛÛ™šYÈİ]Kˆ\ÙYÈX™[H[š]›ÜİÛ‹ˆ
+‹Âœİ]XÈ›ÚYYZ×İ[š]Û[Ù[
+[YÚ\ˆ
+›İ][İ]ÜÚ^™JHÂˆ”ˆš[NÂˆÚ\ˆ]ÍNÂˆÚ\ˆ[™VÌNL—NÂ‚ˆİ]ÌHH	×	ÎÂ‚ˆ[š]ØÛÛ™šY×Ü]
+YSÑK]Ú^™[ÙŠ]
+JNÂˆš[HHÜ[Š
+ÓÓ”ÕÔÕ”Š\]SÑWÓÓ’SJNÂˆYˆ
+Yš[JHÂˆ[š]ØÛÛ™šY×Ü]
+Y•QK]Ú^™[ÙŠ]
+JNÂˆš[HHÜ[Š
+ÓÓ”ÕÔÕ”Š\]SÑWÓÓ’SJNÂˆBˆYˆ
+Yš[JH™]\›Â‚ˆÚ[H
+‘Ù]Êš[K[™KÚ^™[ÙŠ[™JJJHÂˆš[WØÛÛ™šY×Û[™J[™JNÂˆYˆ
+İ›˜Û\
+[™K“SÑSH‹ŠHOH	‰ˆ[™VÍ—JHÂˆİ›˜ÜJİ][™H
+È‹İ]ÜÚ^™HHJNÂˆİ]Ûİ]ÜÚ^™HHWHH	×	ÎÂˆœ™XZÎÂˆBˆBˆÛÜÙJš[JNÂŸB‚‹Êˆ™XZ[ÈH[š]›ÜİÛ‰ÜÈX™[Èœ›ÛHÚ]]™\ˆ\Èİ\œ™[HØ]™YÛ‚ˆ
+ˆ\ÚÈ›ÜˆXXÚÛİ
+•[š]Hœ›İ\ˆSŒÍLÈ‹•[š]H
+[\JH‹‹‹ŠK‚ˆ
+ˆØ[X›H™Y›Ü™HHÚ[™İÈ^\İÈ
+Ú[ˆOH•S
+HÈÙYYHØYÙ]	ÜÂˆ
+ˆ[š]X[ÕÖWÓX™[ËÜˆY\Ø\™ÈÈ™Yœ™\ÚH]™HØYÙ]HK™ËˆY\‚ˆ
+ˆØ]™K[ˆØ\ÙHHœ™\ÚK\]Y\šYYXZÙKÛ[Ù[\İÛİÜš][ˆİ]ˆX]Ú\Âˆ
+ˆ\Èš[IÜÈ^\İ[™È›XZÈHÛX™[›ØÚÈ˜]\ˆ[ˆœ™YH]Ú[Bˆ
+ˆØYÛÛÈZYÚİ[™Y™\™[˜ÙH]ˆÛÛ™[[Ûˆ
+ÙYH\]WÛYYXWÙ›ÜİÛ‚ˆ
+ˆ[™œšY[™ÊKˆ
+‹Âœİ]XÈ›ÚY™Yœ™\Úİ[š]Ù›ÜİÛŠİXİÚ[™İÈ
+Ú[ŠHÂˆ[NÂ‚ˆ›Üˆ
+HHÈHPVÕS’UÎÈJÊÊHÂˆÚ\ˆ[Ù[ÎM—NÂ‚ˆ\İ[š]ÛX™[ÜœÖÚWHH\İ[š]ÛX™[ÜİÜ˜YÙVÚWNÂˆ\İ[š]ÛX™[ÜİÜ˜YÙVÚWVÌHH	×	ÎÂ‚ˆYˆ
+HOHİ\œ™[İ[š]Ú[™^	‰ˆš[\—ÛXZÙWÛ[Ù[ÌJHÂˆİ›˜ÜJ[Ù[š[\—ÛXZÙWÛ[Ù[Ú^™[ÙŠ[Ù[
+HHJNÂˆ[Ù[ÜÚ^™[ÙŠ[Ù[
+HHWHH	×	ÎÂˆH[ÙHÂˆYZ×İ[š]Û[Ù[
+K[Ù[Ú^™[ÙŠ[Ù[
+JNÂˆB‚ˆÊˆH•[š]ˆˆØYÙ]X™[[™XYHØ^\È•[š]ˆH™\X][™È][‚ˆ
+ˆ]™\HŞXÛH[H
+•[š]Hœ›İ\ˆQËRLÌÈŠH\İØ\İ\Âˆ
+ˆÚY]H™X[[Ù[˜[YH˜YH™YYËˆ
+‹ÂˆYˆ
+[Ù[ÌJHÂˆÛœš[Š\İ[š]ÛX™[ÜİÜ˜YÙVÚWKTÕS’UÓP‘SÓS‹ˆ‰Yˆ	\È‹K[Ù[
+NÂˆH[ÙHYˆ
+[š]Ùš[WÙ^\İÊJJHÂˆÛœš[Š\İ[š]ÛX™[ÜİÜ˜YÙVÚWKTÕS’UÓP‘SÓS‹ˆ‰Y‹JNÂˆH[ÙHÂˆÛœš[Š\İ[š]ÛX™[ÜİÜ˜YÙVÚWKTÕS’UÓP‘SÓS‹ˆ‰Y
+[\JH‹JNÂˆBˆBˆ\İ[š]ÛX™[ÜœÖÓPVÕS’U×HH•SÂˆ[š]Ù›ÜİÛ—ÛX™[ÈH\İ[š]ÛX™[ÜœÎÂ‚ˆYˆ
+Ú[ŠHÂˆİXİØYÙ]
+™ÈHš[™ÙØYÙ]ØWÚY
+ĞQÕS’UÑ“ÔÕÓŠNÂˆYˆ
+ÊHÂˆÕÔÙ]ØYÙ]]œÊËÚ[‹•SˆÕÖWÓX™[Ë
+SÓ‘Ê][š]Ù›ÜİÛ—ÛX™[ËˆÕÖWĞXİ]™K
+SÓ‘ÊXİ\œ™[İ[š]Ú[™^ˆQ×ÑÓ‘JNÂˆ™Yœ™\ÚÓ\İ
+ËÚ[‹•SJNÂˆÕÔ™Yœ™\ÚÚ[™İÊÚ[‹•S
+NÂˆBˆBŸB‚œİ]XÈÛÛœİÚ\ˆ
+™[™Ú[™WÛZ[YWİ\JÛÛœİÚ\ˆ
+™[™Ú[™JHÂˆYˆ
+İ˜Û\
+[™Ú[™KœÜİØÜš\ŠHOH
+H™]\›ˆ˜\XØ][Û‹ÜÜİØÜš\ÂˆYˆ
+İ˜Û\
+[™Ú[™KœÙË\˜\İ\ˆŠHOH
+H™]\›ˆš[XYÙKÜÙË\˜\İ\ˆÂˆYˆ
+İ˜Û\
+[™Ú[™KœˆŠHOH
+H™]\›ˆ˜\XØ][Û‹ÜˆÂˆYˆ
+İ˜Û\
+[™Ú[™K\™ˆŠHOH
+H™]\›ˆš[XYÙKİ\™ˆÂˆ™]\›ˆš[XYÙKÚœYÈÂŸB‚‹ÊˆHš\ÚX›HÜ™\ˆX^H™Hš[\™YHHš[\ˆØ\Xš[]H]Y\Kˆ
+‹Âœİ]XÈSÓ‘È\Ù[™Ú[™WØXİ]™WÚ[™^
+›ÚY
+HÂˆ[NÂ‚ˆ›Üˆ
+HHÈH\Ù[™Ú[™WØÛİ[È
+ÊÚJHÂˆYˆ
+\Ù[™Ú[™Wİ˜[YWÛX\ÚWH	‰‚ˆİ˜Û\
+š]™\—Ù[™Ú[™WØY™™\‹\Ù[™Ú[™Wİ˜[YWÛX\ÚWJHOH
+Bˆ™]\›ˆ
+SÓ‘ÊZNÂˆBˆ™]\›ˆÂŸB‚‹Êˆ]™\HØİ[Y[Y›Ü›X]\Èš]™\‰ÜÈ[™Ú[™\ÈØ[ˆXİX[H›ÙXÙKˆÙ\ˆ
+ˆ[ˆŞ[˜ÈÚ][™Ú[™WÛZ[YWİ\J
+IÜÈØ\Ù\Ëˆ
+‹Âœİ]XÈÛÛœİÚ\ˆ
+›\Üİ\ÜYÙ[™Ú[™WÛZ[Y\Ö×HHÂˆš[XYÙKÚœYÈ‹˜\XØ][Û‹ÜÜİØÜš\‹š[XYÙKÜÙË\˜\İ\ˆ‹˜\XØ][Û‹Üˆ‹ˆš[XYÙKİ\™ˆ‚ŸNÂˆÙYš[™HTÔÕTÔ•QÑS‘ÒS‘WÓRSQWĞÓÕS•ˆ
+Ú^™[ÙŠ\Üİ\ÜYÙ[™Ú[™WÛZ[Y\ÊHÈÚ^™[ÙŠ\Üİ\ÜYÙ[™Ú[™WÛZ[Y\ÖÌJJB‚‹ÊˆY\ˆHİXØÙ\ÜÙ[]Y\KÚXÚÜÈÚ]\ˆHš[\ˆY™\\ÙYS–Bˆ
+ˆØİ[Y[Y›Ü›X]\Èš]™\ˆØ[ˆXİX[H›ÙXÙKˆ[›ZÙBˆ
+ˆØ\›—ÚY—Ù[™Ú[™Wİ[œİ\ÜY
+
+H
+ÚXÚÛ›H›YÜÈHZ\ÛX]ÚÚ]Bˆ
+ˆİ\œ™[K\Ù[XİY[™Ú[™H[™\È\™[H[™›Ü›X][Û˜[
+KHš[\ˆ]ˆ
+ˆİ\ÜÈ›Û™HÙˆ[HØ[››İ™Hš[YÈ][HH\™\Âˆ
+ˆš[\ˆ\Û‰İİ\ÜYˆš[™[™ËÛÜH™X[™\]Y\İ\ˆ˜]\ˆ[ˆBˆ
+ˆİ]\ËX›Ş[™HX\Ú[HZ\ÜÙY[[Û™ÈH™\İÙˆH]Y\Hİ]]ˆ
+‹Âœİ]XÈ›ÚY\ØÚXÚ×Ø[WÙ[™Ú[™WÜİ\ÜY
+İXİÚ[™İÈ
+Ú[ŠHÂˆ[KÂˆ“ÓÓ[WÛX]ÚHSÑNÂˆİXİX\ŞTİXİ\ÎÂ‚ˆYˆ
+[WÜİ\ÜYÙ›Ü›X]ÈOH
+H™]\›ÈÊˆš[\ˆY‰İ™\ÜHØ[‰İYÙH
+‹Â‚ˆ›Üˆ
+HHÈH[WÜİ\ÜYÙ›Ü›X]È	‰ˆX[WÛX]ÚÈJÊÊHÂˆ›Üˆ
+ˆHÈˆ
+[
+STÔÕTÔ•QÑS‘ÒS‘WÓRSQWĞÓÕS•ÈŠÊÊHÂˆYˆ
+İ˜Ø\ÙXÛ\
+İ\ÜYÙ›Ü›X]ÖÚWK\Üİ\ÜYÙ[™Ú[™WÛZ[Y\ÖÚ—JHOH
+HÂˆ[WÛX]ÚH•QNÂˆœ™XZÎÂˆBˆBˆB‚ˆYˆ
+[WÛX]Ú
+H™]\›Â‚ˆ\Ë™\×ÔİXİÚ^™HHÚ^™[ÙŠİXİX\ŞTİXİ
+NÂˆ\Ë™\×Ñ›YÜÈHÂˆ\Ë™\×Õ]HH
+P–UH
+ŠH“Z[š[Ù][™ÜÈÂˆ\Ë™\×Õ^›Ü›X]H
+P–UH
+ŠBˆ•\Èš[\ˆY›İY™\\ÙH[HØİ[Y[›Ü›X]ˆ‚ˆ“Z[’S•Ø[ˆ›ÙXÙH”QËÜİØÜš\ÑÈ˜\İ\‹‹ˆ‚ˆ›Üˆ\H˜\İ\ˆ
+T‘ŠK——ˆ‚ˆ’]\ÈZÙ[H›İİ\ÜYY]ˆÈ[Yİ\Üˆ‚ˆœX\ÙHÙÈ[ˆ\ÜİYH]Ú]X‹˜ÛÛKØ›Ú[™Ø˜[ÓZ[’S•Wˆ‚ˆœ[ˆÚ[™İÜ×Ú\Ü›Ø™KœH
+œ›ÛHHÚ[™İÜÈÈÛˆHØ[YWˆ‚ˆ›™]ÛÜšÊHYØZ[œİ\Èš[\ˆ[™]XÚ]Èİ]]ˆÂˆ\Ë™\×ÑØYÙ]›Ü›X]H
+P–UH
+ŠH“ÒÈÂˆX\ŞT™\]Y\İ
+Ú[‹	™\Ë•S
+NÂŸB‚‹ÊˆÜ›ÜÜËXÚXÚÜÈHÚÜÙ[ˆ[™Ú[™HYØZ[œİH›Ü›X]ÈHš[\ˆXİX[Bˆ
+ˆY™\\ÙY[ˆØİ[Y[Y›Ü›X]\İ\ÜY
+Ü[]YHHš[Üˆ]Y\JK‚ˆ
+ˆ\™[H[™›Ü›X][Û˜[ˆ]Ù\È›İ›ØÚÈØ]™KÚ[˜ÙHHš[\ˆ]\Âˆ
+ˆ™]™\ˆ™Y[ˆ]Y\šYYY]\È[ˆ[\H\İ[™Úİ[›İ™HØ\›™YX›İ]ˆ
+‹Âœİ]XÈ›ÚYØ\›—ÚY—Ù[™Ú[™Wİ[œİ\ÜY
+ÛÛœİÚ\ˆ
+™[™Ú[™JHÂˆÛÛœİÚ\ˆ
+›Z[YNÂˆ[NÂˆ“ÓÓ›İ[™Â‚ˆYˆ
+[WÜİ\ÜYÙ›Ü›X]ÈOH
+H™]\›Â‚ˆZ[YHH[™Ú[™WÛZ[YWİ\J[™Ú[™JNÂˆ›İ[™HSÑNÂˆ›Üˆ
+HHÈH[WÜİ\ÜYÙ›Ü›X]ÎÈJÊÊHÂˆYˆ
+İ˜Ø\ÙXÛ\
+İ\ÜYÙ›Ü›X]ÖÚWKZ[YJHOH
+HÂˆ›İ[™H•QNÂˆœ™XZÎÂˆBˆBˆYˆ
+Y›İ[™
+HÂˆİ\İÛWÜš[Š•Ø\›š[™Îˆš[\ˆY›İY™\\ÙH	\Èİ\Ü›ÜˆH	É\ÉÈ[™Ú[™Wˆ‹Z[YK[™Ú[™JNÂˆBŸB‚‹ÊˆÕÑÙ]ØYÙ]]œĞJ
+H\ÈŒÎKˆØYÛÛÈÕ’S‘×ÒÒS‘Ü˜\ÈHİ[™\™ˆ
+ˆ[Z][Ûˆİš[™Ò[™›ÈÚÜÙHY™™\ˆšY[\È]˜Z[X›HÛˆŒÍËÛÈ\ÙH]ˆ
+ˆ\™XİKˆŞXÛH˜[Y\È\™H™]Z[™Yœ›ÛHQÓTÑĞQÑUTY\ÜØYÙHÛÙ\È[‚ˆ
+ˆ›ØÙ\Ü×İÚ[™İ×Ù]™[Ê
+KÚXÚ\ÈHØİ[Y[Y™KUŒÎHYXÚ[š\ÛKˆ
+‹Âœİ]XÈÚ\ˆ
+›\Üİš[™×ÙØYÙ]İ˜[YJİXİØYÙ]
+™ÊHÂˆİXİİš[™Ò[™›È
+œÚNÂ‚ˆYˆ
+YÈYËO”ÜXÚX[[™›ÊBˆ™]\›ˆ•SÂˆÚHH
+İXİİš[™Ò[™›È
+ŠYËO”ÜXÚX[[™›ÎÂˆ™]\›ˆÚKOY™™\ÂŸB‚œİ]XÈ›ÚYØ\\™WÙš]™\—ÜÙ][™ÜÊİXİÚ[™İÈ
+Ú[ŠHÂˆİXİØYÙ]
+™ÎÂˆÚ\ˆ
+˜[YNÂ‚ˆYˆ
+]Ú[ŠH™]\›Â‚ˆÈHš[™ÙØYÙ]ØWÚY
+ĞQÒTÔÕ’S‘ÊNÂˆ˜[YHH\Üİš[™×ÙØYÙ]İ˜[YJÊNÂˆYˆ
+˜[YJHÂˆİ›˜ÜJ\ØY™™\‹˜[YKÚ^™[ÙŠ\ØY™™\ŠHHJNÂˆ\ØY™™\–ÜÚ^™[ÙŠ\ØY™™\ŠHHWHH	×	ÎÂˆB‚ˆÈHš[™ÙØYÙ]ØWÚY
+ĞQÒTÔU
+NÂˆ˜[YHH\Üİš[™×ÙØYÙ]İ˜[YJÊNÂˆYˆ
+˜[YJHÂˆİ›˜ÜJš]™\—Ü]ØY™™\‹˜[YKÚ^™[ÙŠš]™\—Ü]ØY™™\ŠHHJNÂˆš]™\—Ü]ØY™™\–ÜÚ^™[ÙŠš]™\—Ü]ØY™™\ŠHHWHH	×	ÎÂˆB‚ˆÊˆ]™\HŞXÛHØYÙ]\]\È]È\œÚ\İY˜XÚÚ[™È˜[YHœ›ÛHBˆ
+ˆQÓTY\ÜØYÙHÛÙH\ÈH\Ù\ˆÚ[™Ù\È]ˆ
+‹ÂˆØ\›—ÚY—Ù[™Ú[™Wİ[œİ\ÜY
+š]™\—Ù[™Ú[™WØY™™\ŠNÂŸB‚œİ]XÈ“ÓÓÜš]WÙš]™\—ØÛÛ™šY×Ùš[JÓÓ”ÕÔÕ”ˆš[[˜[YJHÂˆ”ˆš[NÂˆÚ\ˆÜİÍNÂˆ[ÜHLNÂˆÚ\ˆ[™VÌNL—NÂ‚ˆYˆ
+\\œÙWÚ\Ø[™ÜÜ
+\ØY™™\‹ÜİÚ^™[ÙŠÜİ
+K	œÜ
+HZÜİÌJHÂˆš[Š’[˜[Yš[\ˆTY™\ÜÎˆ	\×ˆ‹\ØY™™\ŠNÂˆ™]\›ˆSÑNÂˆBˆYˆ
+ÜH
+HÜHÂˆYˆ
+ÜˆMLÍJHÂˆš[Š’[˜[Yš[\ˆÜˆ	Yˆ‹Ü
+NÂˆ™]\›ˆSÑNÂˆBˆYˆ
+Yš]™\—Ü]ØY™™\–ÌHš]™\—Ü]ØY™™\–ÌHOH	ËÉÊHÂˆš[Š’T]]\İİ\Ú]	ËÉÎˆ	\×ˆ‹š]™\—Ü]ØY™™\ŠNÂˆ™]\›ˆSÑNÂˆB‚ˆš[HHÜ[Šš[[˜[YKSÑWÓ‘UÑ’SJNÂˆYˆ
+Yš[JH™]\›ˆSÑNÂ‚ˆÛœš[Š[™KÚ^™[ÙŠ[™JKˆÈZ[’S•[š]	YHÜš][ˆHZ[š[Ù][™Ü×ˆ‹İ\œ™[İ[š]Ú[™^
+NÂˆ”]Êš[K[™JNÂˆÛœš[Š[™KÚ^™[ÙŠ[™JK’ÔÕI\×ˆ‹Üİ
+NÂˆ”]Êš[K[™JNÂˆÛœš[Š[™KÚ^™[ÙŠ[™JK”Ô•IYˆ‹Ü
+NÂˆ”]Êš[K[™JNÂˆÛœš[Š[™KÚ^™[ÙŠ[™JK”UI\×ˆ‹š]™\—Ü]ØY™™\ŠNÂˆ”]Êš[K[™JNÂˆÛœš[Š[™KÚ^™[ÙŠ[™JK‘S‘ÒS‘OI\×ˆ‹š]™\—Ù[™Ú[™WØY™™\ŠNÂˆ”]Êš[K[™JNÂˆÛœš[Š[™KÚ^™[ÙŠ[™JK‘P•QÏIYˆ‹š]™\—ÙXYÈÈHˆ
+NÂˆ”]Êš[K[™JNÂˆÛœš[Š[™KÚ^™[ÙŠ[™JK”‘TÓÓUSÓIYˆ‹š]™\—Ü™\ÛÛ][ÛŠNÂˆ”]Êš[K[™JNÂˆÛœš[Š[™KÚ^™[ÙŠ[™JK“QQPOI\×ˆ‹š]™\—ÛYYXWØY™™\ŠNÂˆ”]Êš[K[™JNÂˆÛœš[Š[™KÚ^™[ÙŠ[™JK”ÓÕTÑOI\×ˆ‹š]™\—ÜÛİ\˜ÙWØY™™\ŠNÂˆ”]Êš[K[™JNÂˆÛœš[Š[™KÚ^™[ÙŠ[™JKÓÓÔI\×ˆ‹š]™\—ØÛÛÜ—ØY™™\ŠNÂˆ”]Êš[K[™JNÂˆÛœš[Š[™KÚ^™[ÙŠ[™JK”UPSUOI\×ˆ‹š]™\—Ü]X[]WØY™™\ŠNÂˆ”]Êš[K[™JNÂˆÛœš[Š[™KÚ^™[ÙŠ[™JK”ĞĞSS‘ÏI\×ˆ‹š]™\—ÜØØ[[™×ØY™™\ŠNÂˆ”]Êš[K[™JNÂˆÛœš[Š[™KÚ^™[ÙŠ[™JK”ÒQTÏI\×ˆ‹š]™\—ÜÚY\×ØY™™\ŠNÂˆ”]Êš[K[™JNÂˆÛœš[Š[™KÚ^™[ÙŠ[™JK”ÔÓÓI\×ˆ‹š]™\—ÜÜÛÛØY™™\ŠNÂˆ”]Êš[K[™JNÂˆÛœš[Š[™KÚ^™[ÙŠ[™JK”ÔÓÓÒÑQTIYˆ‹ˆ\ÜÜÛÛÚÙY\Ø]˜Z[X›J
+H	‰ˆš]™\—ÜÜÛÛÚÙY\ÈHˆ
+NÂˆ”]Êš[K[™JNÂˆÛœš[Š[™KÚ^™[ÙŠ[™JK”Ñ×ÔÒQUĞPÒÏI\×ˆ‹Ù×ÜÚY]Ø˜XÚ×İ˜[YJNÂˆ”]Êš[K[™JNÂˆÛœš[Š[™KÚ^™[ÙŠ[™JK“SÑSI\×ˆ‹š[\—ÛXZÙWÛ[Ù[
+NÂˆ”]Êš[K[™JNÂˆÛÜÙJš[JNÂˆ™]\›ˆ•QNÂŸB‚œİ]XÈ“ÓÓØ]™WÙš]™\—ØÛÛ™šYÊİXİÚ[™İÈ
+Ú[ŠHÂˆ“ÓÓ[—ÛÚÎÂˆ“ÓÓ[˜\˜×ÛÚÎÂˆÚ\ˆ[—Ü]ÍNÂˆÚ\ˆ[˜\˜×Ü]ÍNÂ‚ˆØ\\™WÙš]™\—ÜÙ][™ÜÊÚ[ŠNÂˆ\Ù[œİ\™WÚY[—ÜÜÛÛÙ\Šš]™\—ÜÜÛÛØY™™\ŠNÂ‚ˆYˆ
+Y[œİ\™WØÛÛ™šY×Ù\Š
+ÓÓ”ÕÔÕ”ŠH‘S•“Z[’S•ŠJHÂˆš[ŠÛİ[›İÜ™X]KÙš[™S•“Z[’S•ˆŠNÂˆ™]\›ˆSÑNÂˆBˆYˆ
+Y[œİ\™WØÛÛ™šY×Ù\Š
+ÓÓ”ÕÔÕ”ŠH‘S•TÎ“Z[’S•ŠJHÂˆš[ŠÛİ[›İÜ™X]KÙš[™S•TÎ“Z[’S•ˆŠNÂˆ™]\›ˆSÑNÂˆB‚ˆ[š]ØÛÛ™šY×Ü]
+İ\œ™[İ[š]Ú[™^SÑK[—Ü]Ú^™[ÙŠ[—Ü]
+JNÂˆ[š]ØÛÛ™šY×Ü]
+İ\œ™[İ[š]Ú[™^•QK[˜\˜×Ü]Ú^™[ÙŠ[˜\˜×Ü]
+JNÂ‚ˆ[—ÛÚÈHÜš]WÙš]™\—ØÛÛ™šY×Ùš[J
+ÓÓ”ÕÔÕ”ŠY[—Ü]
+NÂˆ[˜\˜×ÛÚÈHÜš]WÙš]™\—ØÛÛ™šY×Ùš[J
+ÓÓ”ÕÔÕ”ŠY[˜\˜×Ü]
+NÂ‚ˆÊ‚ˆ
+ˆÈ“Õ™\XÙHH]™H[š]ŞXÛHØYÙ]	ÜÈÕÖWÓX™[È\™K‚ˆ
+‚ˆ
+ˆÛˆÛ\ÜÚXÈØYÛÛÈ
+ÔÌËŒKÕŒÍÊK™\X]YHİØ\[™ÈHÖPÓWÒÒS‘ˆ
+ˆX™[\œ˜^HÚ[HHØYÙ]\È]™HØ[ˆX]™H[\›˜[ØYÙ]İ]Bˆ
+ˆÚ[[™È]HÛX™[\İˆH˜Z[\™HÚİÜÈ\]\ˆ\š[™Âˆ
+ˆÕRHX\™İÛˆ
+Ø]™HOˆ^]Ø[ˆ\™[ØÚÈHXXÚ[™JK›İ™XÙ\ÜØ\š[Bˆ
+ˆ]HÕÔÙ]ØYÙ]]œÊ
+HØ[]Ù[‹‚ˆ
+‚ˆ
+ˆØ]š[™ÈÙ\È›İXİX[H™\]Z\™HH[š]›ÜİÛˆ™XZ[ˆHİ\œ™[ˆ
+ˆ[š][X™\ˆ\È[˜Ú[™ÙY[™Hœ™\ÚH]Y\šYY[Ù[\È[™XYBˆ
+ˆ™]šY]ÙYHH]Y\H]ˆX]™HH^\İ[™È]™HX™[È[Û™K‚ˆ
+ˆ^HÚ[™H™XZ[›Ü›X[HH™^[YHÙ][™ÜÈ\È][˜ÚY‚ˆ
+‹Âˆ
+›ÚY
+]Ú[Â‚ˆ™]\›ˆ[—ÛÚÈ	‰ˆ[˜\˜×ÛÚÎÂŸB‚œİ]XÈ“ÓÓØYÙš]™\—ØÛÛ™šYÊ›ÚY
+HÂˆ”ˆš[NÂˆÚ\ˆ[™VÌNL—NÂˆÊˆ[\K›İH™X[Y™\ÜÎˆHœ™\Ú[œİ[\È›ÈØ]™Y[™Ú[[™ˆ
+ˆY˜][[™ÈÈÛÛYHİ\ˆ\Ù\‰ÜÈSˆš[\ˆY™\ÜÈÛİ[XZÙHBˆ
+ˆİ\\]Y\H™[İÈ
+XZ[Š
+IÜÈšYˆ
+\ØY™™\–ÌJHˆ™Yœ™\Ú
+H›Ø™HBˆ
+ˆ˜[™ÛH]šXÙHÛˆ\È™]ÛÜšÈ[œİXYÙˆÚ[™È›İ[™Ëˆ
+‹ÂˆÚ\ˆÜİÍHHˆÂˆÚ\ˆ[—Ü]ÍNÂˆÚ\ˆ[˜\˜×Ü]ÍNÂˆ[ÜHÂˆ“ÓÓ›İ[™HSÑNÂ‚ˆİ˜ÜJš]™\—Ü]ØY™™\‹‹Ú\Üš[ŠNÂˆİ˜ÜJš]™\—Ù[™Ú[™WØY™™\‹šœYÈŠNÂˆš]™\—Ù[™Ú[™WÙ^XÚ]HSÑNÂˆš]™\—Ù[™Ú[™WÜÙ×ÛÙ™™\—ÜÚİÛˆHSÑNÂˆš]™\—ÙXYÈHSÑNÂˆš]™\—Ü™\ÛÛ][ÛˆHÌÂˆš]™\—Ü™\ÛÛ][Û—Ù^XÚ]HSÑNÂˆš]™\—ÛYYXWØY™™\–ÌHH	×	ÎÂˆš]™\—ÜÛİ\˜ÙWØY™™\–ÌHH	×	ÎÂˆš]™\—ØÛÛÜ—ØY™™\–ÌHH	×	ÎÂˆš]™\—Ü]X[]WØY™™\–ÌHH	×	ÎÂˆš]™\—ÜØØ[[™×ØY™™\–ÌHH	×	ÎÂˆš]™\—ÜÚY\×ØY™™\–ÌHH	×	ÎÂˆİ˜ÜJš]™\—ÜÜÛÛØY™™\‹”SHŠNÂˆš]™\—ÜÜÛÛÚÙY\HSÑNÂˆİ˜ÜJÙ×ÜÚY]Ø˜XÚ×İ˜[YK››Ü›X[ŠNÂˆš[\—ÛXZÙWÛ[Ù[ÌHH	×	ÎÂ‚ˆ[š]ØÛÛ™šY×Ü]
+İ\œ™[İ[š]Ú[™^SÑK[—Ü]Ú^™[ÙŠ[—Ü]
+JNÂˆ[š]ØÛÛ™šY×Ü]
+İ\œ™[İ[š]Ú[™^•QK[˜\˜×Ü]Ú^™[ÙŠ[˜\˜×Ü]
+JNÂ‚ˆš[HHÜ[Š
+ÓÓ”ÕÔÕ”ŠY[—Ü]SÑWÓÓ’SJNÂˆYˆ
+Yš[JBˆš[HHÜ[Š
+ÓÓ”ÕÔÕ”ŠY[˜\˜×Ü]SÑWÓÓ’SJNÂ‚ˆYˆ
+Yš[JHÂˆ\ØY™™\–ÌHH	×	ÎÂˆ™]\›ˆSÑNÂˆB‚ˆ›İ[™H•QNÂˆÚ[H
+‘Ù]Êš[K[™KÚ^™[ÙŠ[™JJJHÂˆÚ\ˆ
+˜[YNÂˆš[WØÛÛ™šY×Û[™J[™JNÂˆYˆ
+[[™VÌH[™VÌHOH	ÈÉÈ[™VÌHOH	ÎÉÊHÛÛ[YNÂ‚ˆYˆ
+İ›˜Û\
+[™K’ÔÕH‹JHOH
+HÂˆ˜[YHH[™H
+ÈNÂˆYˆ
+
+˜[YJHÂˆİ›˜ÜJÜİ˜[YKÚ^™[ÙŠÜİ
+HHJNÂˆÜİÜÚ^™[ÙŠÜİ
+HHWHH	×	ÎÂˆBˆH[ÙHYˆ
+İ›˜Û\
+[™K”Ô•H‹JHOH
+HÂˆ[\œÙYH]ÚJ[™H
+ÈJNÂˆYˆ
+\œÙYHH	‰ˆ\œÙYHMLÍJHÜH\œÙYÂˆH[ÙHYˆ
+İ›˜Û\
+[™K”UH‹JHOH
+HÂˆ˜[YHH[™H
+ÈNÂˆYˆ
+
+˜[YHOH	ËÉÊHÂˆİ›˜ÜJš]™\—Ü]ØY™™\‹˜[YKÚ^™[ÙŠš]™\—Ü]ØY™™\ŠHHJNÂˆš]™\—Ü]ØY™™\–ÜÚ^™[ÙŠš]™\—Ü]ØY™™\ŠHHWHH	×	ÎÂˆBˆH[ÙHYˆ
+İ›˜Û\
+[™K‘S‘ÒS‘OH‹ÊHOH
+HÂˆYˆ
+İ˜Û\
+[™H
+ÈËœÙË\˜\İ\ˆŠHOH
+Bˆİ˜ÜJš]™\—Ù[™Ú[™WØY™™\‹œÙË\˜\İ\ˆŠNÂˆ[ÙHYˆ
+İ˜Û\
+[™H
+ÈËœˆŠHOH
+Bˆİ˜ÜJš]™\—Ù[™Ú[™WØY™™\‹œˆŠNÂˆ[ÙHYˆ
+İ˜Û\
+[™H
+ÈËœÜİØÜš\ŠHOH
+Bˆİ˜ÜJš]™\—Ù[™Ú[™WØY™™\‹œÜİØÜš\ŠNÂˆ[ÙHYˆ
+İ˜Û\
+[™H
+ÈË\™ˆŠHOH
+Bˆİ˜ÜJš]™\—Ù[™Ú[™WØY™™\‹\™ˆŠNÂˆ[ÙBˆİ˜ÜJš]™\—Ù[™Ú[™WØY™™\‹šœYÈŠNÂˆÊˆX]Ú\Èš]™\—Ü™\ÛÛ][Û—Ù^XÚ]	ÜÈİÛˆ™XÙY[\İX›İ™N‚ˆ
+ˆÛ˜ÙHH˜[YH\ÈXİX[H™Y[ˆØ]™Y™X]]\È[›™Yˆ
+ˆ˜]\ˆ[ˆ™KY\š]š[™È]œ›ÛHØ\Xš[]Y\ÈÛˆ]™\HØYBˆ
+ˆÛÛœÚ\İ[™Z]š[İ\ˆ›Üˆ›İÙ][™ÜË[™]›ÚYÈÚ[[Bˆ
+ˆ›\[™ÈHš[\ˆ]Ø\È[X™\˜][HÙ\Ûˆ”QÈ
+K™Ë‚ˆ
+ˆH™X[ÑÈ™[™\š[™ÈYÈÛˆ][Ù[
+H˜XÚÈÈÑÈ˜\İ\‚ˆ
+ˆ™Z[™H\Ù\‰ÜÈ˜XÚÈÛˆH]\ˆ]Y\Kˆ
+‹Âˆš]™\—Ù[™Ú[™WÙ^XÚ]H•QNÂˆH[ÙHYˆ
+İ›˜Û\
+[™K‘P•QÏH‹ŠHOH
+HÂˆš]™\—ÙXYÈH
+[™VÍ—HOH	Ì	ÊHÈSÑHˆ•QNÂˆH[ÙHYˆ
+İ›˜Û\
+[™K’ÑQT“ĞH‹
+HOH
+HÂˆÊˆ˜XÚİØ\™ÛÛ\]Xš[]NˆHÛXYÛ›ÜİXËX\Y˜XİÙ][™Âˆ
+ˆX\È\™XİHÈH™]Ëœ›ØY\ˆXYÈİÚ]Úˆ
+‹Âˆš]™\—ÙXYÈH
+[™VÎHOH	Ì	ÊHÈSÑHˆ•QNÂˆH[ÙHYˆ
+İ›˜Û\
+[™K”‘TÓÓUSÓH‹LJHOH
+HÂˆš]™\—Ü™\ÛÛ][ÛˆH
+]ÚJ[™H
+ÈLJHOHŒ
+HÈŒˆÌÂˆš]™\—Ü™\ÛÛ][Û—Ù^XÚ]H•QNÂˆH[ÙHYˆ
+İ›˜Û\
+[™K“QQPOH‹ŠHOH
+HÂˆİ›˜ÜJš]™\—ÛYYXWØY™™\‹[™H
+È‹Ú^™[ÙŠš]™\—ÛYYXWØY™™\ŠHHJNÂˆš]™\—ÛYYXWØY™™\–ÜÚ^™[ÙŠš]™\—ÛYYXWØY™™\ŠHHWHH	×	ÎÂˆH[ÙHYˆ
+İ›˜Û\
+[™K”ÓÕTÑOH‹ÊHOH
+HÂˆİ›˜ÜJš]™\—ÜÛİ\˜ÙWØY™™\‹[™H
+ÈËÚ^™[ÙŠš]™\—ÜÛİ\˜ÙWØY™™\ŠHHJNÂˆš]™\—ÜÛİ\˜ÙWØY™™\–ÜÚ^™[ÙŠš]™\—ÜÛİ\˜ÙWØY™™\ŠHHWHH	×	ÎÂˆH[ÙHYˆ
+İ›˜Û\
+[™KÓÓÔH‹ŠHOH
+HÂˆİ›˜ÜJš]™\—ØÛÛÜ—ØY™™\‹[™H
+È‹Ú^™[ÙŠš]™\—ØÛÛÜ—ØY™™\ŠHHJNÂˆš]™\—ØÛÛÜ—ØY™™\–ÜÚ^™[ÙŠš]™\—ØÛÛÜ—ØY™™\ŠHHWHH	×	ÎÂˆH[ÙHYˆ
+İ›˜Û\
+[™K”UPSUOH‹
+HOH
+HÂˆİ›˜ÜJš]™\—Ü]X[]WØY™™\‹[™H
+ÈÚ^™[ÙŠš]™\—Ü]X[]WØY™™\ŠHHJNÂˆš]™\—Ü]X[]WØY™™\–ÜÚ^™[ÙŠš]™\—Ü]X[]WØY™™\ŠHHWHH	×	ÎÂˆH[ÙHYˆ
+İ›˜Û\
+[™K”ĞĞSS‘ÏH‹
+HOH
+HÂˆİ›˜ÜJš]™\—ÜØØ[[™×ØY™™\‹[™H
+ÈÚ^™[ÙŠš]™\—ÜØØ[[™×ØY™™\ŠHHJNÂˆš]™\—ÜØØ[[™×ØY™™\–ÜÚ^™[ÙŠš]™\—ÜØØ[[™×ØY™™\ŠHHWHH	×	ÎÂˆH[ÙHYˆ
+İ›˜Û\
+[™K”ÒQTÏH‹ŠHOH
+HÂˆÛÛœİÚ\ˆ
+œÚY\ÈH[™H
+ÈÂˆYˆ
+İ˜Û\
+ÚY\Ë›Û™K\ÚYYŠHOHˆİ˜Û\
+ÚY\ËÛË\ÚYY[Û™ËYYÙHŠHOHˆİ˜Û\
+ÚY\ËÛË\ÚYY\ÚÜYYÙHŠHOH
+HÂˆİ›˜ÜJš]™\—ÜÚY\×ØY™™\‹ÚY\ËˆÚ^™[ÙŠš]™\—ÜÚY\×ØY™™\ŠHHJNÂˆš]™\—ÜÚY\×ØY™™\–ÜÚ^™[ÙŠš]™\—ÜÚY\×ØY™™\ŠHHWHH	×	ÎÂˆBˆH[ÙHYˆ
+İ›˜Û\
+[™K”ÔÓÓH‹ŠHOH
+HÂˆÛÛœİÚ\ˆ
+œÜÛÛH[™H
+ÈÂˆYˆ
+ÜÛÛÌJHÂˆİ›˜ÜJš]™\—ÜÜÛÛØY™™\‹ÜÛÛˆÚ^™[ÙŠš]™\—ÜÜÛÛØY™™\ŠHHJNÂˆš]™\—ÜÜÛÛØY™™\–ÜÚ^™[ÙŠš]™\—ÜÜÛÛØY™™\ŠHHWHH	×	ÎÂˆBˆH[ÙHYˆ
+İ›˜Û\
+[™K”ÔÓÓÒÑQTH‹LJHOH
+HÂˆš]™\—ÜÜÛÛÚÙY\H
+[™VÌLWHOH	Ì	ÊHÈSÑHˆ•QNÂˆH[ÙHYˆ
+İ›˜Û\
+[™K”Ñ×ÔÒQUĞPÒÏH‹MJHOH
+HÂˆÛÛœİÚ\ˆ
+œÚY]Ø˜XÚÈH[™H
+ÈMNÂˆYˆ
+İ˜Û\
+ÚY]Ø˜XÚË››Ü›X[ŠHOHˆİ˜Û\
+ÚY]Ø˜XÚËœ›İ]YŠHOHˆİ˜Û\
+ÚY]Ø˜XÚË™›\YŠHOHˆİ˜Û\
+ÚY]Ø˜XÚË›X[X[][X›HŠHOH
+HÂˆİ›˜ÜJÙ×ÜÚY]Ø˜XÚ×İ˜[YKÚY]Ø˜XÚËˆÚ^™[ÙŠÙ×ÜÚY]Ø˜XÚ×İ˜[YJHHJNÂˆÙ×ÜÚY]Ø˜XÚ×İ˜[YVÜÚ^™[ÙŠÙ×ÜÚY]Ø˜XÚ×İ˜[YJHHWHH	×	ÎÂˆBˆH[ÙHYˆ
+İ›˜Û\
+[™K“SÑSH‹ŠHOH
+HÂˆİ›˜ÜJš[\—ÛXZÙWÛ[Ù[[™H
+È‹Ú^™[ÙŠš[\—ÛXZÙWÛ[Ù[
+HHJNÂˆš[\—ÛXZÙWÛ[Ù[ÜÚ^™[ÙŠš[\—ÛXZÙWÛ[Ù[
+HHWHH	×	ÎÂˆBˆB‚ˆÛÜÙJš[JNÂˆYˆ
+ÜİÌJBˆÛœš[Š\ØY™™\‹Ú^™[ÙŠ\ØY™™\ŠK‰\Î‰Y‹ÜİÜ
+NÂˆ[ÙBˆ\ØY™™\–ÌHH	×	ÎÂˆ™]\›ˆ›İ[™ÂŸB‚‹Êˆ•QH›ÜˆH˜]ÈTÔÑÍLLŒÈÙ[‹Y\ØÜšXš[™ÈÙ^]ÛÜ™ˆİÙ\˜Ø\ÙH]\œËˆ
+ˆYÚ]Ë	ËIË	Ë‰È[™	×ÉÈÛ›Kˆ™X[Ù^]ÛÜ™È\™H[Ø^\ÈÚ\YZÙH\Âˆ
+ˆ
+š\Û×ØMÌŒLMÛ[H‹˜K\\ÜË]˜^H‹˜^KLHŠNÈ[][™ÈÚ]HÜXÙBˆ
+ˆÜˆ[ˆ\\˜Ø\ÙH]\ˆ\È[™XYHH[X[‹\™XYX›H˜[YHHZ]\‚ˆ
+ˆš[\‹\İ\YY
+˜^[˜[YOKÛYYX[˜[YOHœ›ÛHH™[™Ü‰ÜÈYYXKXÛÛˆ
+ˆ™\ÜÛœÙJHÜˆÛ™HÙˆ\È›ÙÜ˜[IÜÈİÛˆUUÈ‹È•[šÛ›İÛˆˆ˜[˜XÚÜÈBˆ
+ˆ[™\Ü™]WÛYYXWÜÚ^™J
+KÛ\Ü™]Wİ˜^WÛ˜[YJ
+H™[İÈX]™H][Û™Bˆ
+ˆ˜]\ˆ[ˆš\ÚÈX[™Û[™È]ˆ
+‹Âœİ]XÈ“ÓÓ\ÛÛÚÜ×ÛZÙWÜ˜]×Ú\ÚÙ^]ÛÜ™
+ÛÛœİÚ\ˆ
+œÊHÂˆ[NÂˆYˆ
+\È\ÖÌJH™]\›ˆSÑNÂˆ›Üˆ
+HHÈÖÚWNÈJÊÊHÂˆÚ\ˆÈHÖÚWNÂˆYˆ
+J
+ÈH	ØIÈ	‰ˆÈH	Ş‰ÊH
+ÈH	Ì	È	‰ˆÈH	ÎIÊHˆÈOH	ËIÈÈOH	Ë‰ÈÈOH	×ÉÊJBˆ™]\›ˆSÑNÂˆBˆ™]\›ˆ•QNÂŸB‚‹ÊˆØ\][\Ù\ÈXXÚ\[‹\Ù\\˜]YÛÜ™ÙˆH˜]ÈÙ^]ÛÜ™	ÜÈZYBˆ
+ˆÙYÛY[\›š[™È\[œÈ[ÈÜXÙ\ÈHÚ\™YBˆ
+ˆ\Ü™]WÛYYXWÜÚ^™J
+H[™\Ü™]Wİ˜^WÛ˜[YJ
+H™[İËˆØ[\‚ˆ
+ˆİX\˜[Y\È[ˆİ]ÜÚ^™Kˆ
+‹Âœİ]XÈ›ÚY\Ü™]WİÛÜ™ÊÛÛœİÚ\ˆ
+œİ\Ú^™Wİ[‹Ú\ˆ
+›İ]
+HÂˆÚ^™WİKÚHHÂˆ“ÓÓØ\Û™^H•QNÂˆ›Üˆ
+HHÈH[ÈJÊÊHÂˆÚ\ˆÈHİ\ÚWNÂˆYˆ
+ÈOH	ËIÊHÂˆİ]ÛÚJÊ×HH	È	ÎÂˆØ\Û™^H•QNÂˆH[ÙHYˆ
+Ø\Û™^
+HÂˆİ]ÛÚJÊ×HH
+Ú\Š]İ\\Š
+[œÚYÛ™YÚ\ŠXÊNÂˆØ\Û™^HSÑNÂˆH[ÙHÂˆİ]ÛÚJÊ×HHÎÂˆBˆBˆİ]ÛÚWHH	×	ÎÂŸB‚‹ÊˆÑÍLLŒÈÙ[‹Y\ØÜšXš[™ÈYYXH˜[Y\ÈÛÚÈZÙBˆ
+ˆ™YÚ[Û—Ï˜[YO—Ï[\Ï[š]ˆ‹K™Ëˆš\Û×ØMÌŒLMÛ[HˆÜ‚ˆ
+ˆ›˜WÛ[X™\‹LLY[™[ÜWÍŒL^KZ[ˆˆHÙY\\İH˜[YOˆÙYÛY[ˆ
+ˆH\H\œÛÛˆXİX[H™XÛÙÛš\Ù\Ë[™›ÜH™YÚ[Ûˆ™Yš^[™ˆ
+ˆ^XİZ[[Y]™KÚ[˜Ú[Y[œÚ[ÛœËÚXÚ\™H\İ›Ú\ÙH[ˆH›ÜİÛ‚ˆ
+ˆ
+Mˆ[œİXYÙˆš\Û×ØMÌŒLMÛ[HŠKˆ˜[È˜XÚÈÈH˜]Èİš[™Âˆ
+ˆ[˜Ú[™ÙYYˆ]Ù\Û‰İÛÚÈZÙHH˜]ÈÙ^]ÛÜ™ÜˆÙ\Û‰İ]™HBˆ
+ˆ^XİYÛË][™\œØÛÜ™HÚ\KÛÈ›İ[™È[™XYHœšY[™HÙ]Âˆ
+ˆX[™ÛYˆ
+‹Âœİ]XÈ›ÚY\Ü™]WÛYYXWÜÚ^™JÛÛœİÚ\ˆ
+œ˜]ËÚ\ˆ
+›İ]Ú^™Wİİ]ÜÚ^™JHÂˆÛÛœİÚ\ˆ
+™š\œİİ\Ë
+›\İİ\Ë
+›˜[YWÜİ\ÂˆÚ^™Wİ˜[YWÛ[ÂˆÚ\ˆY–ÓPVĞU—ÓS—NÂ‚ˆYˆ
+[\ÛÛÚÜ×ÛZÙWÜ˜]×Ú\ÚÙ^]ÛÜ™
+˜]ÊJHÂˆÛœš[Šİ]İ]ÜÚ^™K‰\È‹˜]ÈÈ˜]ÈˆˆŠNÂˆ™]\›ÂˆB‚ˆš\œİİ\ÈHİ˜ÚŠ˜]Ë	×ÉÊNÂˆ\İİ\ÈHİœ˜ÚŠ˜]Ë	×ÉÊNÂˆYˆ
+Yš\œİİ\È[\İİ\Èš\œİİ\ÈOH\İİ\ÊHÂˆÛœš[Šİ]İ]ÜÚ^™K‰\È‹˜]ÊNÂˆ™]\›ÂˆB‚ˆ˜[YWÜİ\Hš\œİİ\È
+ÈNÂˆ˜[YWÛ[ˆH
+Ú^™Wİ
+J\İİ\ÈH˜[YWÜİ\
+NÂˆYˆ
+˜[YWÛ[ˆOH˜[YWÛ[ˆHÚ^™[ÙŠYŠJHÂˆÛœš[Šİ]İ]ÜÚ^™K‰\È‹˜]ÊNÂˆ™]\›ÂˆB‚ˆ\Ü™]WİÛÜ™Ê˜[YWÜİ\˜[YWÛ[‹YŠNÂˆÛœš[Šİ]İ]ÜÚ^™K‰\È‹YŠNÂŸB‚‹ÊˆÑÍLLŒÈYYXK\Ûİ\˜ÙHÙ^]ÛÜ™Ë™]YšYY›ÜˆH›ÜİÛ‹ˆÛ›HÛÂˆ
+ˆ™YYHÜXÚX[Ø\ÙHHH™\İ
+˜^KLH‹œ›ÛLˆ‹™[™[ÜK[X[X[‹ˆ
+ˆ›\™ÙKXØ\XÚ]H‹‹‹ŠH[™XYH™XYš[™Hœ›ÛHHØ[YH\[‹]Ë\ÜXÙKˆ
+ˆØ\][\ÙKYXXÚ]ÛÜ™˜[œÙ›Ü›H\Ü™]WÛYYXWÜÚ^™J
+H\Ù\ÈX›İ™K‚ˆ
+ˆ˜[È˜XÚÈÈH˜]Èİš[™È[˜Ú[™ÙYYˆ]Ù\Û‰İÛÚÈZÙHH˜]Âˆ
+ˆÙ^]ÛÜ™HÙYH\ÛÛÚÜ×ÛZÙWÜ˜]×Ú\ÚÙ^]ÛÜ™
+
+Kˆ
+‹Âœİ]XÈ›ÚY\Ü™]Wİ˜^WÛ˜[YJÛÛœİÚ\ˆ
+œ˜]ËÚ\ˆ
+›İ]Ú^™Wİİ]ÜÚ^™JHÂˆÚ\ˆY–ÓPVĞU—ÓS—NÂˆÚ^™Wİ[Â‚ˆYˆ
+[\ÛÛÚÜ×ÛZÙWÜ˜]×Ú\ÚÙ^]ÛÜ™
+˜]ÊJHÂˆÛœš[Šİ]İ]ÜÚ^™K‰\È‹˜]ÈÈ˜]ÈˆˆŠNÂˆ™]\›ÂˆBˆYˆ
+İ˜Û\
+˜]Ë˜]]ÈŠHOH
+HÂˆÛœš[Šİ]İ]ÜÚ^™KUUÈŠNÂˆ™]\›ÂˆBˆYˆ
+İ˜Û\
+˜]Ë˜K\\ÜË]˜^HŠHOHİ˜Û\
+˜]Ë˜\\ÜË]˜^HŠHOH
+HÂˆÛœš[Šİ]İ]ÜÚ^™K\\ÜÈ˜^HŠNÂˆ™]\›ÂˆB‚ˆ[ˆHİ›[Š˜]ÊNÂˆYˆ
+[ˆHÚ^™[ÙŠYŠJH[ˆHÚ^™[ÙŠYŠHHNÂˆ\Ü™]WİÛÜ™Ê˜]Ë[‹YŠNÂˆÛœš[Šİ]İ]ÜÚ^™K‰\È‹YŠNÂŸB‚œİ]XÈ›ÚYÙYYÜØ]™YÛÜ[Û—ÛX™[Ê›ÚY
+HÂˆYˆ
+š]™\—ÛYYXWØY™™\–ÌJHÂˆÚ\ˆYYXWÜ™]VÓPVĞU—ÓS—NÂ‚ˆ\Ü™]WÛYYXWÜÚ^™Jš]™\—ÛYYXWØY™™\‹YYXWÜ™]KÚ^™[ÙŠYYXWÜ™]JJNÂˆYˆ
+š]™\—ÜÛİ\˜ÙWØY™™\–ÌJHÂˆÚ\ˆ˜^WÜ™]VÓPVĞU—ÓS—NÂ‚ˆ\Ü™]Wİ˜^WÛ˜[YJš]™\—ÜÛİ\˜ÙWØY™™\‹˜^WÜ™]KÚ^™[ÙŠ˜^WÜ™]JJNÂˆÛœš[Š[š]X[ÛYYXWİ˜[YKÚ^™[ÙŠ[š]X[ÛYYXWİ˜[YJK‰\È
+	\ÊH‹ˆYYXWÜ™]K˜^WÜ™]JNÂˆH[ÙHÂˆÛœš[Š[š]X[ÛYYXWİ˜[YKÚ^™[ÙŠ[š]X[ÛYYXWİ˜[YJK‰\È‹ˆYYXWÜ™]JNÂˆBˆH[ÙHÂˆİ˜ÜJ[š]X[ÛYYXWİ˜[YK“›İ]XİYŠNÂˆB‚ˆYˆ
+š]™\—ØÛÛÜ—ØY™™\–ÌJBˆÛœš[Š[š]X[Üš[Û[ÙWİ˜[YKÚ^™[ÙŠ[š]X[Üš[Û[ÙWİ˜[YJK‰\È‹ˆš]™\—ØÛÛÜ—ØY™™\ŠNÂˆ[ÙBˆİ˜ÜJ[š]X[Üš[Û[ÙWİ˜[YK“›İ]XİYŠNÂ‚ˆYˆ
+š]™\—ÜØØ[[™×ØY™™\–ÌJBˆÛœš[Š[š]X[ÜØØ[[™×İ˜[YKÚ^™[ÙŠ[š]X[ÜØØ[[™×İ˜[YJK‰\È‹ˆš]™\—ÜØØ[[™×ØY™™\ŠNÂˆ[ÙBˆİ˜ÜJ[š]X[ÜØØ[[™×İ˜[YK“›İ]XİYŠNÂ‚ˆYˆ
+š]™\—Ü]X[]WØY™™\–ÌJBˆÛœš[Š[š]X[Ü]X[]Wİ˜[YKÚ^™[ÙŠ[š]X[Ü]X[]Wİ˜[YJK‰\È‹ˆš]™\—Ü]X[]WØY™™\ŠNÂˆ[ÙBˆİ˜ÜJ[š]X[Ü]X[]Wİ˜[YK“›İ]XİYŠNÂ‚ˆÛœš[Š[š]X[ÙWİ˜[YKÚ^™[ÙŠ[š]X[ÙWİ˜[YJK‰YH‹ˆš]™\—Ü™\ÛÛ][ÛŠNÂˆ\ÙWÛÜ[ÛœË˜[Y\ÖÌHHš]™\—Ü™\ÛÛ][ÛÂˆ\ÙWÛÜ[ÛœË˜ÛÛ\]Xš[]VÌHHÂˆ\ÙWÛÜ[ÛœË˜Ûİ[HNÂˆ\ÙWÛÜ[ÛœË˜Xİ]™HHÂˆ\ÙWÛÜ[ÛœËœÙ[XİYHš]™\—Ü™\ÛÛ][ÛÂ‚ˆ\ÛYYXWÛX™[ÜœÖÌHH\ÛYYXWÛX™[ÜİÜ˜YÙVÌNÂˆİ›˜ÜJ\ÛYYXWÛX™[ÜİÜ˜YÙVÌK[š]X[ÛYYXWİ˜[YKˆÚ^™[ÙŠ\ÛYYXWÛX™[ÜİÜ˜YÙVÌJHHJNÂˆ\ÛYYXWÛX™[ÜİÜ˜YÙVÌVÜÚ^™[ÙŠ\ÛYYXWÛX™[ÜİÜ˜YÙVÌJHHWHH	×	ÎÂˆ\ÛYYXWÛX™[ÜœÖÌWHH•SÂ‚ˆ\Üš[Û[ÙWÛX™[ÜœÖÌHH\Üš[Û[ÙWÛX™[ÜİÜ˜YÙVÌNÂˆİ›˜ÜJ\Üš[Û[ÙWÛX™[ÜİÜ˜YÙVÌK[š]X[Üš[Û[ÙWİ˜[YKˆÚ^™[ÙŠ\Üš[Û[ÙWÛX™[ÜİÜ˜YÙVÌJHHJNÂˆ\Üš[Û[ÙWÛX™[ÜİÜ˜YÙVÌVÜÚ^™[ÙŠ\Üš[Û[ÙWÛX™[ÜİÜ˜YÙVÌJHHWHH	×	ÎÂˆ\Üš[Û[ÙWÛX™[ÜœÖÌWHH•SÂ‚ˆ\ÜØØ[[™×ÛX™[ÜœÖÌHH\ÜØØ[[™×ÛX™[ÜİÜ˜YÙVÌNÂˆİ›˜ÜJ\ÜØØ[[™×ÛX™[ÜİÜ˜YÙVÌK[š]X[ÜØØ[[™×İ˜[YKˆÚ^™[ÙŠ\ÜØØ[[™×ÛX™[ÜİÜ˜YÙVÌJHHJNÂˆ\ÜØØ[[™×ÛX™[ÜİÜ˜YÙVÌVÜÚ^™[ÙŠ\ÜØØ[[™×ÛX™[ÜİÜ˜YÙVÌJHHWHH	×	ÎÂˆ\ÜØØ[[™×ÛX™[ÜœÖÌWHH•SÂ‚ˆ\Ü]X[]WÛX™[ÜœÖÌHH\Ü]X[]WÛX™[ÜİÜ˜YÙVÌNÂˆİ›˜ÜJ\Ü]X[]WÛX™[ÜİÜ˜YÙVÌK[š]X[Ü]X[]Wİ˜[YKˆÚ^™[ÙŠ\Ü]X[]WÛX™[ÜİÜ˜YÙVÌJHHJNÂˆ\Ü]X[]WÛX™[ÜİÜ˜YÙVÌVÜÚ^™[ÙŠ\Ü]X[]WÛX™[ÜİÜ˜YÙVÌJHHWHH	×	ÎÂˆ\Ü]X[]WÛX™[ÜœÖÌWHH•SÂ‚ˆ\ÙWÛX™[ÜœÖÌHH\ÙWÛX™[ÜİÜ˜YÙVÌNÂˆİ›˜ÜJ\ÙWÛX™[ÜİÜ˜YÙVÌK[š]X[ÙWİ˜[YKˆÚ^™[ÙŠ\ÙWÛX™[ÜİÜ˜YÙVÌJHHJNÂˆ\ÙWÛX™[ÜİÜ˜YÙVÌVÜÚ^™[ÙŠ\ÙWÛX™[ÜİÜ˜YÙVÌJHHWHH	×	ÎÂˆ\ÙWÛX™[ÜœÖÌWHH•SÂ‚ˆ\ÜÚY\×ÛX™[ÜœÖÌHH\ÜÚY\×ÛX™[ÜİÜ˜YÙVÌNÂˆİ˜ÜJ\ÜÚY\×ÛX™[ÜİÜ˜YÙVÌK“Û™K\ÚYYŠNÂˆİ˜ÜJ\ÜÚY\×İ˜[YWÜİÜ˜YÙVÌK›Û™K\ÚYYŠNÂˆ\ÜÚY\×ÛX™[ÜœÖÌWHH•SÂˆ\ÜÚY\×ÛÜ[Û—ØÛİ[HNÂ‚ˆYYXWÙ›ÜİÛ—Ú][\ÈH\ÛYYXWÛX™[ÜœÎÂˆš[Û[ÙWÛX™[ÈH\Üš[Û[ÙWÛX™[ÜœÎÂˆØØ[[™×Û[ÙWÛX™[ÈH\ÜØØ[[™×ÛX™[ÜœÎÂˆ]X[]WÛ[ÙWÛX™[ÈH\Ü]X[]WÛX™[ÜœÎÂˆ™\ÛÛ][Û—ÛX™[ÈH\ÙWÛX™[ÜœÎÂŸB‚œİ]XÈ›ÚY\WÜØ]™YÛÜ[Û—Üİ]JİXİÚ[™İÈ
+Ú[ŠHÂˆİXİØYÙ]
+™ÎÂ‚ˆYˆ
+]Ú[ŠH™]\›ÂˆÙYYÜØ]™YÛÜ[Û—ÛX™[Ê
+NÂ‚ˆYˆ
+[WÛYYXWİ˜^WÛX\[™ÜÈOH
+HÂˆÈHš[™ÙØYÙ]ØWÚY
+ĞQÓQQPWÑ“ÔÕÓŠNÂˆYˆ
+ÊBˆÕÔÙ]ØYÙ]]œÊËÚ[‹•SˆÕÖWÓX™[Ë
+SÓ‘Ê[YYXWÙ›ÜİÛ—Ú][\ËˆÕÖWĞXİ]™KˆĞWÑ\ØX›Yš]™\—ÛYYXWØY™™\–ÌHÈSÑHˆ•QKˆQ×ÑÓ‘JNÂˆB‚ˆYˆ
+[WÜİ\ÜYÜØØ[[™ÈOH
+HÂˆÈHš[™ÙØYÙ]ØWÚY
+ĞQÔĞĞSS‘×ÓSÑJNÂˆYˆ
+ÊBˆÕÔÙ]ØYÙ]]œÊËÚ[‹•SˆÕÖWÓX™[Ë
+SÓ‘Ê\ØØ[[™×Û[ÙWÛX™[ËˆÕÖWĞXİ]™KˆĞWÑ\ØX›Yš]™\—ÜØØ[[™×ØY™™\–ÌHÈSÑHˆ•QKˆQ×ÑÓ‘JNÂˆB‚ˆYˆ
+[WÜİ\ÜYÜ]X[]HOH
+HÂˆÈHš[™ÙØYÙ]ØWÚY
+ĞQÔUPSUWÓSÑJNÂˆYˆ
+ÊBˆÕÔÙ]ØYÙ]]œÊËÚ[‹•SˆÕÖWÓX™[Ë
+SÓ‘Ê\]X[]WÛ[ÙWÛX™[ËˆÕÖWĞXİ]™KˆĞWÑ\ØX›Yš]™\—Ü]X[]WØY™™\–ÌHÈSÑHˆ•QKˆQ×ÑÓ‘JNÂˆB‚ˆYˆ
+[WÜİ\ÜYÙHOH
+HÂˆÈHš[™ÙØYÙ]ØWÚY
+ĞQÔ‘TÓÓUSÓŠNÂˆYˆ
+ÊBˆÕÔÙ]ØYÙ]]œÊËÚ[‹•SˆÕÖWÓX™[Ë
+SÓ‘Ê\™\ÛÛ][Û—ÛX™[ËˆÕÖWĞXİ]™KˆĞWÑ\ØX›Y•QKˆQ×ÑÓ‘JNÂˆB‚ˆYˆ
+[WÜİ\ÜYÜš[Û[Ù\ÈOH
+HÂˆÈHš[™ÙØYÙ]ØWÚY
+ĞQÔ’S•ÓSÑJNÂˆYˆ
+ÊBˆÕÔÙ]ØYÙ]]œÊËÚ[‹•SˆÕÖWÓX™[Ë
+SÓ‘Ê\š[Û[ÙWÛX™[ËˆÕÖWĞXİ]™KˆĞWÑ\ØX›Yš]™\—ØÛÛÜ—ØY™™\–ÌHÈSÑHˆ•QKˆQ×ÑÓ‘JNÂˆB‚ˆÈHš[™ÙØYÙ]ØWÚY
+ĞQÔÒQTÊNÂˆYˆ
+ÊBˆÕÔÙ]ØYÙ]]œÊËÚ[‹•SˆÕÖWÓX™[Ë
+SÓ‘Ê[\ÜÚY\×ÛX™[ÜœËˆÕÖWĞXİ]™KˆĞWÑ\ØX›Y•QKˆQ×ÑÓ‘JNÂ‚ˆÕÔ™Yœ™\ÚÚ[™İÊÚ[‹•S
+NÂŸB‚œİ]XÈ›ÚY\WÚ›Ø—ÙY˜][×İ×ÙØYÙ]ÊİXİÚ[™İÈ
+Ú[ŠHÂˆİXİØYÙ]
+™ÎÂˆ[NÂ‚ˆYˆ
+]Ú[ŠH™]\›Â‚ˆYˆ
+YYXWÙ›ÜİÛˆ	‰ˆ[WÛYYXWİ˜^WÛX\[™ÜÈˆ	‰ˆš]™\—ÛYYXWØY™™\–ÌJHÂˆ›Üˆ
+HHÈH[WÛYYXWİ˜^WÛX\[™ÜÎÈ
+ÊÚJHÂˆYˆ
+İ˜Û\
+YYXWİ˜^WÛX\ÚWK›YYXKš]™\—ÛYYXWØY™™\ŠHOH	‰‚ˆ
+Yš]™\—ÜÛİ\˜ÙWØY™™\–ÌHˆİ˜Û\
+YYXWİ˜^WÛX\ÚWKœÛİ\˜ÙKš]™\—ÜÛİ\˜ÙWØY™™\ŠHOH
+JHÂˆÕÔÙ]ØYÙ]]œÊYYXWÙ›ÜİÛ‹Ú[‹•SˆÕÖWĞXİ]™K
+SÓ‘ÊZKˆQ×ÑÓ‘JNÂˆœ™XZÎÂˆBˆBˆB‚ˆÈHš[™ÙØYÙ]ØWÚY
+ĞQÔ’S•ÓSÑJNÂˆYˆ
+È	‰ˆš]™\—ØÛÛÜ—ØY™™\–ÌJHÂˆ›Üˆ
+HHÈH[WÜİ\ÜYÜš[Û[Ù\ÎÈ
+ÊÚJHÂˆYˆ
+İ˜Û\
+İ\ÜYÜš[Û[Ù\ÖÚWKš]™\—ØÛÛÜ—ØY™™\ŠHOH
+HÂˆÕÔÙ]ØYÙ]]œÊËÚ[‹•SÕÖWĞXİ]™K
+SÓ‘ÊZKQ×ÑÓ‘JNÂˆİ›˜ÜJÙ[XİYÜš[Û[ÙKİ\ÜYÜš[Û[Ù\ÖÚWKˆÚ^™[ÙŠÙ[XİYÜš[Û[ÙJHHJNÂˆÙ[XİYÜš[Û[ÙVÜÚ^™[ÙŠÙ[XİYÜš[Û[ÙJHHWHH	×	ÎÂˆœ™XZÎÂˆBˆBˆB‚ˆÈHš[™ÙØYÙ]ØWÚY
+ĞQÔĞĞSS‘×ÓSÑJNÂˆYˆ
+È	‰ˆš]™\—ÜØØ[[™×ØY™™\–ÌJHÂˆ›Üˆ
+HHÈH[WÜİ\ÜYÜØØ[[™ÎÈ
+ÊÚJHÂˆYˆ
+İ˜Û\
+İ\ÜYÜØØ[[™ÖÚWKš]™\—ÜØØ[[™×ØY™™\ŠHOH
+HÂˆÕÔÙ]ØYÙ]]œÊËÚ[‹•SÕÖWĞXİ]™K
+SÓ‘ÊZKQ×ÑÓ‘JNÂˆİ›˜ÜJÙ[XİYÜØØ[[™Ëİ\ÜYÜØØ[[™ÖÚWKÚ^™[ÙŠÙ[XİYÜØØ[[™ÊHHJNÂˆÙ[XİYÜØØ[[™ÖÜÚ^™[ÙŠÙ[XİYÜØØ[[™ÊHHWHH	×	ÎÂˆœ™XZÎÂˆBˆBˆB‚ˆÈHš[™ÙØYÙ]ØWÚY
+ĞQÔUPSUWÓSÑJNÂˆYˆ
+È	‰ˆš]™\—Ü]X[]WØY™™\–ÌJHÂˆ›Üˆ
+HHÈH[WÜİ\ÜYÜ]X[]NÈ
+ÊÚJHÂˆYˆ
+İ˜Û\
+İ\ÜYÜ]X[]VÚWKš]™\—Ü]X[]WØY™™\ŠHOH
+HÂˆÕÔÙ]ØYÙ]]œÊËÚ[‹•SÕÖWĞXİ]™K
+SÓ‘ÊZKQ×ÑÓ‘JNÂˆİ›˜ÜJÙ[XİYÜ]X[]Kİ\ÜYÜ]X[]VÚWKÚ^™[ÙŠÙ[XİYÜ]X[]JHHJNÂˆÙ[XİYÜ]X[]VÜÚ^™[ÙŠÙ[XİYÜ]X[]JHHWHH	×	ÎÂˆœ™XZÎÂˆBˆBˆB‚ˆÈHš[™ÙØYÙ]ØWÚY
+ĞQÔÒQTÊNÂˆYˆ
+ÊBˆÕÔÙ]ØYÙ]]œÊËÚ[‹•SˆÕÖWĞXİ]™K\ÜÚY\×ØXİ]™WÚ[™^
+
+KˆQ×ÑÓ‘JNÂ‚ˆÕÔ™Yœ™\ÚÚ[™İÊÚ[‹•S
+NÂŸB‚œİ]XÈ›ÚY\ÜÙ]İ\İÜš[Ù[˜X›Y
+İXİÚ[™İÈ
+Ú[‹“ÓÓ[˜X›Y
+BÂˆİXİØYÙ]
+™ÈHš[™ÙØYÙ]ØWÚY
+ĞQÔ’S•Ğ•UÓŠNÂˆYˆ
+È	‰ˆÚ[ŠHÂˆÕÔÙ]ØYÙ]]œÊËÚ[‹•SˆĞWÑ\ØX›Y[˜X›YÈSÑHˆ•QKˆQ×ÑÓ‘JNÂˆBŸB‚‹ÊˆÙY\ÈHÙY\ÜÛÛY›ØœÈÚXÚØ›Ş	ÜÈ[˜X›YİXÚÙYİ]H[ˆİ\ˆ
+ˆÚ]HÜÛÛ\ˆŞXÛHHØ[YšYÚY\ˆš]™\—ÜÜÛÛØY™™\‚ˆ
+ˆÚ[™Ù\È
+ĞQÔÔÓÓT‰ÜÈ[™\ˆ™[İÊH[™Û˜ÙH]İ\\ˆ
+ˆ
+\WÙš]™\—ØÛÛ™šY×İ×ÙØYÙ]Ê
+JKˆ›Ü˜Ù\Èš]™\—ÜÜÛÛÚÙY\Ù™ˆBˆ
+ˆ[ÛY[ÜÛÛ\ˆ›ÈÛ™Ù\ˆ˜[Y\ÈH™X[]šXÙK˜]\ˆ[ˆX]š[™ÈBˆ
+ˆİ[HXÚÈ›Ø›ÙHØ[ˆÙYHÜˆÛX\ˆÛˆH\ØX›YØYÙ]HÙYBˆ
+ˆ\ÜÜÛÛÚÙY\Ø]˜Z[X›J
+Kˆ
+‹Âœİ]XÈ›ÚY\İ\]WÜÜÛÛÚÙY\ÙØYÙ]
+İXİÚ[™İÈ
+Ú[ŠBÂˆİXİØYÙ]
+™ÈHš[™ÙØYÙ]ØWÚY
+ĞQÔÔÓÓÒÑQT
+NÂˆ“ÓÓ]˜Z[X›HH\ÜÜÛÛÚÙY\Ø]˜Z[X›J
+NÂ‚ˆYˆ
+X]˜Z[X›JHš]™\—ÜÜÛÛÚÙY\HSÑNÂ‚ˆYˆ
+È	‰ˆÚ[ŠHÂˆÕÔÙ]ØYÙ]]œÊËÚ[‹•SˆĞWÑ\ØX›Y
+SÓ‘ÊJ]˜Z[X›HÈSÑHˆ•QJKˆÕĞ—ĞÚXÚÙY
+SÓ‘ÊJ]˜Z[X›H	‰ˆš]™\—ÜÜÛÛÚÙY\
+KˆQ×ÑÓ‘JNÂˆBŸB‚œİ]XÈ›ÚY\İ\İÜš[Ü™[X\ÙJİXİÚ[™İÈ
+Ú[ŠBÂˆYˆ
+\İÜš[Ú›Ø‹œ™\]Y\İ	‰ˆ\İÜš[Ú›Ø‹™]šXÙWÛÜ[ŠHÂˆÛÜÙQ]šXÙJ
+İXİSÔ™\]Y\İ
+Š]\İÜš[Ú›Ø‹œ™\]Y\İ
+NÂˆ\İÜš[Ú›Ø‹™]šXÙWÛÜ[ˆHSÑNÂˆBˆYˆ
+\İÜš[Ú›Ø‹œ™\]Y\İ
+HÂˆ[]RSÔ™\]Y\İ
+
+İXİSÔ™\]Y\İ
+Š]\İÜš[Ú›Ø‹œ™\]Y\İ
+NÂˆ\İÜš[Ú›Ø‹œ™\]Y\İH•SÂˆBˆYˆ
+\İÜš[Ú›Ø‹œÜ
+HÂˆ[]S\ÙÔÜ
+\İÜš[Ú›Ø‹œÜ
+NÂˆ\İÜš[Ú›Ø‹œÜH•SÂˆBˆYˆ
+\İÜš[Ú›Ø‹˜š]X\
+HÂˆYˆ
+\İÜš[Ú›Ø‹˜š]X\ÛX[X[
+HÂˆ[[™NÂˆ›Üˆ
+[™HHÂˆ[™H
+[
+]\İÜš[Ú›Ø‹˜š]X\ÜİÜ˜YÙK‘\Âˆ
+ÊÜ[™JHÂˆYˆ
+\İÜš[Ú›Ø‹˜š]X\ÜİÜ˜YÙK”[™\ÖÜ[™WJHÂˆœ™YT˜\İ\Š\İÜš[Ú›Ø‹˜š]X\ÜİÜ˜YÙK”[™\ÖÜ[™WKˆ
+SÓ‘Ê]\İÜš[Ú›Ø‹˜š]X\ÜİÜ˜YÙK]\Ô\”›İÈ
+ˆSˆ
+SÓ‘Ê]\İÜš[Ú›Ø‹˜š]X\ÜİÜ˜YÙK”›İÜÊNÂˆ\İÜš[Ú›Ø‹˜š]X\ÜİÜ˜YÙK”[™\ÖÜ[™WHH•SÂˆBˆBˆH[ÙHÂˆœ™YPš]X\
+\İÜš[Ú›Ø‹˜š]X\
+NÂˆBˆ\İÜš[Ú›Ø‹˜š]X\H•SÂˆ\İÜš[Ú›Ø‹˜š]X\ÛX[X[HSÑNÂˆBˆYˆ
+\İÜš[Ú›Ø‹˜ÛÛÜ›X\
+HÂˆœ™YPÛÛÜ“X\
+\İÜš[Ú›Ø‹˜ÛÛÜ›X\
+NÂˆ\İÜš[Ú›Ø‹˜ÛÛÜ›X\H•SÂˆBˆ\İÜš[Ú›Ø‹˜Xİ]™HHSÑNÂˆ\ÜÙ]İ\İÜš[Ù[˜X›Y
+Ú[‹•QJNÂŸB‚œİ]XÈ›ÚY\İ\İÜš[ØÛÛ\]JİXİÚ[™İÈ
+Ú[ŠBÂˆÓ‘È[Ù\œÂˆÓ‘È™\]Y\İÙ\œ›ÜÂ‚ˆYˆ
+]\İÜš[Ú›Ø‹˜Xİ]™H]\İÜš[Ú›Ø‹œ™\]Y\İ
+H™]\›Âˆ[Ù\œˆHØZ]SÊ
+İXİSÔ™\]Y\İ
+Š]\İÜš[Ú›Ø‹œ™\]Y\İ
+NÂˆ™\]Y\İÙ\œ›ÜˆH
+Ó‘Ê]\İÜš[Ú›Ø‹œ™\]Y\İOš[×Ñ\œ›ÜÂˆÊˆÛÜÙQ]šXÙHX^Hİ[İX›Z]H[™[™ËÙ\^YÙKˆš[š\Ú]ˆ
+ˆ™Y›Ü™H™\Ü[™ÈÛÛ\][Û‹Ø]š[™ÈH™\]Y\İ\œ›ÜœÈ™Y›Ü™HBˆ
+ˆ™[X\ÙH[\ˆ[]\ÈHSÔ™\]Y\İˆ
+‹Âˆ\İ\İÜš[Ü™[X\ÙJÚ[ŠNÂˆYˆ
+[Ù\œˆOH™\]Y\İÙ\œ›ÜˆOH
+HÂˆš[Š•\İš[˜Z[YˆØZ]SÏI[[×Ñ\œ›ÜI[ˆ‹ˆ[Ù\œ‹™\]Y\İÙ\œ›ÜŠNÂˆH[ÙHÂˆÊˆH™X[ÔÈ‹ŒØ\\™H™]\›™Y›ÈKÓÈ\œ›Üˆ\Ü]HHš]™\‚ˆ
+ˆÙÙÚ[™È[ˆTÛÛ›™Xİ[Ûˆ[Y[İ]\š[™È™[™\Š
+KˆHÛÛ\]Yˆ
+ˆ˜\İ\ˆ™\]Y\İ\™Y›Ü™HØ[››İÛÛ™š\›H[]™\K[™]™[ˆTˆ
+ˆXØÙ\[˜ÙHÛİ[›İ›İ™H]\\ˆ\È\ÚXØ[Hš[Yˆ
+‹Âˆš[Š•\İš[™\]Y\İš[š\ÚYÈ[]™\H\È›İÛÛ™š\›YYˆŠNÂˆš[ŠÚXÚÈš[\ˆİ]]™]Z[™Y›Øˆİ]\ÈÜˆXYÈš]™\ˆÙ×ˆŠNÂˆBŸB‚œİ]XÈ›ÚY\İ\İÜš[ØØ[˜Ù[
+İXİÚ[™İÈ
+Ú[ŠBÂˆYˆ
+]\İÜš[Ú›Ø‹˜Xİ]™H]\İÜš[Ú›Ø‹œ™\]Y\İ
+H™]\›Âˆš[ŠØ[˜Ù[[™È\İš[‹‹—ˆŠNÂˆYˆ
+PÚXÚÒSÊ
+İXİSÔ™\]Y\İ
+Š]\İÜš[Ú›Ø‹œ™\]Y\İ
+JBˆX›ÜSÊ
+İXİSÔ™\]Y\İ
+Š]\İÜš[Ú›Ø‹œ™\]Y\İ
+NÂˆØZ]SÊ
+İXİSÔ™\]Y\İ
+Š]\İÜš[Ú›Ø‹œ™\]Y\İ
+NÂˆ\İ\İÜš[Ü™[X\ÙJÚ[ŠNÂŸB‚‹ÊˆÜ˜Z]M\›ÜÜ[Û™Y
+ŒLMÛ[JH\İØ[˜\Ë˜]Ûˆ[È]ÈİÛ‚ˆ
+ˆš]˜]Hš]X\[™XÛÛİ\ˆÛÛÜ“X\˜]\ˆ[ˆH]™HÛÜšØ™[˜Úˆ
+ˆØÜ™Y[‰ÜË‚ˆ
+‚ˆ
+ˆ\È\ÈHÜšYÚ[˜[™KTŒÎÌŒLÈ^[İ]™\İÜ™Yˆ™X[\İ[™ÈÙ‚ˆ
+ˆŒÎ	ÜÈÛX[\ˆÌŒ]™K\[]HØ[˜\ÈÚİÙYHØ[YHY[X\™Ú[‹Âˆ
+ˆÜÚ][Ûš[™È™YÜ™\ÜÚ[ÛˆÛˆ›İÑÈ˜\İ\ˆ[™”QÈ\İš[ÚXÚˆ
+ˆYX[œÈ]	ÜÈ[ˆ\İ™X[Hš[\‹™]šXÙHST”Ô•Ù[ÛY]H]Z\šÈYYÂˆ
+ˆ]Ø[˜\ÉÜÈİÛˆ[Y[œÚ[ÛœËØ\ÜXİH›İÛÛY][™ÈÜXÚYšXÈÈ[HÛ™Bˆ
+ˆZ[’S•[˜ÛÙ\‹ˆÛÚ[™È˜XÚÈÈH™]š[İ\ÛK\›İ™[ˆÌŒLÈÛİ\˜ÙBˆ
+ˆ
+Ù\Y[XØ[›Üˆ”QËÑÈ˜\İ\ˆ[™ˆHØ[YHš]X\Ø[YHÛİ\˜ÙBˆ
+ˆ[Y[œÚ[ÛœËØ[YHÛÛ™šYİ\™Y[YYXH\İÛÛËÑ\İ›İÜÊH™\Ù\™\ÈBˆ
+ˆ[[™YYÙH\ÜXİˆÈ›İYÔPÒPSĞÑS•TˆHÔÈ‹ŒØ\\™Bˆ
+ˆ™[İÈÚİÜÈ]]YÈ]™[ˆ\È[\YÙHØ[˜\ÈYØZ[œİHš]™\‰ÜÂˆ
+ˆ]XÚ\™Ù\ˆX^[][HÚY‚ˆ
+‚ˆ
+ˆHš]˜]HÛÛÜ“X\^\İÈ™XØ]\ÙH[ˆÛˆH]™HÛÜšØ™[˜ÚØÜ™Y[ˆ\Âˆ
+ˆÚ]]™\ˆÜ™^HH\Ù\‰ÜÈ˜XÚÙÜ›İ[™\[œÈÈ™K›İÚ]HH[\[™Âˆ
+ˆHØÜ™Y[‰ÜÈİÛˆ[œÈš[YH[YÙHÙˆÜ™^H[šËˆ[ˆ\™H\Âˆ
+ˆš^YÈYHÚ]H[™[ˆHÈYH›XÚË[™\[™[ÙˆH\Ù\‰ÜÂˆ
+ˆØÜ™Y[‹İ[YK[™[œÈ‹MÈ\™Hš^Yš[X\šY\È›ÜˆHÛÛİ\ˆ\İ‚ˆ
+‚ˆ
+ˆš[\‹™]šXÙHİ[[œÈHST”Ô•™\]Y\İ\Ş[˜Ú›Û›İ\ÛBˆ
+ˆ
+\İÜš[Ú›Ø‹X›İ™JHÛÈHÕRHİ^\È™\ÜÛœÚ]™NÈ\İ\İÜš[ØÛÛ\]J
+Bˆ
+ˆ
+Ø[Yœ›ÛHHXZ[ˆ]™[ÛÜ
+H[™\İ\İÜš[ØØ[˜Ù[
+
+H
+Ø[YÛ‚ˆ
+ˆÚ[™İÈÛÜÙJHš[š\ÚH›Øˆ[™™[X\ÙH]È™\Ûİ\˜Ù\Ë[˜ÛY[™ÈBˆ
+ˆÛÛÜ“X\[ØØ]Y\™Kˆ
+‹ÂˆÙYš[™HTÕTÕQÑWÕÒQÌŒˆÙYš[™HTÕTÕQÑWÒRQÒLÂˆÙYš[™HTÕTÕQÑWÑTÈÊˆ[œÎˆ—ŒÈ
+‹ÂˆÙYš[™HTÕTÕQÑWĞÓÓÔ”È‚‹ÊˆÜİØÜš\[Û™Hİ[Ù]È[ˆ^XİÛX[\ÚXØ[\™Ù]ˆ
+ˆ
+ÔPÒPSÓRSÓÓËÓRS“ÕÔË›ÈÔPÒPSĞÑS•TŠHÚ[˜ÙHHÜİØÜš\Üš]\‚ˆ
+ˆÙ[™\ÈH[XYÙHÛˆÔYÙTÚ^™H]Ù[È\ÚÚ[™Èš[\‹™]šXÙHÈ[ÛÂˆ
+ˆÙ[™H]YNÈ›[šÈ˜\İ\ˆÛÛ[[œÈÛˆH™X[Ø[\İ[™ÈØ\\™K[™ˆ
+ˆHÛX[\ˆ\™Ù]ÙY\ÈHÌH[˜ÛÙ\ˆ[œ]İÛ‹ˆH\™Ù]ˆ
+ˆÙY\ÈH™\İÜ™YÌŒLÈÛİ\˜ÙIÜÈİÛˆ\ÜXİ˜][È
+ÌŒÍLÈBˆ
+ˆÌ
+H˜]\ˆ[ˆH™]š[İ\ÈŒÌŒØ[˜\ÉÜÈÎ
+ÍJHHš[[™Âˆ
+ˆÈHZ\ÛX]ÚY\ÜXİÛİ[]Ù[ˆ™Z[›ÙXÙHÜ›Ü[™ËÜÜÚ][Ûš[™Âˆ
+ˆ\œ›Üˆ[™\[™[ÙˆHš[\‹™]šXÙH]Z\šÈX›İ™Kˆ
+‹ÂˆÙYš[™HTÕTÕÔ×ÕÒQÓRSÈŒˆÙYš[™HTÕTÕÔ×ÒRQÒÓRSÈNM‚œİ]XÈÛÛœİÚ\ˆ
+›\İ\İÜš[Ù[™Ú[™WÛ˜[YJ›ÚY
+BÂˆ[NÂ‚ˆ›Üˆ
+HHÈHTÑS‘ÒS‘WÓPVÈ
+ÊÚJHÂˆYˆ
+İ˜Û\
+š]™\—Ù[™Ú[™WüëMø¶‰ËkºwµçKˆÛÈ][\È™Y›Ü™Bˆ
+ˆ[İš[™ÈÛˆÛİ™\œÈ]Ø\ÙNÈH\™Ûİ[Û›HÛİÂˆ
+ˆİÛˆ™XXÚ[™ÈH˜[˜XÚÈÜ›Üˆ[™Ú[È]\™Bˆ
+ˆXİX[HXYˆ™]šY\Èİ^HÛÜÚ[H›ÜˆLH
+Bˆ
+ˆÛÛ›™Xİ[ÛˆİXØÙYYY]ÛÛY][™ÈY\ˆ]Ø\Âˆ
+ˆ›ZŞKK™ËˆH[˜Ø]Y™\ÜÛœÙHHÙYBˆ
+ˆ]Y\WÜš[\—Ø]šX]\ÊKˆ
+‹ÂˆYˆ
+\˜ÈOHLˆ	‰ˆ][\ˆ
+Hœ™XZÎÂˆBˆBˆB‚ˆYˆ
+[ÚÊHÂˆİ\İÛWÜš[ŠÓPTˆŠNÂˆİ\İÛWÜš[Š”ØØ[ˆ˜Z[YHX\ÙHH]Y\HYØZ[ˆŠNÂˆ\ØÛX\—Üš[\—ÚXÛÛŠ
+NÂˆ\ÛØYÜš[\—ÚXÛÛ—ØØXÚJSÑJNÂˆH[ÙHÂˆ\Ü™Yœ™\ÚÜš[\—ÚXÛÛŠ
+NÂˆBˆÊˆ™Y˜]ÈZ]\ˆØ^Nˆ]Y\WÜš[\—Ø]šX]\Ê
+H[™XYH™\Ù]Bˆ
+ˆX\šÙ\‹Jˆ\œ˜^\È™Y›Ü™H\ÈÛÜ]™[ˆÛˆ˜Z[\™KÛÈH˜Z[Yˆ
+ˆ™K\]Y\HÛÜœ™XİHÛX\œÈH™]š[İ\Èš[\‰ÜÈ[šÈ]™[ÈÙ™ˆBˆ
+ˆ[™[[œİXYÙˆX]š[™È[HÛÚÚ[™Èİ\œ™[ˆ
+‹Âˆ\Ù˜]×ÛX\šÙ\—Üİš\Ê
+NÂˆ\Ù˜]×ÜÚY\×Ú[
+
+NÂˆ\Ù˜]×Üš[\—ÚXÛÛŠ
+NÂŸB‚‹Êˆ[ØØ]HH]Y\H™\ÜÛœÙHÛ›HÚ[HH]Y\H\È[›š[™ËˆÛ\ÜÚXÂˆ
+ˆŞ\İ[\ÈX^H›İ]™HHÛÛYİ[İ\ÈLÚPˆ›ØÚÈ]˜Z[X›H]™[ˆÚ[‚ˆ
+ˆZ\ˆİ[œ™YHY[[ÜH\ÈX[KÛÈ™]Z[ˆH[Y™™\ˆÚ\™Bˆ
+ˆÜÜÚX›H[™˜[˜XÚÈÈİ[]\ÙY[LÚPˆÜˆÚPˆØ\XÚ]Y\Ë‚ˆ
+ˆ]Y\WÜš[\—Ø]šX]\Ê
+H™XÙZ]™\ÈHXİX[Ø\XÚ]H[™\™Y›Ü™Bˆ
+ˆØ[››İÜš]H\ÈİYÚHÛX[\ˆ˜[˜XÚÈÙ\™Hİ[PVĞ•Q‘‘Tˆ]\Ëˆ
+‹Âœİ]XÈÚ\ˆ
+›\Ø[Ø×Ü]Y\WÜ™\ÜÛœÙJ[
+›İ]ÜÚ^™JHÂˆİ]XÈÛÛœİSÓ‘ÈÚ^™\Ö×HHÂˆ
+SÓ‘ÊSPVĞ•Q‘‘T‹LÌLÌ•SMLÍ•SˆNÂˆ[NÂ‚ˆYˆ
+[İ]ÜÚ^™JBˆ™]\›ˆ•SÂˆ
+›İ]ÜÚ^™HHÂ‚ˆ›Üˆ
+HHÈH
+[
+JÚ^™[ÙŠÚ^™\ÊHÈÚ^™[ÙŠÚ^™\ÖÌJJNÈ
+ÊÚJHÂˆÚ\ˆ
+œ™\ÜÛœÙHH
+Ú\ˆ
+ŠP[ØÕ™XÊÚ^™\ÖÚWKQSQ—ĞS–JNÂˆYˆ
+™\ÜÛœÙJHÂˆ
+›İ]ÜÚ^™HH
+[
+\Ú^™\ÖÚWNÂˆYˆ
+Ú^™\ÖÚWH
+SÓ‘ÊSPVĞ•Q‘‘TŠBˆš[Š•\Ú[™È™YXÙY	[KX]H]Y\H™\ÜÛœÙHY™™\—ˆ‹ˆ
+[œÚYÛ™YÛ™Ê\Ú^™\ÖÚWJNÂˆ™]\›ˆ™\ÜÛœÙNÂˆBˆB‚ˆš[ŠÛİ[›İ[ØØ]HH]Y\H™\ÜÛœÙHY™™\ˆ
+Z[š[][HMLÍˆ]\ÊWˆŠNÂˆ™]\›ˆ•SÂŸB‚œİ]XÈ›ÚY\™›Ü›WÜ]Y\WÙ›İ×Ø[ØØ]Y
+İXİÚ[™İÈ
+Ú[‹ˆÛÛœİÚ\ˆ
+š\ÛÛ›Kˆ[ÜÚ[
+HÂˆ[™\ÜÛœÙWÜÚ^™NÂˆÚ\ˆ
+œ™\ÜÛœÙHH\Ø[Ø×Ü]Y\WÜ™\ÜÛœÙJ	œ™\ÜÛœÙWÜÚ^™JNÂ‚ˆYˆ
+\™\ÜÛœÙJBˆ™]\›Â‚ˆ\™›Ü›WÜ]Y\WÙ›İÊÚ[‹\ÛÛ›KÜÚ[™\ÜÛœÙK™\ÜÛœÙWÜÚ^™JNÂˆœ™YU™XÊ™\ÜÛœÙJNÂŸB‚š[Ù[™ÜÙ×Üš[Ú›ØŠÛÛœİÚ\ˆ
+š\[ÜÛÛœİÚ\ˆ
+›YYXKÛÛœİÚ\ˆ
+œš[Û[ÙK[œÚYÛ™YÚ\ˆ
+œÙ×Ù]K[Ù×ÜÚ^™JHÂˆYˆ
+Ü\˜][Û—Ú[—Ü›ÙÜ™\ÜÊHÂˆš[Š“Ü\˜][Ûˆ[™XYH[ˆ›ÙÜ™\ÜËX\ÙHØZ]‹‹—ˆŠNÂˆ™]\›ˆLNÂˆBˆÜ\˜][Û—Ú[—Ü›ÙÜ™\ÜÈH•QNÂ‚ˆÛÛœİÚ\ˆ
+œÙ[XİYÜÛİ\˜ÙHH˜]]ÈÂˆ›Üˆ
+[HHÈH[WÛYYXWİ˜^WÛX\[™ÜÎÈJÊÊHÂˆYˆ
+İ˜Û\
+YYXWİ˜^WÛX\ÚWK›YYXKYYXJHOH
+HÂˆÙ[XİYÜÛİ\˜ÙHHYYXWİ˜^WÛX\ÚWKœÛİ\˜ÙNÂˆœ™XZÎÂˆBˆBˆš[Š”Ù[XİYYYXNˆ	\ËÛİ\˜ÙNˆ	\Ëš[[ÙNˆ	\×ˆ‹YYXKÙ[XİYÜÛİ\˜ÙKš[Û[ÙJNÂ‚ˆİXİÛØÚØY—Ú[ˆÙ\—ØYÂˆ[ÛØÚÙ™HLNÂˆ[œÚYÛ™YÚ\ˆ
+š\Ü^[ØYH•SÂˆ[Ù™œÙ]HÂˆÚ\ˆ
+šÚXY\ˆH•SÂˆÚ\ˆ
+œ™\ÜÛœÙWØY™™\ˆH•SÂˆ[™\İ[HLNÂ‚ˆ\Ü^[ØYHX[ØÊŒ
+NÂˆYˆ
+Z\Ü^[ØY
+HÂˆš[Š‘˜Z[YÈ[ØØ]HY[[ÜH›ÜˆT^[ØYˆŠNÂˆÜ\˜][Û—Ú[—Ü›ÙÜ™\ÜÈHSÑNÂˆ™]\›ˆLNÂˆBˆY[\Ù]
+\Ü^[ØYŒ
+NÂ‚ˆÚ\ˆ\šVÌLNÂˆÛœš[Š\šKÚ^™[ÙŠ\šJKš\‹ËÉ\ËÚ\‹\
+NÂˆ[\šWÛ[ˆHİ›[Š\šJNÂ‚ˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHNÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHNÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHNÂ‚ˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHNÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÎÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHLÂˆY[XÜJ	š\Ü^[ØYÛÙ™œÙ]K˜]šX]\ËXÚ\œÙ]‹N
+NÈÙ™œÙ]
+ÏHNÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHNÂˆY[XÜJ	š\Ü^[ØYÛÙ™œÙ]K]‹N‹JNÈÙ™œÙ]
+ÏHNÂ‚ˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHXÂˆY[XÜJ	š\Ü^[ØYÛÙ™œÙ]K˜]šX]\Ë[˜]\˜[[[™İXYÙH‹ÊNÈÙ™œÙ]
+ÏHÎÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÂˆY[XÜJ	š\Ü^[ØYÛÙ™œÙ]K™[ˆ‹ŠNÈÙ™œÙ]
+ÏHÂ‚ˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHNÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÂˆY[XÜJ	š\Ü^[ØYÛÙ™œÙ]Kœš[\‹]\šH‹LJNÈÙ™œÙ]
+ÏHLNÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HH
+\šWÛ[ˆˆ
+H	ˆ‘Âˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HH\šWÛ[ˆ	ˆ‘ÂˆY[XÜJ	š\Ü^[ØYÛÙ™œÙ]K\šK\šWÛ[ŠNÈÙ™œÙ]
+ÏH\šWÛ[Â‚ˆÛÛœİÚ\ˆ
+š›Ø—Û˜[YHH[ZYØHÂˆ[›Ø—Û˜[YWÛ[ˆHİ›[Š›Ø—Û˜[YJNÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÂˆY[XÜJ	š\Ü^[ØYÛÙ™œÙ]Kš›Ø‹[˜[YH‹
+NÈÙ™œÙ]
+ÏHÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HH
+›Ø—Û˜[YWÛ[ˆˆ
+H	ˆ‘Âˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HH›Ø—Û˜[YWÛ[ˆ	ˆ‘ÂˆY[XÜJ	š\Ü^[ØYÛÙ™œÙ]K›Ø—Û˜[YK›Ø—Û˜[YWÛ[ŠNÈÙ™œÙ]
+ÏH›Ø—Û˜[YWÛ[Â‚ˆÛÛœİÚ\ˆ
+™Ø×Ù›Ü›X]Hš[XYÙKÜÙË\˜\İ\ˆÂˆ[Ø×Ù›Ü›X]Û[ˆHİ›[ŠØ×Ù›Ü›X]
+NÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHNÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHNÂˆY[XÜJ	š\Ü^[ØYÛÙ™œÙ]K™Øİ[Y[Y›Ü›X]‹M
+NÈÙ™œÙ]
+ÏHMÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HH
+Ø×Ù›Ü›X]Û[ˆˆ
+H	ˆ‘Âˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHØ×Ù›Ü›X]Û[ˆ	ˆ‘ÂˆY[XÜJ	š\Ü^[ØYÛÙ™œÙ]KØ×Ù›Ü›X]Ø×Ù›Ü›X]Û[ŠNÈÙ™œÙ]
+ÏHØ×Ù›Ü›X]Û[Â‚ˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÂ‚ˆ[YYXWÛ[ˆHİ›[ŠYYXJNÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHNÂˆY[XÜJ	š\Ü^[ØYÛÙ™œÙ]K›YYXH‹JNÈÙ™œÙ]
+ÏHNÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HH
+YYXWÛ[ˆˆ
+H	ˆ‘Âˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHYYXWÛ[ˆ	ˆ‘ÂˆY[XÜJ	š\Ü^[ØYÛÙ™œÙ]KYYXKYYXWÛ[ŠNÈÙ™œÙ]
+ÏHYYXWÛ[Â‚ˆ[Ûİ\˜ÙWÛ[ˆHİ›[ŠÙ[XİYÜÛİ\˜ÙJNÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÎÂˆY[XÜJ	š\Ü^[ØYÛÙ™œÙ]K›YYXK\Ûİ\˜ÙH‹LŠNÈÙ™œÙ]
+ÏHLÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HH
+Ûİ\˜ÙWÛ[ˆˆ
+H	ˆ‘Âˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÛİ\˜ÙWÛ[ˆ	ˆ‘ÂˆY[XÜJ	š\Ü^[ØYÛÙ™œÙ]KÙ[XİYÜÛİ\˜ÙKÛİ\˜ÙWÛ[ŠNÈÙ™œÙ]
+ÏHÛİ\˜ÙWÛ[Â‚‚ˆYˆ
+\š[Û[ÙHİ›[Šš[Û[ÙJHOH
+HÂˆš[Û[ÙHH›[Û›ØÚ›ÛYHÂˆBˆ[š[Û[ÙWÛ[ˆHİ›[Šš[Û[ÙJNÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÂˆY[XÜJ	š\Ü^[ØYÛÙ™œÙ]Kœš[XÛÛÜ‹[[ÙH‹MÊNÈÙ™œÙ]
+ÏHMÎÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HH
+š[Û[ÙWÛ[ˆˆ
+H	ˆ‘Âˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHš[Û[ÙWÛ[ˆ	ˆ‘ÂˆY[XÜJ	š\Ü^[ØYÛÙ™œÙ]Kš[Û[ÙKš[Û[ÙWÛ[ŠNÈÙ™œÙ]
+ÏHš[Û[ÙWÛ[Â‚ˆ[ØØ[[™×Û[ˆHİ›[ŠÙ[XİYÜØØ[[™ÊNÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÂˆY[XÜJ	š\Ü^[ØYÛÙ™œÙ]Kœš[\ØØ[[™È‹LÊNÈÙ™œÙ]
+ÏHLÎÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HH
+ØØ[[™×Û[ˆˆ
+H	ˆ‘Âˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHØØ[[™×Û[ˆ	ˆ‘ÂˆY[XÜJ	š\Ü^[ØYÛÙ™œÙ]KÙ[XİYÜØØ[[™ËØØ[[™×Û[ŠNÈÙ™œÙ]
+ÏHØØ[[™×Û[Â‚ˆ[]X[]Wİ˜[YHHÂˆYˆ
+İ˜Û\
+Ù[XİYÜ]X[]K™˜YŠHOH
+H]X[]Wİ˜[YHHÎÂˆ[ÙHYˆ
+İ˜Û\
+Ù[XİYÜ]X[]KšYÚŠHOH
+H]X[]Wİ˜[YHHNÂ‚ˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHŒNÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÂˆY[XÜJ	š\Ü^[ØYÛÙ™œÙ]Kœš[\]X[]H‹LÊNÈÙ™œÙ]
+ÏHLÎÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HH]X[]Wİ˜[YNÂ‚ˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHŒNÈËÈ[[Bˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHLÂˆY[XÜJ	š\Ü^[ØYÛÙ™œÙ]Kœš[\‹\™\ÛÛ][Ûˆ‹N
+NÈÙ™œÙ]
+ÏHNÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHNÈËÈÜ›ÜÜÈ™YY[š]ÈHBˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHNÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HH˜ÎÈËÈÌˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHNÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HH˜ÎÈËÈÌˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÎÂ‚ˆÚXY\ˆHX[ØÊMŠNÂˆYˆ
+ZÚXY\ŠHÂˆœ™YJ\Ü^[ØY
+NÂˆÜ\˜][Û—Ú[—Ü›ÙÜ™\ÜÈHSÑNÂˆ™]\›ˆLNÂˆBˆÛœš[ŠÚXY\‹M‹ˆ”ÔÕÚ\ÌKŒW—’Üİˆ	\×—ÛÛ[U\Nˆ\XØ][Û‹Ú\—ÛÛ[S[™İˆ	Y—ÛÛ›™Xİ[ÛˆÛÜÙW———ˆ‹ˆ\Ù™œÙ]
+ÈÙ×ÜÚ^™JNÂ‚ˆÛØÚÙ™HÛØÚÙ]
+Q—ÒS‘UÓĞÒ×ÔÕ‘PSKT“Õ×ÕÔ
+NÂˆYˆ
+ÛØÚÙ™
+HÂˆœ™YJÚXY\ŠNÂˆœ™YJ\Ü^[ØY
+NÂˆÜ\˜][Û—Ú[—Ü›ÙÜ™\ÜÈHSÑNÂˆ™]\›ˆLNÂˆBˆš[Š”Ù[XY\—ˆŠNÂˆİXİ[Y]˜[[Y[İ]HÌLNÂˆİXİ[Y]˜[Ù[™İ[Y[İ]HÌLNÂˆÙ]ÛØÚÛÜ
+ÛØÚÙ™ÓÓÔÓĞÒÑUÓ×ÔÕ•SQSË
+Ú\ŠŠI[Y[İ]Ú^™[ÙŠ[Y[İ]
+JNÂˆÙ]ÛØÚÛÜ
+ÛØÚÙ™ÓÓÔÓĞÒÑUÓ×ÔÓ‘SQSË
+Ú\ŠŠIœÙ[™İ[Y[İ]Ú^™[ÙŠÙ[™İ[Y[İ]
+JNÂˆY[\Ù]
+	œÙ\—ØY‹Ú^™[ÙŠÙ\—ØYŠJNÂˆÙ\—ØY‹œÚ[—Ù˜[Z[HHQ—ÒS‘UÂˆÙ\—ØY‹œÚ[—ÜÜHÛœÊÜ
+NÂˆÙ\—ØY‹œÚ[—ØY‹œ×ØYˆH[™]ØYŠ
+Õ”ŠZ\
+NÂˆYˆ
+ÛÛ›™Xİ
+ÛØÚÙ™
+İXİÛØÚØYŠŠIœÙ\—ØY‹Ú^™[ÙŠÙ\—ØYŠJH
+HÂˆÛÜÙTÛØÚÙ]
+ÛØÚÙ™
+NÂˆœ™YJÚXY\ŠNÂˆœ™YJ\Ü^[ØY
+NÂˆÜ\˜][Û—Ú[—Ü›ÙÜ™\ÜÈHSÑNÂˆ™]\›ˆLNÂˆBˆš[Š”Ù[T^[ØY
+	Y]\ÊWˆ‹Ù™œÙ]
+NÂˆš[Š•ˆÛÛ[ˆ	Yˆ
+XY\ˆ	Y‹ÙÎˆ	Y
+Wˆ‹Ù™œÙ]
+ÈÙ×ÜÚ^™KÙ™œÙ]Ù×ÜÚ^™JNÂˆš[Š”Ù[™[™ÈÑÈ]H
+	Y]\ÊK‹‹—ˆ‹Ù×ÜÚ^™JNÂˆYˆ
+Ù[™
+ÛØÚÙ™ÚXY\‹İ›[ŠÚXY\ŠK
+HˆÙ[™
+ÛØÚÙ™
+Ú\ˆ
+ŠZ\Ü^[ØYÙ™œÙ]
+HˆØY™WÜÙ[™
+ÛØÚÙ™
+Ú\ˆ
+Š\Ù×Ù]KÙ×ÜÚ^™JH
+HÂˆÛÜÙTÛØÚÙ]
+ÛØÚÙ™
+NÂˆœ™YJÚXY\ŠNÂˆœ™YJ\Ü^[ØY
+NÂˆÜ\˜][Û—Ú[—Ü›ÙÜ™\ÜÈHSÑNÂˆ™]\›ˆLNÂˆB‚ˆœ™YJÚXY\ŠNÂˆœ™YJ\Ü^[ØY
+NÂ‚ˆ™\ÜÛœÙWØY™™\ˆHX[ØÊMŠNÂˆYˆ
+\™\ÜÛœÙWØY™™\ŠHÂˆÛÜÙTÛØÚÙ]
+ÛØÚÙ™
+NÂˆÜ\˜][Û—Ú[—Ü›ÙÜ™\ÜÈHSÑNÂˆ™]\›ˆLNÂˆB‚ˆÂˆ[İ[Ü™XÙZ]™YHÂˆ[XY\—Üİ\HÂˆ[›ÙWÛÙ™ˆHLNÂˆ[][\Â‚ˆ›Üˆ
+][\HÈ][\LÈ][\
+ÊÊHÂˆÜÚ^™Wİ™XÙZ]™YH™XİŠÛØÚÙ™™\ÜÛœÙWØY™™\ˆ
+Èİ[Ü™XÙZ]™YˆMˆHHHİ[Ü™XÙZ]™Y
+NÂˆYˆ
+™XÙZ]™YH
+Hœ™XZÎÂˆİ[Ü™XÙZ]™Y
+ÏH
+[
+\™XÙZ]™YÂˆ™\ÜÛœÙWØY™™\–İİ[Ü™XÙZ]™YHH	×	ÎÂˆ›ÙWÛÙ™ˆH\ÚÙš[™Ø›ÙJ™\ÜÛœÙWØY™™\‹İ[Ü™XÙZ]™YXY\—Üİ\
+NÂˆYˆ
+›ÙWÛÙ™ˆ
+HÛÛ[YNÂˆÂˆ[İ]\ÈH\ÚÜİ]\Ê™\ÜÛœÙWØY™™\‹İ[Ü™XÙZ]™YXY\—Üİ\
+NÂˆYˆ
+İ]\ÈHL	‰ˆİ]\ÈŒ
+HÂˆXY\—Üİ\H›ÙWÛÙ™Âˆ›ÙWÛÙ™ˆHLNÂˆÛÛ[YNÂˆBˆBˆœ™XZÎÂˆB‚ˆYˆ
+›ÙWÛÙ™ˆH
+HÂˆÚ\ˆ
+š\Üİ\H™\ÜÛœÙWØY™™\ˆ
+È›ÙWÛÙ™Âˆš[Š’Tİ]\Îˆ	L	Lˆ‹\Üİ\Ì—K\Üİ\Ì×JNÂˆH[ÙHÂˆš[Š“›È™\ÜÛœÙHÜˆ™XÙZ]™H[Y[İ]—ˆŠNÂˆBˆB‚ˆœ™YJ™\ÜÛœÙWØY™™\ŠNÂˆÛÜÙTÛØÚÙ]
+ÛØÚÙ™
+NÂˆÜ\˜][Û—Ú[—Ü›ÙÜ™\ÜÈHSÑNÂˆ™]\›ˆÂŸB‚‹ËÈ\]YÙ[™Üš[Ú›ØˆÈÙ[™HÙ[XİY˜^H
+YYXK\Ûİ\˜ÙJH[™š[[ÙBš[Ù[™Üš[Ú›ØŠÛÛœİÚ\ˆ
+š\[ÜÛÛœİÚ\ˆ
+™š[[˜[YKÛÛœİÚ\ˆ
+›YYXKÛÛœİÚ\ˆ
+œš[Û[ÙJHÂˆYˆ
+Ü\˜][Û—Ú[—Ü›ÙÜ™\ÜÊHÂˆš[Š“Ü\˜][Ûˆ[™XYH[ˆ›ÙÜ™\ÜËX\ÙHØZ]‹‹—ˆŠNÂˆ™]\›ˆLNÂˆBˆÜ\˜][Û—Ú[—Ü›ÙÜ™\ÜÈH•QNÂ‚ˆËÈš[™HÙ[XİYYYXIÜÈ˜^BˆÛÛœİÚ\ˆ
+œÙ[XİYÜÛİ\˜ÙHH˜]]ÈÈËÈY˜][˜[˜XÚÂˆ›Üˆ
+[HHÈH[WÛYYXWİ˜^WÛX\[™ÜÎÈJÊÊHÂˆYˆ
+İ˜Û\
+YYXWİ˜^WÛX\ÚWK›YYXKYYXJHOH
+HÂˆÙ[XİYÜÛİ\˜ÙHHYYXWİ˜^WÛX\ÚWKœÛİ\˜ÙNÂˆœ™XZÎÂˆBˆBˆš[Š”Ù[XİYYYXNˆ	\ËÛİ\˜ÙNˆ	\Ëš[[ÙNˆ	\×ˆ‹YYXKÙ[XİYÜÛİ\˜ÙKš[Û[ÙJNÂ‚ˆİXİÛØÚØY—Ú[ˆÙ\—ØYÂˆ[ÛØÚÙ™HLNÂˆ[œÚYÛ™YÚ\ˆ
+š\Ü^[ØYH•SÂˆ[Ù™œÙ]HÂˆ[œÚYÛ™YÚ\ˆ
+™š[WÙ]HH•SÂˆ’SH
+™š[HH•SÂˆÚ\ˆ
+šÚXY\ˆH•SÂˆÚ\ˆ
+œ™\ÜÛœÙWØY™™\ˆH•SÈËÈ[˜[ZXØ[H[ØØ]Bˆ[™\İ[HLNÂ‚ˆËÈ[ØØ]HT^[ØY[˜[ZXØ[Bˆ\Ü^[ØYHX[ØÊŒ
+NÂˆYˆ
+Z\Ü^[ØY
+HÂˆš[Š‘˜Z[YÈ[ØØ]HY[[ÜH›ÜˆT^[ØYˆŠNÂˆÜ\˜][Û—Ú[—Ü›ÙÜ™\ÜÈHSÑNÂˆ™]\›ˆLNÂˆBˆY[\Ù]
+\Ü^[ØYŒ
+NÂ‚ˆÚ\ˆ\šVÌLNÂˆÛœš[Š\šKÚ^™[ÙŠ\šJKš\‹ËÉ\ËÚ\‹\
+NÂˆ[\šWÛ[ˆHİ›[Š\šJNÂ‚ˆËÈÜ[ˆHš[Bˆš[HH›Ü[Šš[[˜[YKœ˜ˆŠNÂˆYˆ
+Yš[JHÂˆš[Š‘˜Z[YÈÜ[ˆš[Nˆ	\×ˆ‹š[[˜[YJNÂˆœ™YJ\Ü^[ØY
+NÂˆÜ\˜][Û—Ú[—Ü›ÙÜ™\ÜÈHSÑNÂˆ™]\›ˆLNÂˆB‚ˆËÈÙ]š[HÚ^™BˆœÙYZÊš[KÑQR×ÑS‘
+NÂˆÛ™Èš[WÜÚ^™HH[
+š[JNÂˆœÙYZÊš[KÑQR×ÔÑU
+NÂ‚ˆËÈ[ØØ]HY™™\ˆ›Üˆš[H]Bˆš[WÙ]HHX[ØÊš[WÜÚ^™JNÂ‚ˆYˆ
+š[WÜÚ^™HH
+HÂˆš[Š’[˜[YÜˆ[\Hš[WˆŠNÂˆ˜ÛÜÙJš[JNÂˆœ™YJ\Ü^[ØY
+NÂˆÜ\˜][Û—Ú[—Ü›ÙÜ™\ÜÈHSÑNÂˆ™]\›ˆLNÂˆB‚ˆYˆ
+Yš[WÙ]JHÂˆš[Š‘˜Z[YÈ[ØØ]HY[[ÜH›Üˆš[H]WˆŠNÂˆ˜ÛÜÙJš[JNÂˆœ™YJ\Ü^[ØY
+NÂˆÜ\˜][Û—Ú[—Ü›ÙÜ™\ÜÈHSÑNÂˆ™]\›ˆLNÂˆB‚ˆËÈ™XYHš[Bˆœ™XY
+š[WÙ]KKš[WÜÚ^™Kš[JNÂˆ˜ÛÜÙJš[JNÂˆš[HH•SÂ‚ˆËÈZ[T^[ØYˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHNÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHNÈËÈT™\œÚ[ÛˆKŒBˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈËÈš[R›ØˆÜ\˜][Û‚ˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHNÈËÈ™\]Y\İQ‚ˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHNÈËÈÜ\˜][Ûˆ]šX]\ÈÜ›İ\ˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÎÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHLÂˆY[XÜJ	š\Ü^[ØYÛÙ™œÙ]K˜]šX]\ËXÚ\œÙ]‹N
+NÈÙ™œÙ]
+ÏHNÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHNÂˆY[XÜJ	š\Ü^[ØYÛÙ™œÙ]K]‹N‹JNÈÙ™œÙ]
+ÏHNÂ‚ˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHXÂˆY[XÜJ	š\Ü^[ØYÛÙ™œÙ]K˜]šX]\Ë[˜]\˜[[[™İXYÙH‹ÊNÈÙ™œÙ]
+ÏHÎÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÂˆY[XÜJ	š\Ü^[ØYÛÙ™œÙ]K™[ˆ‹ŠNÈÙ™œÙ]
+ÏHÂ‚ˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHNÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÂˆY[XÜJ	š\Ü^[ØYÛÙ™œÙ]Kœš[\‹]\šH‹LJNÈÙ™œÙ]
+ÏHLNÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HH
+\šWÛ[ˆˆ
+H	ˆ‘Âˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HH\šWÛ[ˆ	ˆ‘ÂˆY[XÜJ	š\Ü^[ØYÛÙ™œÙ]K\šK\šWÛ[ŠNÈÙ™œÙ]
+ÏH\šWÛ[Â‚ˆÛÛœİÚ\ˆ
+š›Ø—Û˜[YHH[ZYØHÂˆ[›Ø—Û˜[YWÛ[ˆHİ›[Š›Ø—Û˜[YJNÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÂˆY[XÜJ	š\Ü^[ØYÛÙ™œÙ]Kš›Ø‹[˜[YH‹
+NÈÙ™œÙ]
+ÏHÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HH
+›Ø—Û˜[YWÛ[ˆˆ
+H	ˆ‘Âˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HH›Ø—Û˜[YWÛ[ˆ	ˆ‘ÂˆY[XÜJ	š\Ü^[ØYÛÙ™œÙ]K›Ø—Û˜[YK›Ø—Û˜[YWÛ[ŠNÈÙ™œÙ]
+ÏH›Ø—Û˜[YWÛ[Â‚ˆÛÛœİÚ\ˆ
+™Ø×Ù›Ü›X]Hš[XYÙKÚœYÈÂˆ[Ø×Ù›Ü›X]Û[ˆHİ›[ŠØ×Ù›Ü›X]
+NÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHNÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHNÂˆY[XÜJ	š\Ü^[ØYÛÙ™œÙ]K™Øİ[Y[Y›Ü›X]‹M
+NÈÙ™œÙ]
+ÏHMÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HH
+Ø×Ù›Ü›X]Û[ˆˆ
+H	ˆ‘Âˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHØ×Ù›Ü›X]Û[ˆ	ˆ‘ÂˆY[XÜJ	š\Ü^[ØYÛÙ™œÙ]KØ×Ù›Ü›X]Ø×Ù›Ü›X]Û[ŠNÈÙ™œÙ]
+ÏHØ×Ù›Ü›X]Û[Â‚ˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈËÈ›Øˆ[\]H]šX]\ÈÜ›İ\‚ˆ[YYXWÛ[ˆHİ›[ŠYYXJNÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈËÈÙ^]ÛÜ™ˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHNÂˆY[XÜJ	š\Ü^[ØYÛÙ™œÙ]K›YYXH‹JNÈÙ™œÙ]
+ÏHNÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HH
+YYXWÛ[ˆˆ
+H	ˆ‘Âˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHYYXWÛ[ˆ	ˆ‘ÂˆY[XÜJ	š\Ü^[ØYÛÙ™œÙ]KYYXKYYXWÛ[ŠNÈÙ™œÙ]
+ÏHYYXWÛ[Â‚ˆËÈYYYXK\Ûİ\˜ÙH]šX]Bˆ[Ûİ\˜ÙWÛ[ˆHİ›[ŠÙ[XİYÜÛİ\˜ÙJNÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈËÈÙ^]ÛÜ™ˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÎÂˆY[XÜJ	š\Ü^[ØYÛÙ™œÙ]K›YYXK\Ûİ\˜ÙH‹LŠNÈÙ™œÙ]
+ÏHLÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HH
+Ûİ\˜ÙWÛ[ˆˆ
+H	ˆ‘Âˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÛİ\˜ÙWÛ[ˆ	ˆ‘ÂˆY[XÜJ	š\Ü^[ØYÛÙ™œÙ]KÙ[XİYÜÛİ\˜ÙKÛİ\˜ÙWÛ[ŠNÈÙ™œÙ]
+ÏHÛİ\˜ÙWÛ[Â‹Ê‚ˆYˆ
+\š[Û[ÙHİ›[Šš[Û[ÙJHOH
+HÂˆš[Š’[˜[Yš[[ÙH
+[\JK˜[[™È˜XÚÈÈ	Û[Û›ØÚ›ÛYI×ˆŠNÂˆš[Û[ÙHH›[Û›ØÚ›ÛYHÂˆBˆËÈYš[XÛÛÜ‹[[ÙH]šX]Bˆ[š[Û[ÙWÛ[ˆHİ›[Šš[Û[ÙJNÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈËÈÙ^]ÛÜ™ˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÂˆY[XÜJ	š\Ü^[ØYÛÙ™œÙ]Kœš[XÛÛÜ‹[[ÙH‹MÊNÈÙ™œÙ]
+ÏHMÎÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HH
+š[Û[ÙWÛ[ˆˆ
+H	ˆ‘Âˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHš[Û[ÙWÛ[ˆ	ˆ‘ÂˆY[XÜJ	š\Ü^[ØYÛÙ™œÙ]Kš[Û[ÙKš[Û[ÙWÛ[ŠNÈÙ™œÙ]
+ÏHš[Û[ÙWÛ[Â‚ˆËÔØØ[[™ÈÜ[ÛœÂˆ[ØØ[[™×Û[ˆHİ›[ŠÙ[XİYÜØØ[[™ÊNÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈËÈÙ^]ÛÜ™
+›Üˆš[\ØØ[[™ÊBˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÂˆY[XÜJ	š\Ü^[ØYÛÙ™œÙ]Kœš[\ØØ[[™È‹LÊNÈÙ™œÙ]
+ÏHLÎÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HH
+ØØ[[™×Û[ˆˆ
+H	ˆ‘Âˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHØØ[[™×Û[ˆ	ˆ‘ÂˆY[XÜJ	š\Ü^[ØYÛÙ™œÙ]KÙ[XİYÜØØ[[™ËØØ[[™×Û[ŠNÈÙ™œÙ]
+ÏHØØ[[™×Û[Â‚ˆËÈ]X[]HÜ[ÛœÂˆ[]X[]Wİ˜[YHHÈËÈY˜][È›Ü›X[ˆYˆ
+İ˜Û\
+Ù[XİYÜ]X[]K™˜YŠHOH
+H]X[]Wİ˜[YHHÎÂˆ[ÙHYˆ
+İ˜Û\
+Ù[XİYÜ]X[]KšYÚŠHOH
+H]X[]Wİ˜[YHHNÂ‚ˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHŒNÈËÈ[[Bˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÂˆY[XÜJ	š\Ü^[ØYÛÙ™œÙ]Kœš[\]X[]H‹LÊNÈÙ™œÙ]
+ÏHLÎÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÂˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÈ\Ü^[ØYÛÙ™œÙ]
+Ê×HH]X[]Wİ˜[YNÂŠ‹Âˆ\Ü^[ØYÛÙ™œÙ]
+Ê×HHÎÈËÈ[™Ùˆ]šX]\Â‚ˆÚXY\ˆHX[ØÊMŠNÂˆYˆ
+ZÚXY\ŠHÂˆš[Š‘˜Z[YÈ[ØØ]HY[[ÜH›ÜˆXY\—ˆŠNÂˆœ™YJš[WÙ]JNÂˆœ™YJ\Ü^[ØY
+NÂˆÜ\˜][Û—Ú[—Ü›ÙÜ™\ÜÈHSÑNÂˆ™]\›ˆLNÂˆBˆÛœš[ŠÚXY\‹M‹ˆ”ÔÕÚ\ÌKŒW—’Üİˆ	\×—ÛÛ[U\Nˆ\XØ][Û‹Ú\—ÛÛ[S[™İˆ	Y—ÛÛ›™Xİ[ÛˆÛÜÙW———ˆ‹ˆ\Ù™œÙ]
+Èš[WÜÚ^™JNÂ‚ˆš[Š”Ù[™[™È”QÈÈš[\ˆ]	\Ë‹‹—ˆ‹\
+NÂˆÛØÚÙ™HÛØÚÙ]
+Q—ÒS‘UÓĞÒ×ÔÕ‘PSKT“Õ×ÕÔ
+NÂˆYˆ
+ÛØÚÙ™
+HÂˆš[Š”ÛØÚÙ]Ü™X][Ûˆ˜Z[Y—ˆŠNÂˆœ™YJÚXY\ŠNÂˆœ™YJš[WÙ]JNÂˆœ™YJ\Ü^[ØY
+NÂˆÜ\˜][Û—Ú[—Ü›ÙÜ™\ÜÈHSÑNÂˆ™]\›ˆLNÂˆB‚ˆİXİ[Y]˜[[Y[İ]HÌLNÈËÈL\ÙXÛÛ™[Y[İ]ˆYˆ
+Ù]ÛØÚÛÜ
+ÛØÚÙ™ÓÓÔÓĞÒÑUÓ×ÔÕ•SQSË
+Ú\ŠŠI[Y[İ]Ú^™[ÙŠ[Y[İ]
+JH
+HÂˆš[Š‘˜Z[YÈÙ]ÛØÚÙ][Y[İ]ˆŠNÂˆÛÜÙTÛØÚÙ]
+ÛØÚÙ™
+NÂˆœ™YJÚXY\ŠNÂˆœ™YJš[WÙ]JNÂˆœ™YJ\Ü^[ØY
+NÂˆÜ\˜][Û—Ú[—Ü›ÙÜ™\ÜÈHSÑNÂˆ™]\›ˆLNÂˆB‚ˆY[\Ù]
+	œÙ\—ØY‹Ú^™[ÙŠÙ\—ØYŠJNÂˆÙ\—ØY‹œÚ[—Ù˜[Z[HHQ—ÒS‘UÂˆÙ\—ØY‹œÚ[—ÜÜHÛœÊÜ
+NÂˆÙ\—ØY‹œÚ[—ØY‹œ×ØYˆH[™]ØYŠ
+Õ”ŠZ\
+NÂˆYˆ
+Ù\—ØY‹œÚ[—ØY‹œ×ØYˆOHSQ—Ó“Ó‘JHÂˆš[Š’[˜[YTY™\ÜÎˆ	\×ˆ‹\
+NÂˆÛÜÙTÛØÚÙ]
+ÛØÚÙ™
+NÂˆœ™YJÚXY\ŠNÂˆœ™YJš[WÙ]JNÂˆœ™YJ\Ü^[ØY
+NÂˆÜ\˜][Û—Ú[—Ü›ÙÜ™\ÜÈHSÑNÂˆ™]\›ˆLNÂˆB‚ˆYˆ
+ÛÛ›™Xİ
+ÛØÚÙ™
+İXİÛØÚØYŠŠIœÙ\—ØY‹Ú^™[ÙŠÙ\—ØYŠJH
+HÂˆš[Š‘˜Z[YÈÛÛ›™XİÈš[\‹—ˆŠNÂˆÛÜÙTÛØÚÙ]
+ÛØÚÙ™
+NÂˆœ™YJÚXY\ŠNÂˆœ™YJš[WÙ]JNÂˆœ™YJ\Ü^[ØY
+NÂˆÜ\˜][Û—Ú[—Ü›ÙÜ™\ÜÈHSÑNÂˆ™]\›ˆLNÂˆB‚ˆËÈ›ØÙ\ÜÈÕRH]™[ÂˆYˆ
+Ú[™İÊHÂˆİXİ[ZSY\ÜØYÙH
+š[\ÙÎÂˆÚ[H
+
+[\ÙÈHÕÑÙ]S\ÙÊÚ[™İËO•\Ù\”Ü
+JJHÂˆÕÔ™\RS\ÙÊ[\ÙÊNÂˆBˆB‚ˆËÈÙ[™H]BˆYˆ
+Ù[™
+ÛØÚÙ™ÚXY\‹İ›[ŠÚXY\ŠK
+HˆÙ[™
+ÛØÚÙ™
+Ú\ˆ
+ŠZ\Ü^[ØYÙ™œÙ]
+HˆÙ[™
+ÛØÚÙ™š[WÙ]Kš[WÜÚ^™K
+H
+HÂˆš[Š‘˜Z[YÙ[™[™È]K—ˆŠNÂˆÛÜÙTÛØÚÙ]
+ÛØÚÙ™
+NÂˆœ™YJÚXY\ŠNÂˆœ™YJš[WÙ]JNÂˆœ™YJ\Ü^[ØY
+NÂˆÜ\˜][Û—Ú[—Ü›ÙÜ™\ÜÈHSÑNÂˆ™]\›ˆLNÂˆB‚ˆœ™YJÚXY\ŠNÂˆœ™YJš[WÙ]JNÂˆœ™YJ\Ü^[ØY
+NÂ‚ˆš[Š•ØZ][™È›Üˆ™\ÜÛœÙK‹‹—ˆŠNÂˆËÈ[˜[ZXØ[H[ØØ]H™\ÜÛœÙWØY™™\‚ˆ™\ÜÛœÙWØY™™\ˆHX[ØÊMŠNÂˆYˆ
+\™\ÜÛœÙWØY™™\ŠHÂˆš[Š‘˜Z[YÈ[ØØ]HY[[ÜH›Üˆ™\ÜÛœÙHY™™\—ˆŠNÂˆÛÜÙTÛØÚÙ]
+ÛØÚÙ™
+NÂˆÜ\˜][Û—Ú[—Ü›ÙÜ™\ÜÈHSÑNÂˆ™]\›ˆLNÂˆB‚ˆÂˆ[İ[Ü™XÙZ]™YHÂˆ[XY\—Üİ\HÂˆ[›ÙWÛÙ™ˆHLNÂˆ[][\Â‚ˆ›Üˆ
+][\HÈ][\LÈ][\
+ÊÊHÂˆÜÚ^™Wİ™XÙZ]™YH™XİŠÛØÚÙ™™\ÜÛœÙWØY™™\ˆ
+Èİ[Ü™XÙZ]™YˆMˆHHHİ[Ü™XÙZ]™Y
+NÂˆYˆ
+™XÙZ]™YH
+Hœ™XZÎÂˆİ[Ü™XÙZ]™Y
+ÏH
+[
+\™XÙZ]™YÂˆ™\ÜÛœÙWØY™™\–İİ[Ü™XÙZ]™YHH	×	ÎÂˆ›ÙWÛÙ™ˆH\ÚÙš[™Ø›ÙJ™\ÜÛœÙWØY™™\‹İ[Ü™XÙZ]™YXY\—Üİ\
+NÂˆYˆ
+›ÙWÛÙ™ˆ
+HÛÛ[YNÂˆÂˆ[İ]\ÈH\ÚÜİ]\Ê™\ÜÛœÙWØY™™\‹İ[Ü™XÙZ]™YXY\—Üİ\
+NÂˆYˆ
+İ]\ÈHL	‰ˆİ]\ÈŒ
+HÂˆXY\—Üİ\H›ÙWÛÙ™Âˆ›ÙWÛÙ™ˆHLNÂˆÛÛ[YNÂˆBˆBˆœ™XZÎÂˆB‚ˆYˆ
+İ[Ü™XÙZ]™YOH
+HÂˆš[Š“›È™\ÜÛœÙHÜˆ™XÙZ]™H[Y[İ]—ˆŠNÂˆÛÜÙTÛØÚÙ]
+ÛØÚÙ™
+NÂˆœ™YJ™\ÜÛœÙWØY™™\ŠNÂˆÜ\˜][Û—Ú[—Ü›ÙÜ™\ÜÈHSÑNÂˆ™]\›ˆLNÂˆB‚ˆYˆ
+›ÙWÛÙ™ˆH
+HÂˆÚ\ˆ
+š\Üİ\H™\ÜÛœÙWØY™™\ˆ
+È›ÙWÛÙ™Âˆš[Š’Tİ]\Îˆ	L	Lˆ‹\Üİ\Ì—K\Üİ\Ì×JNÂˆH[ÙHÂˆš[ŠÛİ[›İš[™T™\ÜÛœÙH^[ØY—ˆŠNÂˆBˆB‚ˆœ™YJ™\ÜÛœÙWØY™™\ŠNÂˆÛÜÙTÛØÚÙ]
+ÛØÚÙ™
+NÂˆÜ\˜][Û—Ú[—Ü›ÙÜ™\ÜÈHSÑNÂˆš[ŠœÙ[™Üš[Ú›ØˆÛÛ\]YİXØÙ\ÜÙ[WˆŠNÂˆ™]\›ˆÂŸB‚‹ËÈ[˜İ[ÛˆÈÜ™X]H[ØYÛÛÈØYÙ]ÂœİXİØYÙ]
+˜Ü™X]P[ØYÙ]ÊİXİØYÙ]
+Š™Û\İ‹›ÚY
+šKUÓÔ‘Ü›Ü™\ŠHÂˆİXİ™]ÑØYÙ]™ÎÂˆİXİØYÙ]
+™ØYÂ‚ˆËÈ[š]X[^™HHØYÙ]\İˆØYHÜ™X]PÛÛ^
+Û\İŠNÂˆYˆ
+YØY
+HÂˆš[Š‘˜Z[YÈÜ™X]HØYÙ]ÛÛ^ˆŠNÂˆ™]\›ˆ•SÂˆB‚ˆËÈÙ]\H™]ÑØYÙ]İXİ\™Bˆ™Ë›™×Õ^]ˆH	•Ü^Âˆ™Ë›™×Õš\İX[[™›ÈHšNÂˆ™Ë›™×Ñ›YÜÈH‘×ÒQÒP‘SÂ‚ˆËÈ[š]Ù[XİÜˆHÚXÚØ]™Yš[\ˆ›Ùš[H
+S•“Z[’S•Õ[š]ŠH\ÂˆËÈ™Z[™ÈšY]ÙYÙY]YˆÛ›H[š]\ÈÚ]Hš]™\ˆXİX[Hš[ÂˆËÈÚ]ÈİÚ]Ú[™È\™H™[ØYÈH™\İÙˆH›Ü›Hœ›ÛH][š]	ÜÂˆËÈØ]™Yš[K‚ˆ™Ë›™×ÓYYÙHHÂˆ™Ë›™×ÕÜYÙHHÈ
+ÈÜ›Ü™\Âˆ™Ë›™×ÕÚYHÌÂˆ™Ë›™×ÒZYÚHLÂˆ™Ë›™×ÑØYÙ]^H
+Õ”ŠH•[š]ˆÂˆ™Ë›™×ÑØYÙ]QHĞQÕS’UÑ“ÔÕÓÂˆØYHÜ™X]QØYÙ]
+ÖPÓWÒÒS‘ØY	›™ËˆÕÖWÓX™[Ë
+SÓ‘Ê][š]Ù›ÜİÛ—ÛX™[ËˆÕÖWĞXİ]™K
+SÓ‘ÊXİ\œ™[İ[š]Ú[™^ˆQ×ÑÓ‘JNÂˆYˆ
+YØY
+HÂˆš[Š‘˜Z[YÈÜ™X]H[š]›ÜİÛ—ˆŠNÂˆ™]\›ˆ•SÂˆB‚ˆËÈÛÜY\ÈHÙ[XİY[š]	ÜÈØ]™YÙ][™ÜÈİ™\ˆ[š]HÛ›HÛİˆËÈHš]™\ˆXİX[H™XYÈ]š[[YHHH˜XİXØ[Ø^HÂˆËÈœİÚ]ÚÚXÚš[\ˆ\ÈXİ]™HˆÚ]İ]İXÚ[™Èš]™\ˆÛÙK‚ˆ™Ë›™×ÓYYÙHHÂˆ™Ë›™×ÕÚYHLÂˆ™Ë›™×ÒZYÚHLÂˆ™Ë›™×ÕÜYÙHHÈ
+ÈÜ›Ü™\Âˆ™Ë›™×ÑØYÙ]^H
+Õ”ŠH—ĞXİ]˜]HÂˆ™Ë›™×ÑØYÙ]QHĞQÔÑUĞPÕU‘WĞ•UÓÂˆ™Ë›™×Ñ›YÜÈHÂˆØYHÜ™X]QØYÙ]
+•UÓ—ÒÒS‘ØY	›™ËˆÕÕ[™\œØÛÜ™K	×ÉËˆQ×ÑÓ‘JNÂˆYˆ
+YØY
+HÂˆš[Š‘˜Z[YÈÜ™X]HXİ]˜]H]Û—ˆŠNÂˆ™]\›ˆ•SÂˆBˆ™Ë›™×Ñ›YÜÈH‘×ÒQÒP‘SÂ‚ˆËÈTİš[™ÈØYÙ]ˆ™Ë›™×ÓYYÙHHMÂˆ™Ë›™×ÕÜYÙHHŒH
+ÈÜ›Ü™\Âˆ™Ë›™×ÕÚYHÂˆ™Ë›™×ÒZYÚHLÂˆÊˆ›İ‹‹‹’TÒÜİˆ›İ\ÈšY[[™Hš]™\ˆ™\ÛÛ™H]Ú]ˆ
+ˆ[™]ØYŠ
+HÛ›KÛÈHÜİ˜[YHZÙHœš[\‹›ØØ[ˆÚ[[H˜Z[Âˆ
+ˆ˜]\ˆ[ˆ™Z[™ÈÛÚÙY\ˆX™[X]Ú\ÈXİX[™Z]š[İ\ˆ[œİXYˆ
+ˆÙˆ[\Z[™È”ËÛQ”È˜[YHİ\Ü]Ù\Û‰İ^\İˆ
+‹Âˆ™Ë›™×ÑØYÙ]^H
+Õ”ŠH—Ôš[\ˆTˆÂˆ™Ë›™×ÑØYÙ]QHĞQÒTÔÕ’S‘ÎÂˆØYHÜ™X]QØYÙ]
+Õ’S‘×ÒÒS‘ØY	›™ËˆÕÕÔİš[™Ë
+SÓ‘ÊZ\ØY™™\‹ˆÕÕÓX^Ú\œËÚ^™[ÙŠ\ØY™™\ŠHHKˆĞWÒ[[YYX]K•QKˆÕÕ[™\œØÛÜ™K	×ÉËˆĞPÕÔ‘S‘T’Q–K•QKˆQ×ÑÓ‘JNÂˆYˆ
+YØY
+HÂˆš[Š‘˜Z[YÈÜ™X]HTİš[™ÈØYÙ]ˆŠNÂˆ™]\›ˆ•SÂˆB‚‚‚ˆËÈ]Y\H]ÛˆHÚ\™\ÈHš[\ˆ[Ù[›İÈ[ˆHÛÛ\Xİ^[İ]‚ˆ™Ë›™×ÓYYÙHHÂˆ™Ë›™×ÕÚYHLÂˆ™Ë›™×ÒZYÚHLÂˆ™Ë›™×ÕÜYÙHHÎH
+ÈÜ›Ü™\Âˆ™Ë›™×ÑØYÙ]^H
+Õ”ŠH—Ô]Y\HÂˆ™Ë›™×ÑØYÙ]QHĞQÔUQT–WĞ•UÓÂˆ™Ë›™×Ñ›YÜÈHÂˆØYHÜ™X]QØYÙ]
+•UÓ—ÒÒS‘ØY	›™ËˆÕÕ[™\œØÛÜ™K	×ÉËˆQ×ÑÓ‘JNÂˆYˆ
+YØY
+HÂˆš[Š‘˜Z[YÈÜ™X]H]Y\H]Û—ˆŠNÂˆ™]\›ˆ•SÂˆB‚ˆËÈš[\ˆ[Ù[
+™XY[Û›H\Ü^JHHÚİÜÈš[\‹[XZÙKX[™[[Ù[ˆËÈœ›ÛHH\İİXØÙ\ÜÙ[]Y\H›Üˆ\È[š]ˆ›İ\Ù\‹YY]X›NÂˆËÈ\œÚ\İYšXHSÑSH[ˆH[š]	ÜÈİÛˆÛÛ™šYÈš[HÛˆØ]™K‚ˆ™Ë›™×ÓYYÙHHLÂˆ™Ë›™×ÕÜYÙHHÎH
+ÈÜ›Ü™\Âˆ™Ë›™×ÕÚYHÂˆ™Ë›™×ÒZYÚHLÂˆ™Ë›™×ÑØYÙ]^H
+Õ”ŠH”š[\ˆ[Ù[ˆÂˆ™Ë›™×ÑØYÙ]QHĞQÓSÑSÑTÔVNÂˆØYHÜ™X]QØYÙ]
+VÒÒS‘ØY	›™ËˆÕÕ^
+SÓ‘Ê\š[\—ÛXZÙWÛ[Ù[ˆÕÒ\İYšXØ][Û‹Õ—ÓQ•ˆQ×ÑÓ‘JNÂˆYˆ
+YØY
+HÂˆš[Š‘˜Z[YÈÜ™X]H[Ù[\Ü^WˆŠNÂˆ™]\›ˆ•SÂˆB‚ˆËÈš]™\ˆT]ˆ™Ë›™×ÓYYÙHHLÌÂˆ™Ë›™×ÕÜYÙHHMÈ
+ÈÜ›Ü™\Âˆ™Ë›™×ÕÚYHLÂˆ™Ë›™×ÒZYÚHLÂˆ™Ë›™×ÑØYÙ]^H
+Õ”ŠH’TÔ]ˆÂˆ™Ë›™×ÑØYÙ]QHĞQÒTÔUÂˆØYHÜ™X]QØYÙ]
+Õ’S‘×ÒÒS‘ØY	›™ËˆÕÕÔİš[™Ë
+SÓ‘ÊYš]™\—Ü]ØY™™\‹ˆÕÕÓX^Ú\œËÚ^™[ÙŠš]™\—Ü]ØY™™\ŠHHKˆĞWÒ[[YYX]K•QKˆÕÕ[™\œØÛÜ™K	×ÉËˆĞPÕÔ‘S‘T’Q–K•QKˆQ×ÑÓ‘JNÂˆYˆ
+YØY
+HÂˆš[Š‘˜Z[YÈÜ™X]HT]ØYÙ]ˆŠNÂˆ™]\›ˆ•SÂˆB‚ˆËÈ\ØÛİ™\ˆ]ÛˆHÚ\™\ÈHš[\ˆT›İÈ[ˆHÛÛ\Xİ^[İ]‚ˆËÈ™\Ù\™HH™]š[İ\ÈÜYÙHY\Ø\™ÈÛÈ\È\ÛÛ]Y]ÛˆÙ\ÂˆËÈ›İY™™XİHİ]H\ÙYH]\ˆØYÙ]Ù]\‚ˆÂˆUÓÔ‘›İÌ—İÜH™Ë›™×ÕÜYÙNÂˆ™Ë›™×ÓYYÙHHÂˆ™Ë›™×ÕÜYÙHHŒH
+ÈÜ›Ü™\Âˆ™Ë›™×ÕÚYHLÂˆ™Ë›™×ÒZYÚHLÂˆ™Ë›™×ÑØYÙ]^H
+Õ”ŠH—Ñ\ØÛİ™\ˆÂˆ™Ë›™×ÑØYÙ]QHĞQÑTĞÓÕ‘T—Ğ•UÓÂˆ™Ë›™×Ñ›YÜÈHÂˆØYHÜ™X]QØYÙ]
+•UÓ—ÒÒS‘ØY	›™ËˆÕÕ[™\œØÛÜ™K	×ÉËˆQ×ÑÓ‘JNÂˆYˆ
+YØY
+HÂˆš[Š‘˜Z[YÈÜ™X]H\ØÛİ™\ˆ]Û—ˆŠNÂˆ™]\›ˆ•SÂˆBˆ™Ë›™×ÕÜYÙHH›İÌ—İÜÂˆB‚ˆËÈš[\ˆØİ[Y[[™Ú[™Nˆ”QËÜİØÜš\ÑÈ˜\İ\‹‹Ü‚ˆËÈ\H˜\İ\ˆ
+T‘ŠK‚ˆËÈš[\ˆ[™Ú[™H\ÈHÛ™Ù\İX™[[ˆHYÛÛ[[ÈLLÌˆÙY\ÂˆËÈHÛX[YX\™Ú[ˆÚ[HX]š[™ÈHÛÛ\Xİ[šÈ[™[œ™YH]LÌŒ‚ˆËÈÚYM
+Ø\ÈN
+NˆHÛ™Ù\İÜ[Ûˆ^
+\H˜\İ\ˆŠH\ÂˆËÈİ[ÛÛY›ÜX›H[œÚYH]]Ü^	ÜÈØÚ\‹[™H›Ş	ÜÂˆËÈšYÚYÙH
+LÌ
+ÌMLÌ
+H›İÈÚ]ÈÙ[ÛX\ˆÙˆH[šÈ[™[]ˆËÈLÌŒ[œİXYÙˆÜ›İÙ[™È]]HÛÌL‚ˆ™Ë›™×ÓYYÙHHLÍNÂˆ™Ë›™×ÕÜYÙHHÎ
+ÈÜ›Ü™\Âˆ™Ë›™×ÕÚYHMÂˆ™Ë›™×ÒZYÚHLÂˆ™Ë›™×ÑØYÙ]^H
+Õ”ŠH”š[\ˆ[™Ú[™NˆÂˆ™Ë›™×ÑØYÙ]QHĞQÑS‘ÒS‘NÂˆØYHÜ™X]QØYÙ]
+ÖPÓWÒÒS‘ØY	›™ËˆÕÖWÓX™[Ë
+SÓ‘ÊY[™Ú[™WÛX™[ËˆÕÖWĞXİ]™K\Ù[™Ú[™WØXİ]™WÚ[™^
+
+KˆQ×ÑÓ‘JNÂˆYˆ
+YØY
+HÂˆš[Š‘˜Z[YÈÜ™X]Hš[\ˆ[™Ú[™HØYÙ]ˆŠNÂˆ™]\›ˆ•SÂˆB‚ˆËÈÚ\™H›Øˆš[\ÈÜÛÛˆSH
+‹\ÈZ[’S•\È[Ø^\ÈÛ™JHÜˆBˆËÈ™X[\™š]™H]šXÙK›ÜˆY[[ÜK]YÚŞ\İ[\ÈHÙYBˆËÈ\ØZ[ÜÜÛÛÛÜ[ÛœÊ
+KˆØ[YHÚYÜ›İÈ\ÈHÛXYÈÛİÛÂˆËÈHİXÚÙYŞXÛHØYÙ]Èİ^Hš\İX[H[YÛ™YÈXYÈ]Ù[ˆ›İÂˆËÈ]™\ÈÛˆH]Ûˆ›İÈ™^ÈØ]™K‚ˆ™Ë›™×ÓYYÙHHLÍNÂˆ™Ë›™×ÕÜYÙHHMH
+ÈÜ›Ü™\Âˆ™Ë›™×ÕÚYHMÂˆ™Ë›™×ÒZYÚHLÂˆ™Ë›™×ÑØYÙ]^H
+Õ”ŠH”ÜÛÛ\ˆÂˆ™Ë›™×ÑØYÙ]QHĞQÔÔÓÓTÂˆØYHÜ™X]QØYÙ]
+ÖPÓWÒÒS‘ØY	›™ËˆÕÖWÓX™[Ë
+SÓ‘Ê[\ÜÜÛÛÛX™[ÜœËˆÕÖWĞXİ]™K\ÜÜÛÛØXİ]™WÚ[™^
+
+KˆQ×ÑÓ‘JNÂˆYˆ
+YØY
+HÂˆš[Š‘˜Z[YÈÜ™X]HÜÛÛ\ˆØYÙ]ˆŠNÂˆ™]\›ˆ•SÂˆB‚ˆËÈYYXH›ÜİÛˆHØ[YHÚY\ÈØØ[[™È™[İÈ]›İÈ]BˆËÈ™]YšYYX™[È
+M
+\\ÜÈ˜^JHŠH™YY˜\ˆ\ÜÈ›ÛÛH[ˆBˆËÈ˜]ÈTÙ^]ÛÜ™È
+š\Û×ØMÌŒLMÛ[H
+K\\ÜË]˜^JHŠHY‚ˆ™Ë›™×ÓYYÙHHLÍNÂˆ™Ë›™×ÕÜYÙHHL
+ÈÜ›Ü™\Âˆ™Ë›™×ÕÚYHNÂˆ™Ë›™×ÒZYÚHLÂˆ™Ë›™×ÑØYÙ]^H
+Õ”ŠH“YYXH
+˜^JNˆÂˆ™Ë›™×ÑØYÙ]QHĞQÓQQPWÑ“ÔÕÓÂˆ™Ë›™×Ñ›YÜÈH‘×ÒQÒP‘SÂˆØYHÜ™X]QØYÙ]
+ÖPÓWÒÒS‘ØY	›™ËˆÕÖWÓX™[Ë
+SÓ‘Ê[YYXWÙ›ÜİÛ—Ú][\ËˆÕÖWĞXİ]™KˆĞWÑ\ØX›Yš]™\—ÛYYXWØY™™\–ÌHÈSÑHˆ•QKˆQ×ÑÓ‘JNÂˆYˆ
+YØY
+HÂˆš[Š‘˜Z[YÈÜ™X]HYYXH›ÜİÛ—ˆŠNÂˆ™]\›ˆ•SÂˆBˆYYXWÙ›ÜİÛˆHØYÈËÈØ]™H]ÛØ˜[B‚ˆËÈØØ[[™È›ÜİÛ‚ˆ™Ë›™×ÓYYÙHHLÍNÂˆ™Ë›™×ÕÜYÙHHLˆ
+ÈÜ›Ü™\Âˆ™Ë›™×ÕÚYHMLÂˆ™Ë›™×ÒZYÚHLÂˆ™Ë›™×ÑØYÙ]^H
+Õ”ŠH”ØØ[[™ÎˆÂˆ™Ë›™×ÑØYÙ]QHĞQÔĞĞSS‘×ÓSÑNÂˆØYHÜ™X]QØYÙ]
+ÖPÓWÒÒS‘ØY	›™ËˆÕÖWÓX™[Ë
+SÓ‘Ê\ØØ[[™×Û[ÙWÛX™[ËˆÕÖWĞXİ]™KˆĞWÑ\ØX›Yš]™\—ÜØØ[[™×ØY™™\–ÌHÈSÑHˆ•QKˆQ×ÑÓ‘JNÂ‚ˆËÈ]X[]H›ÜİÛ‚ˆ™Ë›™×ÓYYÙHHLÍNÂˆ™Ë›™×ÕÜYÙHHM
+ÈÜ›Ü™\Âˆ™Ë›™×ÕÚYHMLÂˆ™Ë›™×ÒZYÚHLÂˆ™Ë›™×ÑØYÙ]^H
+Õ”ŠH”]X[]NˆÂˆ™Ë›™×ÑØYÙ]QHĞQÔUPSUWÓSÑNÂˆØYHÜ™X]QØYÙ]
+ÖPÓWÒÒS‘ØY	›™ËˆÕÖWÓX™[Ë
+SÓ‘Ê\]X[]WÛ[ÙWÛX™[ËˆÕÖWĞXİ]™KˆĞWÑ\ØX›Yš]™\—Ü]X[]WØY™™\–ÌHÈSÑHˆ•QKˆQ×ÑÓ‘JNÂ‚ˆËÈØ\\™HHHÚ\™\ÈH]X[]H›İÈ[™\ÈÜ[]YH]Y\Hœ›ÛBˆËÈš[\‹\™\ÛÛ][Û‹\İ\ÜYÔÑÈ˜\İ\ˆ™\ÛÛ][ÛˆØ\Xš[]Y\Ë‚ˆ™Ë›™×ÓYYÙHHÍLÂˆ™Ë›™×ÕÚYHLÂˆ™Ë›™×ÒZYÚHLÂˆ™Ë›™×ÕÜYÙHHN
+ÈÜ›Ü™\Âˆ™Ë›™×ÑØYÙ]^H
+Õ”ŠH‘NˆÂˆ™Ë›™×ÑØYÙ]QHĞQÔ‘TÓÓUSÓÂˆØYHÜ™X]QØYÙ]
+ÖPÓWÒÒS‘ØY	›™ËˆÕÖWÓX™[Ë
+SÓ‘Ê\™\ÛÛ][Û—ÛX™[ËˆÕÖWĞXİ]™K
+SÓ‘Ê[\ÙWØXİ]™WÚ[™^
+š]™\—Ü™\ÛÛ][ÛŠKˆĞWÑ\ØX›Y[WÜİ\ÜYÙHˆÈSÑHˆ•QKˆQ×ÑÓ‘JNÂˆYˆ
+YØY
+HÂˆš[Š‘˜Z[YÈÜ™X]HHØYÙ]ˆŠNÂˆ™]\›ˆ•SÂˆB‚ˆËÈš[[ÙH˜Y[È]ÛœÂˆ™Ë›™×ÓYYÙHHLÍNÂˆ™Ë›™×ÕÜYÙHHMŒˆ
+ÈÜ›Ü™\Âˆ™Ë›™×ÕÚYHMLÂˆ™Ë›™×ÒZYÚHLÂˆ™Ë›™×ÑØYÙ]^H
+Õ”ŠH”š[[ÙNˆÂˆ™Ë›™×ÑØYÙ]QHĞQÔ’S•ÓSÑNÂˆØYHÜ™X]QØYÙ]
+ÖPÓWÒÒS‘ØY	›™ËˆÕÖWÓX™[Ë
+SÓ‘Ê\š[Û[ÙWÛX™[ËˆÕÖWĞXİ]™KˆĞWÑ\ØX›Yš]™\—ØÛÛÜ—ØY™™\–ÌHÈSÑHˆ•QKˆQ×ÑÓ‘JNÂˆYˆ
+YØY
+HÂˆš[Š‘˜Z[YÈÜ™X]Hš[[ÙH˜Y[È]Ûœ×ˆŠNÂˆ™]\›ˆ•SÂˆB‚ˆÊˆ\^™YYÈ][\H[ZYØHYÙ\È[ˆÛ™HÑÈ˜\İ\ˆØİ[Y[ˆ]Y\Bˆ
+ˆ[˜X›\È\ÙHÚÚXÙ\ÈÛ›H›ÜˆÑÈ˜\İ\ˆÚ[ˆHš[\ˆY™\\Ù\Âˆ
+ˆH™\]Y\İYÚY\È˜[YKˆ
+‹Âˆ™Ë›™×ÓYYÙHHÍLÂˆ™Ë›™×ÕÚYHMLÂˆ™Ë›™×ÒZYÚHLÂˆ™Ë›™×ÕÜYÙHHMŒˆ
+ÈÜ›Ü™\Âˆ™Ë›™×ÑØYÙ]^H
+Õ”ŠH”ÚY\ÎˆÂˆ™Ë›™×ÑØYÙ]QHĞQÔÒQTÎÂˆØYHÜ™X]QØYÙ]
+ÖPÓWÒÒS‘ØY	›™ËˆÕÖWÓX™[Ë
+SÓ‘Ê[\ÜÚY\×ÛX™[ÜœËˆÕÖWĞXİ]™K\ÜÚY\×ØXİ]™WÚ[™^
+
+KˆĞWÑ\ØX›Y•QKˆQ×ÑÓ‘JNÂˆYˆ
+YØY
+HÂˆš[Š‘˜Z[YÈÜ™X]HÚY\ÈØYÙ]ˆŠNÂˆ™]\›ˆ•SÂˆB‚ˆËÈ\İš[]Û‚ˆ™Ë›™×ÓYYÙHHLÂˆ™Ë›™×ÕÜYÙHHNN
+ÈÜ›Ü™\Âˆ™Ë›™×ÕÚYHLLÂˆ™Ë›™×ÒZYÚHLÂˆ™Ë›™×ÑØYÙ]^H
+Õ”ŠH—Õ\İš[Âˆ™Ë›™×ÑØYÙ]QHĞQÔ’S•Ğ•UÓÂˆØYHÜ™X]QØYÙ]
+•UÓ—ÒÒS‘ØY	›™ËˆÕÕ[™\œØÛÜ™K	×ÉËˆQ×ÑÓ‘JNÂˆYˆ
+YØY
+HÂˆš[Š‘˜Z[YÈÜ™X]Hš[]Û—ˆŠNÂˆ™]\›ˆ•SÂˆB‚ˆËÈ[˜X›KÙ\ØX›HXYÛ›ÜİXÈÙÜÈ[™™]Z[™Y™[™\™Y›ØœËˆÚ\™\ÂˆËÈH]Ûˆ›İÉÜÈÜ\™HÜXÙH™]ÙY[ˆ\İš[[™Ø]™NÈBˆËÈŞXÛIÜÈİÛˆX™[^
+‘XYÈÛˆ‹È‘XYÈÙ™ˆŠH\ÈÙ[‹Y^[˜]ÜBˆËÈÛÈ]™YYÈ›ÈÙ\\˜]HØYÙ]^™Yš^[›ZÙHHİXÚÙYˆËÈš[\ˆ[™Ú[™KÔÜÛÛ\ˆŞXÛ\ÈX›İ™K‚ˆ™Ë›™×ÓYYÙHHMŒÂˆ™Ë›™×ÕÜYÙHHNN
+ÈÜ›Ü™\Âˆ™Ë›™×ÕÚYHLLÂˆ™Ë›™×ÒZYÚHLÂˆ™Ë›™×ÑØYÙ]^H•SÂˆ™Ë›™×ÑØYÙ]QHĞQÑP•QÎÂˆØYHÜ™X]QØYÙ]
+ÖPÓWÒÒS‘ØY	›™ËˆÕÖWÓX™[Ë
+SÓ‘ÊYXY×ÛX™[ËˆÕÖWĞXİ]™Kš]™\—ÙXYÈÈHˆˆQ×ÑÓ‘JNÂˆYˆ
+YØY
+HÂˆš[Š‘˜Z[YÈÜ™X]HXYÈØYÙ]ˆŠNÂˆ™]\›ˆ•SÂˆB‚ˆËÈØ]™H]ÛˆHØ[YHXİ[Ûˆ\Èš[HOˆØ]™Hš]™\ˆÙ][™ÜË‚ˆ™Ë›™×ÓYYÙHHÌÂˆ™Ë›™×ÕÚYHLÂˆ™Ë›™×ÕÜYÙHHNN
+ÈÜ›Ü™\Âˆ™Ë›™×ÒZYÚHLÂˆ™Ë›™×ÑØYÙ]^H
+Õ”ŠH—ÔØ]™HÂˆ™Ë›™×ÑØYÙ]QHĞQÔĞU‘WĞ•UÓÂˆØYHÜ™X]QØYÙ]
+•UÓ—ÒÒS‘ØY	›™ËˆÕÕ[™\œØÛÜ™K	×ÉËˆQ×ÑÓ‘JNÂˆYˆ
+YØY
+HÂˆš[Š‘˜Z[YÈÜ™X]HØ]™H]Û—ˆŠNÂˆ™]\›ˆ•SÂˆB‚ˆËÈ^]]Û‚ˆ™Ë›™×ÓYYÙHHÂˆ™Ë›™×ÕÚYHLÂˆ™Ë›™×ÕÜYÙHHNN
+ÈÜ›Ü™\Âˆ™Ë›™×ÒZYÚHLÂˆ™Ë›™×ÑØYÙ]^H
+Õ”ŠH—Ñ^]Âˆ™Ë›™×ÑØYÙ]QHĞQÑVUĞ•UÓÂˆØYHÜ™X]QØYÙ]
+•UÓ—ÒÒS‘ØY	›™ËˆÕÕ[™\œØÛÜ™K	×ÉËˆQ×ÑÓ‘JNÂˆYˆ
+YØY
+HÂˆš[Š‘˜Z[YÈÜ™X]H^]]Û—ˆŠNÂˆ™]\›ˆ•SÂˆB‚ˆËÈÙY\ÜÛÛY›ØœÈHÛ›HYX[š[™Ù[[™Û›H[˜X›YÛ˜ÙHÜÛÛ\‚ˆËÈ˜[Y\ÈH™X[\™š]™H
+ÙYH\ÜÜÛÛÚÙY\Ø]˜Z[X›J
+JNÈBˆËÈĞQÔÔÓÓTˆ[™\ˆ™[İÈ\ØX›\È[™[XÚÜÈ\È]™HH[ÛY[ˆËÈÜÛÛ\ˆ\ÈİÚ]ÚY˜XÚÈÈSK‚ˆËÂˆËÈPÑUVÔ’QÒ\È™\]Z\™Y\™NˆÒPÒĞ“ÖÒÒS‘	ÜÈİÛˆY˜][ˆËÈXÙ[Y[\ÈPÑUVÓQ•
+X™[ÈHQ•ÙˆH›Ş[›ZÙBˆËÈ•UÓ—ÒÒS‘ĞÖPÓWÒÒS‘X›İ™JKÚXÚ]\ÈØYÙ]	ÜÈYYÙOLLˆËÈH›\ÚYØZ[œİHÚ[™İÉÜÈİÛˆYYÙHH˜]ÜÈHX™[ˆËÈ[\™[HÙ™‹]Ú[™İËX]š[™ÈÚ]ÛÚÜÈZÙH[ˆ[›X™[YˆËÈÚXÚØ›Ş‚ˆ™Ë›™×ÓYYÙHHLÂˆ™Ë›™×ÕÜYÙHHN
+ÈÜ›Ü™\Âˆ™Ë›™×ÕÚYHMŒÂˆ™Ë›™×ÒZYÚHLÂˆ™Ë›™×ÑØYÙ]^H
+Õ”ŠH’ÙY\›ØœÈ
+
+HÂˆ™Ë›™×ÑØYÙ]QHĞQÔÔÓÓÒÑQTÂˆ™Ë›™×Ñ›YÜÈHPÑUVÔ’QÒÂˆØYHÜ™X]QØYÙ]
+ÒPÒĞ“ÖÒÒS‘ØY	›™ËˆÕĞ—ĞÚXÚÙY
+SÓ‘ÊJ\ÜÜÛÛÚÙY\Ø]˜Z[X›J
+H	‰ˆš]™\—ÜÜÛÛÚÙY\
+KˆĞWÑ\ØX›Y
+SÓ‘ÊJ\ÜÜÛÛÚÙY\Ø]˜Z[X›J
+HÈSÑHˆ•QJKˆQ×ÑÓ‘JNÂˆYˆ
+YØY
+HÂˆš[Š‘˜Z[YÈÜ™X]HÙY\\ÜÛÛYZ›ØœÈÚXÚØ›ŞˆŠNÂˆ™]\›ˆ•SÂˆB‚ˆËÈÜ[œÈHÜÛÛ\ˆX[˜YÙ[Y[Ú[™İÈ\İ[™È˜XÚÙY›ØœÈHÙYBˆËÈ\ÜÜÛÛİÚ[—ÛÜ[Š
+Kˆ[›ZÙH[—Ù\ØÛİ™\WÜÙ[Xİ[ÛŠ
+K]\ÂˆËÈ›Û‹[[Ù[ˆ]™]\›œÈ[[YYX][H[™›ØÙ\Ü×İÚ[™İ×Ù]™[Ê
+IÜÂˆËÈXZ[ˆÛÜš]™\È]œ›ÛH[ˆÛ‹ÛÈ›İÚ[™İÜÈİ^H\ØX›K‚ˆ™Ë›™×ÓYYÙHHMÍNÂˆ™Ë›™×ÕÜYÙHHN
+ÈÜ›Ü™\Âˆ™Ë›™×ÕÚYHLÌÂˆ™Ë›™×ÒZYÚHLÂˆ™Ë›™×Ñ›YÜÈHÂˆ™Ë›™×ÑØYÙ]^H
+Õ”ŠH—ÕšY]ÈÜÛÛ\ˆÂˆ™Ë›™×ÑØYÙ]QHĞQÕ’QU×ÔÔÓÓÂˆØYHÜ™X]QØYÙ]
+•UÓ—ÒÒS‘ØY	›™ËˆÕÕ[™\œØÛÜ™K	×ÉËˆQ×ÑÓ‘JNÂˆYˆ
+YØY
+HÂˆš[Š‘˜Z[YÈÜ™X]HšY]ÈÜÛÛ]Û—ˆŠNÂˆ™]\›ˆ•SÂˆB‚ˆ™]\›ˆØYÂŸB‚‹ËÈ[˜İ[ÛˆÈ›ØÙ\ÜÈÚ[™İÈ]™[È\Ú[™ÈØYÛÛÈY\ÜØYÙH[™[™Â›ÚY›ØÙ\Ü×İÚ[™İ×Ù]™[ÊİXİÚ[™İÈ
+Ú[ŠHÂˆİXİ[ZSY\ÜØYÙH
+š[\ÙÎÂˆSÓ‘È[\ÙĞÛ\ÜÎÂˆUÓÔ‘[\ÙĞÛÙNÂˆİXİØYÙ]
+™ØYÂˆ“ÓÓ\›Z[˜]YHSÑNÂˆÚ\ˆ\ÛÛ›VÍNÂˆ[ÜHLNÂ‚ˆÚ[H
+]\›Z[˜]Y
+HÂˆSÓ‘ÈÚ[™İ×ÜÚYÛ˜[HSÚ[‹O•\Ù\”ÜO›\ÔÚYĞš]ÂˆSÓ‘ÈØZ]ÛX\ÚÈHÚ[™İ×ÜÚYÛ˜[ÂˆSÓ‘È™XÙZ]™YÜÚYÛ˜[ÎÂ‚ˆYˆ
+\İÜš[Ú›Ø‹˜Xİ]™H	‰ˆ\İÜš[Ú›Ø‹œÜ
+BˆØZ]ÛX\ÚÈHS\İÜš[Ú›Ø‹œÜO›\ÔÚYĞš]ÂˆÊˆÜÛÛ\ˆÚ[™İÈ›ÛY[ÈHØ[YHØZ]
+
+H\ÈHXZ[ˆÚ[™İÉÜÂˆ
+ˆİÛˆÜ›İHÙ\\˜]H™\İY]™[ÛÜHÙYBˆ
+ˆ\ÜÜÛÛİÚ[—Ü›ØÙ\ÜÊ
+IÜÈİÛˆÛÛ[Y[›ÜˆÚNˆ]\ÈÚ]ˆ
+ˆÙY\È\ÈÚ[™İÈ[™HÜÛÛ\ˆÚ[™İÈ›İ]™H›Üˆ[œ]ˆ
+ˆ]Û˜ÙH[œİXYÙˆÛ™H›ØÚÚ[™ÈHİ\‹ˆ
+‹ÂˆYˆ
+×ÜÜÛÛİÚ[ŠBˆØZ]ÛX\ÚÈHS×ÜÜÛÛİÚ[‹O•\Ù\”ÜO›\ÔÚYĞš]Â‚ˆ™XÙZ]™YÜÚYÛ˜[ÈHØZ]
+ØZ]ÛX\ÚÊNÂˆYˆ
+\İÜš[Ú›Ø‹˜Xİ]™H	‰ˆ\İÜš[Ú›Ø‹œÜ	‰‚ˆ
+™XÙZ]™YÜÚYÛ˜[È	ˆ
+S\İÜš[Ú›Ø‹œÜO›\ÔÚYĞš]
+JJHÂˆ\İ\İÜš[ØÛÛ\]JÚ[ŠNÂˆBˆYˆ
+×ÜÜÛÛİÚ[ˆ	‰‚ˆ
+™XÙZ]™YÜÚYÛ˜[È	ˆ
+S×ÜÜÛÛİÚ[‹O•\Ù\”ÜO›\ÔÚYĞš]
+JJHÂˆ\ÜÜÛÛİÚ[—Ü›ØÙ\ÜÊ
+NÂˆBˆYˆ
+J™XÙZ]™YÜÚYÛ˜[È	ˆÚ[™İ×ÜÚYÛ˜[
+JBˆÛÛ[YNÂ‚ˆ[\ÙÈHÕÑÙ]S\ÙÊÚ[‹O•\Ù\”Ü
+NÂˆÚ[H
+]\›Z[˜]Y	‰ˆ[\ÙÊHÂˆØYH
+İXİØYÙ]
+ŠZ[\ÙËO’PY™\ÜÎÂˆ[\ÙĞÛ\ÜÈH[\ÙËOÛ\ÜÎÂˆ[\ÙĞÛÙHH[\ÙËOÛÙNÂˆÊˆPY™\ÜÈ\ÈÛ›HXİX[HHİXİØYÙ]
+ˆ›ÜˆØYÙ]\™[]Yˆ
+ˆÛ\ÜÙ\ÈH[X™\˜][H“Õ\™Y™\™[˜Ú[™ÈØYO‘ØYÙ]Q\™Bˆ
+ˆ›Üˆİ\ˆÛ\ÜÙ\È
+K™ËˆQÓTÔ‘Q”‘TÒÒS‘ÕÊKÚ\™H]Ø[ˆ™Bˆ
+ˆÛÛY][™È[ÙH[\™[Kˆ
+‹Â‚ˆÕÔ™\RS\ÙÊ[\ÙÊNÂ‚ˆİÚ]Ú
+[\ÙĞÛ\ÜÊHÂˆØ\ÙHQÓTÑĞQÑUT‚ˆİÚ]Ú
+ØYO‘ØYÙ]Q
+HÂˆØ\ÙHĞQÕS’UÑ“ÔÕÓ‚ˆÂˆSÓ‘ÈÙ[XİYH
+SÓ‘ÊZ[\ÙĞÛÙNÂˆYˆ
+Ù[XİY
+SÓ‘ÊSPVÕS’UÈ	‰ˆ
+[
+\Ù[XİYOHİ\œ™[İ[š]Ú[™^
+HÂˆİ\œ™[İ[š]Ú[™^H
+[
+\Ù[XİYÂˆİ\İÛWÜš[ŠÓPTˆŠNÂˆ™[ØYØİ\œ™[İ[š]
+Ú[ŠNÂˆBˆBˆœ™XZÎÂ‚ˆØ\ÙHĞQÔÑUĞPÕU‘WĞ•UÓ‚ˆÂˆİ\İÛWÜš[ŠÓPTˆŠNÂ‚ˆYˆ
+İ\œ™[İ[š]Ú[™^OH
+HÂˆİ\İÛWÜš[Š•[š]\È[™XYHHXİ]™Hš[\‹—ˆŠNÂˆH[ÙHYˆ
+][š]Ùš[WÙ^\İÊİ\œ™[İ[š]Ú[™^
+JHÂˆİ\İÛWÜš[Š•[š]	Y\È›ÈØ]™YÙ][™ÜÈY]H›İ[™ÈÈXİ]˜]K—ˆ‹ˆİ\œ™[İ[š]Ú[™^
+NÂˆH[ÙHÂˆÚ\ˆÜ˜×Ù[–ÍKÜ˜×Ù[˜\˜ÖÍNÂˆÚ\ˆİÙ[–ÍKİÙ[˜\˜ÖÍNÂˆ“ÓÓÚÎÂ‚ˆ[š]ØÛÛ™šY×Ü]
+İ\œ™[İ[š]Ú[™^SÑKÜ˜×Ù[‹Ú^™[ÙŠÜ˜×Ù[ŠJNÂˆ[š]ØÛÛ™šY×Ü]
+İ\œ™[İ[š]Ú[™^•QKÜ˜×Ù[˜\˜ËÚ^™[ÙŠÜ˜×Ù[˜\˜ÊJNÂˆ[š]ØÛÛ™šY×Ü]
+SÑKİÙ[‹Ú^™[ÙŠİÙ[ŠJNÂˆ[š]ØÛÛ™šY×Ü]
+•QKİÙ[˜\˜ËÚ^™[ÙŠİÙ[˜\˜ÊJNÂ‚ˆÚÈH[œİ\™WØÛÛ™šY×Ù\Š
+ÓÓ”ÕÔÕ”ŠH‘S•“Z[’S•ŠH	‰‚ˆ[œİ\™WØÛÛ™šY×Ù\Š
+ÓÓ”ÕÔÕ”ŠH‘S•TÎ“Z[’S•ŠH	‰‚ˆ\ØÛÜWÙš[J
+ÓÓ”ÕÔÕ”Š\Ü˜×Ù[‹
+ÓÓ”ÕÔÕ”ŠYİÙ[ŠH	‰‚ˆ\ØÛÜWÙš[J
+ÓÓ”ÕÔÕ”Š\Ü˜×Ù[˜\˜Ë
+ÓÓ”ÕÔÕ”ŠYİÙ[˜\˜ÊNÂ‚ˆYˆ
+ÚÊHÂˆÚ\ˆÜ˜×ØØXÚWÙ[–ÍKÜ˜×ØØXÚWÙ[˜\˜ÖÍNÂˆÚ\ˆİØØXÚWÙ[–ÍKİØØXÚWÙ[˜\˜ÖÍNÂ‚ˆÊˆ™\İYY™›ÜˆØ\œHHØXÚYØ\Xš[]Y\Èİ™\ˆÛËÛÂˆ
+ˆ[š]Ù\Û‰İ™YYHœ™\Ú]Y\Kˆš[™HYˆ\™H\È›Û™Kˆ
+‹Âˆ[š]ØØXÚWÜ]
+İ\œ™[İ[š]Ú[™^SÑKÜ˜×ØØXÚWÙ[‹Ú^™[ÙŠÜ˜×ØØXÚWÙ[ŠJNÂˆ[š]ØØXÚWÜ]
+İ\œ™[İ[š]Ú[™^•QKÜ˜×ØØXÚWÙ[˜\˜ËÚ^™[ÙŠÜ˜×ØØXÚWÙ[˜\˜ÊJNÂˆ[š]ØØXÚWÜ]
+SÑKİØØXÚWÙ[‹Ú^™[ÙŠİØØXÚWÙ[ŠJNÂˆ[š]ØØXÚWÜ]
+•QKİØØXÚWÙ[˜\˜ËÚ^™[ÙŠİØØXÚWÙ[˜\˜ÊJNÂˆ\ØÛÜWÙš[J
+ÓÓ”ÕÔÕ”Š\Ü˜×ØØXÚWÙ[‹
+ÓÓ”ÕÔÕ”ŠYİØØXÚWÙ[ŠNÂˆ\ØÛÜWÙš[J
+ÓÓ”ÕÔÕ”Š\Ü˜×ØØXÚWÙ[˜\˜Ë
+ÓÓ”ÕÔÕ”ŠYİØØXÚWÙ[˜\˜ÊNÂ‚ˆÊˆØ\œHH›ØÙ\ÜÙYš[\ˆ\ÛÜšÈÛËˆ
+‹ÂˆÂˆÚ\ˆÜ˜×ÚXÛÛ—Ù[–ÎM—KÜ˜×ÚXÛÛ—Ù[˜\˜ÖÎM—NÂˆÚ\ˆİÚXÛÛ—Ù[–ÎM—KİÚXÛÛ—Ù[˜\˜ÖÎM—NÂˆ[œİ\™WØÛÛ™šY×Ù\Š
+ÓÓ”ÕÔÕ”ŠH‘S•“Z[’S•Ğ\ŠNÂˆ[œİ\™WØÛÛ™šY×Ù\Š
+ÓÓ”ÕÔÕ”ŠH‘S•TÎ“Z[’S•Ğ\ŠNÂˆ[š]ÚXÛÛ—ØØXÚWÜ]
+İ\œ™[İ[š]Ú[™^SÑKÜ˜×ÚXÛÛ—Ù[‹Ú^™[ÙŠÜ˜×ÚXÛÛ—Ù[ŠJNÂˆ[š]ÚXÛÛ—ØØXÚWÜ]
+İ\œ™[İ[š]Ú[™^•QKÜ˜×ÚXÛÛ—Ù[˜\˜ËÚ^™[ÙŠÜ˜×ÚXÛÛ—Ù[˜\˜ÊJNÂˆ[š]ÚXÛÛ—ØØXÚWÜ]
+SÑKİÚXÛÛ—Ù[‹Ú^™[ÙŠİÚXÛÛ—Ù[ŠJNÂˆ[š]ÚXÛÛ—ØØXÚWÜ]
+•QKİÚXÛÛ—Ù[˜\˜ËÚ^™[ÙŠİÚXÛÛ—Ù[˜\˜ÊJNÂˆ\ØÛÜWÙš[J
+ÓÓ”ÕÔÕ”Š\Ü˜×ÚXÛÛ—Ù[‹
+ÓÓ”ÕÔÕ”ŠYİÚXÛÛ—Ù[ŠNÂˆ\ØÛÜWÙš[J
+ÓÓ”ÕÔÕ”Š\Ü˜×ÚXÛÛ—Ù[˜\˜Ë
+ÓÓ”ÕÔÕ”ŠYİÚXÛÛ—Ù[˜\˜ÊNÂˆB‚ˆİ\İÛWÜš[Š•[š]	YÛÜYYÈ[š]H]\È›İÈHXİ]™Hš[\‹—ˆ‹ˆİ\œ™[İ[š]Ú[™^
+NÂˆİ\œ™[İ[š]Ú[™^HÂˆ™[ØYØİ\œ™[İ[š]
+Ú[ŠNÂˆ™Yœ™\Úİ[š]Ù›ÜİÛŠÚ[ŠNÂˆH[ÙHÂˆİ\İÛWÜš[ŠÛİ[›İÛÜH[š]	YÈ[š]—ˆ‹İ\œ™[İ[š]Ú[™^
+NÂˆBˆBˆBˆœ™XZÎÂ‚ˆØ\ÙHĞQÓQQPWÑ“ÔÕÓ‚ˆÂˆSÓ‘ÈÙ[XİYH
+SÓ‘ÊZ[\ÙĞÛÙNÂˆYˆ
+Ù[XİY
+SÓ‘Ê[[WÛYYXWİ˜^WÛX\[™ÜÊHÂˆİ›˜ÜJš]™\—ÛYYXWØY™™\‹ˆYYXWİ˜^WÛX\ÜÙ[XİYK›YYXKˆÚ^™[ÙŠš]™\—ÛYYXWØY™™\ŠHHJNÂˆš]™\—ÛYYXWØY™™\–ÜÚ^™[ÙŠš]™\—ÛYYXWØY™™\ŠHHWHH	×	ÎÂˆİ›˜ÜJš]™\—ÜÛİ\˜ÙWØY™™\‹ˆYYXWİ˜^WÛX\ÜÙ[XİYKœÛİ\˜ÙKˆÚ^™[ÙŠš]™\—ÜÛİ\˜ÙWØY™™\ŠHHJNÂˆš]™\—ÜÛİ\˜ÙWØY™™\–ÜÚ^™[ÙŠš]™\—ÜÛİ\˜ÙWØY™™\ŠHHWHH	×	ÎÂˆš[Š”Ù[XİY[™^H	[K˜[YHH	\×ˆ‹ˆÙ[XİYYYXWİ˜^WÛX\ÜÙ[XİYK›YYXJNÂˆH[ÙHÂˆš[Š’[˜[YÙ[Xİ[Ûˆ[™^H	[Wˆ‹Ù[XİY
+NÂˆBˆBˆœ™XZÎÂ‚ˆØ\ÙHĞQÒTÔÕ’S‘Î‚ˆÂˆÚ\ˆ
+˜İ\œ™[Ú\ÂˆÕÔ™Yœ™\ÚÚ[™İÊÚ[‹•S
+NÂˆİ\œ™[Ú\H\Üİš[™×ÙØYÙ]İ˜[YJØY
+NÂˆš[Š‘ÛİÚ[\ˆ	\ˆ‹İ\œ™[Ú\
+NÂˆYˆ
+İ\œ™[Ú\
+HÂˆš[Š”˜]ÈTİš[™Èœ›ÛHØYÙ]ˆ	É\É×ˆ‹İ\œ™[Ú\
+NÂˆİ›˜ÜJ\ØY™™\‹İ\œ™[Ú\Ú^™[ÙŠ\ØY™™\ŠHHJNÂˆ\ØY™™\–ÜÚ^™[ÙŠ\ØY™™\ŠHHWHH	×	ÎÂˆš[Š’TY™™\ˆY\ˆ\]Nˆ	É\É×ˆ‹\ØY™™\ŠNÂˆH[ÙHÂˆš[Š‘˜Z[YÈ™]šY]™HTİš[™Èœ›ÛHØYÙ]ˆŠNÂˆBˆBˆœ™XZÎÂˆØ\ÙHĞQÒTÔU‚ˆÂˆÚ\ˆ
+œ]H\Üİš[™×ÙØYÙ]İ˜[YJØY
+NÂˆYˆ
+]
+HÂˆİ›˜ÜJš]™\—Ü]ØY™™\‹]ˆÚ^™[ÙŠš]™\—Ü]ØY™™\ŠHHJNÂˆš]™\—Ü]ØY™™\–ÜÚ^™[ÙŠš]™\—Ü]ØY™™\ŠHHWHH	×	ÎÂˆBˆBˆœ™XZÎÂ‚ˆØ\ÙHĞQÑP•QÎ‚ˆš]™\—ÙXYÈH[\ÙĞÛÙHÈ•QHˆSÑNÂˆœ™XZÎÂ‚ˆØ\ÙHĞQÔÔÓÓT‚ˆÂˆSÓ‘ÈÙ[XİYH
+SÓ‘ÊZ[\ÙĞÛÙNÂˆYˆ
+Ù[XİY
+SÓ‘Ê[\ÜÜÛÛÛÜ[Û—ØÛİ[
+HÂˆİ›˜ÜJš]™\—ÜÜÛÛØY™™\‹ˆ\ÜÜÛÛİ˜[YWÜİÜ˜YÙVÜÙ[XİYKˆÚ^™[ÙŠš]™\—ÜÜÛÛØY™™\ŠHHJNÂˆš]™\—ÜÜÛÛØY™™\–ÂˆÚ^™[ÙŠš]™\—ÜÜÛÛØY™™\ŠHHWHH	×	ÎÂˆBˆ\İ\]WÜÜÛÛÚÙY\ÙØYÙ]
+Ú[ŠNÂˆBˆœ™XZÎÂ‚ˆØ\ÙHĞQÔÔÓÓÒÑQT‚ˆš]™\—ÜÜÛÛÚÙY\H[\ÙĞÛÙHÈ•QHˆSÑNÂˆœ™XZÎÂ‚ˆØ\ÙHĞQÕ’QU×ÔÔÓÓ‚ˆ\ÜÜÛÛİÚ[—ÛÜ[ŠÚ[ŠNÂˆœ™XZÎÂ‚ˆØ\ÙHĞQÔUPSUWÓSÑN‚ˆÂˆSÓ‘ÈÙ[XİYH
+SÓ‘ÊZ[\ÙĞÛÙNÂˆYˆ
+Ù[XİY
+SÓ‘Ê[[WÜİ\ÜYÜ]X[]JHÂˆİ›˜ÜJÙ[XİYÜ]X[]Kİ\ÜYÜ]X[]VÜÙ[XİYKˆÚ^™[ÙŠÙ[XİYÜ]X[]JHHJNÂˆÙ[XİYÜ]X[]VÜÚ^™[ÙŠÙ[XİYÜ]X[]JHHWHH	×	ÎÂˆİ›˜ÜJš]™\—Ü]X[]WØY™™\‹İ\ÜYÜ]X[]VÜÙ[XİYKˆÚ^™[ÙŠš]™\—Ü]X[]WØY™™\ŠHHJNÂˆš]™\—Ü]X[]WØY™™\–ÜÚ^™[ÙŠš]™\—Ü]X[]WØY™™\ŠHHWHH	×	ÎÂˆBˆBˆœ™XZÎÂ‚ˆØ\ÙHĞQÔ’S•ÓSÑN‚ˆÂˆSÓ‘ÈÙ[XİYH
+SÓ‘ÊZ[\ÙĞÛÙNÂˆš[Û[ÙHHÙ[XİYÂˆYˆ
+Ù[XİY[WÜİ\ÜYÜš[Û[Ù\ÊHÂˆİ›˜ÜJÙ[XİYÜš[Û[ÙKİ\ÜYÜš[Û[Ù\ÖÜÙ[XİYKPVĞU—ÓSˆHJNÂˆÙ[XİYÜš[Û[ÙVÓPVĞU—ÓSˆHWHH	×	ÎÂˆİ›˜ÜJš]™\—ØÛÛÜ—ØY™™\‹İ\ÜYÜš[Û[Ù\ÖÜÙ[XİYKˆÚ^™[ÙŠš]™\—ØÛÛÜ—ØY™™\ŠHHJNÂˆš]™\—ØÛÛÜ—ØY™™\–ÜÚ^™[ÙŠš]™\—ØÛÛÜ—ØY™™\ŠHHWHH	×	ÎÂˆš[Š”š[[ÙHÙ]Îˆ	\×ˆ‹Ù[XİYÜš[Û[ÙJNÂˆBˆBˆœ™XZÎÂ‚ˆØ\ÙHĞQÑS‘ÒS‘N‚ˆÂˆSÓ‘ÈÙ[XİYH
+SÓ‘ÊZ[\ÙĞÛÙNÂˆYˆ
+Ù[XİY
+SÓ‘Ê[\Ù[™Ú[™WØÛİ[
+HÂˆİ›˜ÜJš]™\—Ù[™Ú[™WØY™™\‹ˆ\Ù[™Ú[™Wİ˜[YWÛX\ÜÙ[XİYKˆÚ^™[ÙŠš]™\—Ù[™Ú[™WØY™™\ŠHHJNÂˆš]™\—Ù[™Ú[™WØY™™\–ÂˆÚ^™[ÙŠš]™\—Ù[™Ú[™WØY™™\ŠHHWHH	×	ÎÂˆš]™\—Ù[™Ú[™WÙ^XÚ]H•QNÂˆ\]WÜÚY\×Ù›ÜİÛŠÚ[ŠNÂˆ\]WÙWÙ›ÜİÛŠÚ[ŠNÂˆ\Ù˜]×ÜÚY\×Ú[
+
+NÂˆBˆBˆœ™XZÎÂ‚ˆØ\ÙHĞQÔÒQTÎ‚ˆÂˆSÓ‘ÈÙ[XİYH
+SÓ‘ÊZ[\ÙĞÛÙNÂˆYˆ
+Ù[XİY
+SÓ‘Ê[\ÜÚY\×ÛÜ[Û—ØÛİ[
+HÂˆİ›˜ÜJš]™\—ÜÚY\×ØY™™\‹ˆ\ÜÚY\×İ˜[YWÜİÜ˜YÙVÜÙ[XİYKˆÚ^™[ÙŠš]™\—ÜÚY\×ØY™™\ŠHHJNÂˆš]™\—ÜÚY\×ØY™™\–ÂˆÚ^™[ÙŠš]™\—ÜÚY\×ØY™™\ŠHHWHH	×	ÎÂˆš[Š”ÚY\ÈÙ]Îˆ	\×ˆ‹š]™\—ÜÚY\×ØY™™\ŠNÂˆ\Ù˜]×ÜÚY\×Ú[
+
+NÂˆBˆBˆœ™XZÎÂ‚ˆØ\ÙHĞQÔ‘TÓÓUSÓ‚ˆÂˆSÓ‘ÈÙ[XİYH
+SÓ‘ÊZ[\ÙĞÛÙNÂˆYˆ
+Ù[XİY
+SÓ‘Ê[\ÙWÛÜ[ÛœË˜Ûİ[
+HÂˆš]™\—Ü™\ÛÛ][ÛˆBˆ\ÙWÛÜ[ÛœË˜[Y\ÖÜÙ[XİYNÂˆš]™\—Ü™\ÛÛ][Û—Ù^XÚ]H•QNÂˆYˆ
+\ÙWÛÜ[ÛœË˜ÛÛ\]Xš[]VÜÙ[XİYJBˆš[Š‘HÙ]ÈÌÛÛ\]Xš[]H[ÙH
+›İš[\‹\™\ÜY
+WˆŠNÂˆ[ÙBˆš[Š‘HÙ]È	Yˆ‹š]™\—Ü™\ÛÛ][ÛŠNÂˆBˆBˆœ™XZÎÂ‚ˆØ\ÙHĞQÔĞĞSS‘×ÓSÑN‚ˆÂˆSÓ‘ÈÙ[XİYH
+SÓ‘ÊZ[\ÙĞÛÙNÂˆYˆ
+Ù[XİY
+SÓ‘Ê[[WÜİ\ÜYÜØØ[[™ÊHÂˆİ›˜ÜJÙ[XİYÜØØ[[™Ëİ\ÜYÜØØ[[™ÖÜÙ[XİYKPVĞU—ÓSˆHJNÂˆÙ[XİYÜØØ[[™ÖÓPVĞU—ÓSˆHWHH	×	ÎÂˆİ›˜ÜJš]™\—ÜØØ[[™×ØY™™\‹İ\ÜYÜØØ[[™ÖÜÙ[XİYKˆÚ^™[ÙŠš]™\—ÜØØ[[™×ØY™™\ŠHHJNÂˆš]™\—ÜØØ[[™×ØY™™\–ÜÚ^™[ÙŠš]™\—ÜØØ[[™×ØY™™\ŠHHWHH	×	ÎÂˆš[Š”ØØ[[™È[ÙHÙ]Îˆ	\×ˆ‹Ù[XİYÜØØ[[™ÊNÂˆBˆBˆœ™XZÎÂ‚ˆØ\ÙHĞQÔUQT–WĞ•UÓ‚ˆÂˆÕÔ™Yœ™\ÚÚ[™İÊÚ[‹•S
+NÂˆˆËÈÙ]Tİš[™Èœ›ÛHØYÙ]ˆİXİØYÙ]
+š\ÙØYÙ]HÛ\İÂˆÚ[H
+\ÙØYÙ]	‰ˆ\ÙØYÙ]O‘ØYÙ]QOHĞQÒTÔÕ’S‘ÊHÂˆ\ÙØYÙ]H\ÙØYÙ]O“™^ØYÙ]ÂˆBˆˆYˆ
+\ÙØYÙ]
+HÂˆÚ\ˆ
+š\Üİš[™ÈH\Üİš[™×ÙØYÙ]İ˜[YJ\ÙØYÙ]
+NÂˆYˆ
+\Üİš[™ÊHÂˆİ›˜ÜJ\ØY™™\‹\Üİš[™ËÚ^™[ÙŠ\ØY™™\ŠHHJNÂˆ\ØY™™\–ÜÚ^™[ÙŠ\ØY™™\ŠHHWHH	×	ÎÂˆš[Š’TY™™\ˆ\]YÎˆ	É\É×ˆ‹\ØY™™\ŠNÂˆBˆBˆˆËÈ\œÙHT[™Ü[Û˜[ÜˆYˆ
+\\œÙWÚ\Ø[™ÜÜ
+\ØY™™\‹\ÛÛ›KÚ^™[ÙŠ\ÛÛ›JK	œÜ
+JHÂˆÊˆ™\ÜH˜YY™\ÜÈ[™ÙY\HÚ[™İÂˆ
+ˆÜ[ˆH\È\ÙYÈœ™]\›È‹ÚXÚ^]Âˆ
+ˆ›ØÙ\Ü×İÚ[™İ×Ù]™[Ê
+IÜÈ[\™H]™[ÛÜˆ
+ˆ
+[™XZÜÈH™\ÜÛœÙHY™™\ˆ™[İÈ]
+Kˆ
+ˆÛÜÚ[™ÈÙ][™ÜÈ[œİXYÙˆ\İ˜Z[[™Âˆ
+ˆ\ÈÛ™H]Y\H][\ˆ
+‹Âˆš[Š’[˜[YT›Ü›X]ˆ	É\É×ˆ‹\ØY™™\ŠNÂˆœ™XZÎÂˆBˆˆËÈHY˜][
+È˜[˜XÚÈÜË\HØ\Xš[]Y\ÈÛˆİXØÙ\ÜÂˆ\™›Ü›WÜ]Y\WÙ›İ×Ø[ØØ]Y
+Ú[‹\ÛÛ›KÜ
+NÂˆBˆœ™XZÎÂ‚ˆØ\ÙHĞQÑTĞÓÕ‘T—Ğ•UÓ‚ˆÂˆİXİ\ØÛİ™\™Yš[\ˆ›İ[™ÓPVÑTĞÓÕ‘T–WÔ‘TÕS×NÂˆ[›İ[™ØÛİ[ÂˆÚ\ˆÚÜÙ[—Ú\ÌM—NÂ‚ˆÕÔ™Yœ™\ÚÚ[™İÊÚ[‹•S
+NÂˆš[ŠÓPTˆŠNÂ‚ˆ›İ[™ØÛİ[H\ØÛİ™\—Üš[\œ×ÛÛ—Û[Š›İ[™PVÑTĞÓÕ‘T–WÔ‘TÕSÊNÂ‚ˆYˆ
+›İ[™ØÛİ[H
+HÂˆš[Š“›Èš[\œÈ›İ[™šXHÔÑÜˆQ”Ë—ˆŠNÂˆš[Š‘[\ˆHš[\ˆTX[X[H[™™\ÜÈ]Y\K—ˆŠNÂˆH[ÙHÂˆš[Š‘›İ[™	YØ[™Y]H]šXÙJÊK—ˆ‹›İ[™ØÛİ[
+NÂˆYˆ
+[—Ù\ØÛİ™\WÜÙ[Xİ[ÛŠÚ[‹›İ[™›İ[™ØÛİ[ÚÜÙ[—Ú\Ú^™[ÙŠÚÜÙ[—Ú\
+JJHÂˆİXİØYÙ]
+™\Ø×Ú\ÙØYÙ]HÛ\İÂ‚ˆİ›˜ÜJ\ØY™™\‹ÚÜÙ[—Ú\Ú^™[ÙŠ\ØY™™\ŠHHJNÂˆ\ØY™™\–ÜÚ^™[ÙŠ\ØY™™\ŠHHWHH	×	ÎÂ‚ˆÚ[H
+\Ø×Ú\ÙØYÙ]	‰ˆ\Ø×Ú\ÙØYÙ]O‘ØYÙ]QOHĞQÒTÔÕ’S‘ÊHÂˆ\Ø×Ú\ÙØYÙ]H\Ø×Ú\ÙØYÙ]O“™^ØYÙ]ÂˆBˆYˆ
+\Ø×Ú\ÙØYÙ]
+HÂˆÕÔÙ]ØYÙ]]œÊ\Ø×Ú\ÙØYÙ]Ú[‹•SˆÕÕÔİš[™Ë
+SÓ‘ÊZ\ØY™™\‹ˆQ×ÑÓ‘JNÂˆB‚ˆ\™›Ü›WÜ]Y\WÙ›İ×Ø[ØØ]Y
+Ú[‹ÚÜÙ[—Ú\
+NÂˆH[ÙHÂˆš[Š‘\ØÛİ™\HÙ[Xİ[ÛˆØ[˜Ù[Y—ˆŠNÂˆBˆBˆBˆœ™XZÎÂ‚ˆØ\ÙHĞQÔ’S•Ğ•UÓ‚ˆÂˆÕÔ™Yœ™\ÚÚ[™İÊÚ[‹•S
+NÂˆZ[š[İ\İÜYÙJÚ[ŠNÂˆBˆœ™XZÎÂ‚ˆØ\ÙHĞQÔĞU‘WĞ•UÓ‚ˆYˆ
+Ø]™WÙš]™\—ØÛÛ™šYÊÚ[ŠJBˆš[Š“Z[’S•[š]	YØ]™YÈS•ˆ[™S•TÎ—ˆ‹İ\œ™[İ[š]Ú[™^
+NÂˆ[ÙBˆš[Š‘˜Z[YÈØ]™HZ[’S•[š]	YÙ][™Ü×ˆ‹İ\œ™[İ[š]Ú[™^
+NÂˆœ™XZÎÂ‚ˆØ\ÙHĞQÑVUĞ•UÓ‚ˆ\›Z[˜]YH•QNÂˆœ™XZÎÂˆBˆœ™XZÎÂ‚ˆØ\ÙHQÓTĞÓÔÑUÒS‘ÕÎ‚ˆ\›Z[˜]YH•QNÂˆœ™XZÎÂ‚ˆØ\ÙHQÓTÔ‘Q”‘TÒÒS‘ÕÎ‚ˆÕĞ™YÚ[”™Yœ™\Ú
+Ú[ŠNÂˆÕÑ[™™Yœ™\Ú
+Ú[‹•QJNÂˆÊˆÕĞ™YÚ[”™Yœ™\ÚÑ[™™Yœ™\ÚÛ›H™\Z[ÈØYÛÛÂˆ
+ˆØYÙ]ÈHHİ]\È›Ş\È[™Y˜]Ûˆ[™™YYÈ]Âˆ
+ˆİÛˆ™\^H\™KÜˆ]ÛÚÜÈ[\YYİ][H[YBˆ
+ˆÛÛY][™È›Ü˜Ù\ÈH™Yœ™\Ú
+K™Ëˆš[\ˆ™YœÂˆ
+ˆÜ[š[™ÈÛˆÜÙˆ\ÈÚ[™İÈ[™ÛÜÚ[™ÈYØZ[ŠKˆ
+‹Âˆ™Y˜]×Ûİ]]Ø›Ş
+
+NÂˆ\Ù˜]×ÛX\šÙ\—Üİš\Ê
+NÂˆ\Ù˜]×ÜÚY\×Ú[
+
+NÂˆ\Ù˜]×Üš[\—ÚXÛÛŠ
+NÂˆœ™XZÎÂ‚ˆØ\ÙHQÓTÓQS•TPÒÎ‚ˆÂˆSÓ‘ÈÛÙHH[\ÙËOÛÙNÂˆÚ[H
+ÛÙHOHQS•S•S
+HÂˆUÓÔ‘Y[WÛ[HHQS•S•SJÛÙJNÂˆUÓÔ‘][WÛ[HHUSS•SJÛÙJNÂˆˆYˆ
+Y[WÛ[HOH
+HÈËÈš[HY[BˆİÚ]Ú
+][WÛ[JHÂˆØ\ÙHˆËÈØ]™HÙ][™ÜÂˆØ]™WÜš[Û[ÙJ
+NÂˆYˆ
+Ø]™WÙš]™\—ØÛÛ™šYÊÚ[ŠJBˆš[Š“Z[’S•[š]	YØ]™YÈS•ˆ[™S•TÎ—ˆ‹İ\œ™[İ[š]Ú[™^
+NÂˆ[ÙBˆš[Š‘˜Z[YÈØ]™HZ[’S•[š]	YÙ][™Ü×ˆ‹İ\œ™[İ[š]Ú[™^
+NÂˆœ™XZÎÂ‚ˆØ\ÙHNˆËÈØYÙ][™ÜÂˆ™[ØYØİ\œ™[İ[š]
+Ú[ŠNÂˆœ™XZÎÂ‚ˆØ\ÙHÎˆËÈX›İ]Z[’S•‹‹‚ˆÚİ×ØX›İ]
+Ú[ŠNÂˆœ™XZÎÂ‚ˆØ\ÙHNˆËÈ]Z]ˆ\›Z[˜]YH•QNÂˆœ™XZÎÂˆBˆH[ÙHYˆ
+Y[WÛ[HOHJHÈËÈ[Y[BˆİÚ]Ú
+][WÛ[JHÂˆØ\ÙHˆËÈZ[š[Ù][™ÜÈ[‹‹‚ˆ\Û][˜ÚÚ[ÙİZYJ
+NÂˆœ™XZÎÂˆBˆB‚ˆÛÙHHQS•S•SÈËÈÛ›H[™[™ÈÛ™HY[H][H\ˆ]™[ˆBˆBˆœ™XZÎÂˆˆˆB‚ˆ[\ÙÈHÕÑÙ]S\ÙÊÚ[‹O•\Ù\”Ü
+NÂˆBˆB‚ˆYˆ
+\İÜš[Ú›Ø‹˜Xİ]™JBˆ\İ\İÜš[ØØ[˜Ù[
+Ú[ŠNÂ‚ˆÊˆHXZ[ˆÚ[™İÈ\ÈÛÜÚ[™È
+ÜˆH\\È]Z][™ÊHH[ˆÜœ[™Yˆ
+ˆÜÛÛ\ˆÚ[™İÈYÜ[ˆÛİ[ÙY\]È\Ù\”Ü™YÚ\İ\™YÚ]ˆ
+ˆ[Z][ÛˆY\ˆ\È\ÚÈ^]ËÚXÚ\È›İØY™KˆÛÜÙH]Bˆ
+ˆØ[YHØ^H]ÈİÛˆÛÜÙH]ÛˆÛİ[ˆ
+‹ÂˆYˆ
+×ÜÜÛÛİÚ[ŠBˆ\ÜÜÛÛİÚ[—ØÛÜÙJ
+NÂŸB‚œİ]XÈ“ÓÓ\ÛÜ[—İÜÜİXÚÊ›ÚY
+HÂˆÓ‘È›Ø™WÜÛØÚÙ]Â‚ˆÊˆX]ÚHZ[š[][H™\œÚ[Ûˆ\ÙYHHš[\ˆš]™\‹ˆÜ[š[™ÈBˆ
+ˆXœ˜\H[Û™H\È›İ]Z]H[›İYÚˆHİ[KÚ[˜ÛÛ\]H[œİ[][ÛˆØ[‚ˆ
+ˆ^ÜÙHœÙÛØÚÙ]›Xœ˜\HÚ[Hİ[™Z[™È[˜X›HÈÜ™X]HÛØÚÙ]Ëˆ
+‹ÂˆÛØÚÙ]˜\ÙHHÜ[“Xœ˜\J˜œÙÛØÚÙ]›Xœ˜\H‹
+NÂˆYˆ
+TÛØÚÙ]˜\ÙJH™]\›ˆSÑNÂ‚ˆ›Ø™WÜÛØÚÙ]HÛØÚÙ]
+Q—ÒS‘UÓĞÒ×ÔÕ‘PSK
+NÂˆYˆ
+›Ø™WÜÛØÚÙ]
+HÂˆÛÜÙSXœ˜\JÛØÚÙ]˜\ÙJNÂˆÛØÚÙ]˜\ÙHH•SÂˆ™]\›ˆSÑNÂˆB‚ˆÛÜÙTÛØÚÙ]
+›Ø™WÜÛØÚÙ]
+NÂˆ™]\›ˆ•QNÂŸB‚œİ]XÈ›ÚY\ÜÚİ×İÜÜİXÚ×Ü™\]Z\™Y
+›ÚY
+HÂˆİXİX\ŞTİXİ\ÎÂ‚ˆ\Ë™\×ÔİXİÚ^™HHÚ^™[ÙŠİXİX\ŞTİXİ
+NÂˆ\Ë™\×Ñ›YÜÈHÂˆ\Ë™\×Õ]HH
+P–UH
+ŠH“Z[š[Ù][™ÜÈÂˆ\Ë™\×Õ^›Ü›X]H
+P–UH
+ŠBˆ“Z[’S•™YYÈH[›š[™ÈÔÒTİXÚË——ˆ‚ˆ˜œÙÛØÚÙ]›Xœ˜\HÛİ[›İ™HÜ[™YÜˆ]Ûİ[›İˆ‚ˆ˜Ü™X]HHÛØÚÙ]ˆİ\Üˆ[œİ[›ØYÚİË[ZUÔZX[ZKˆ‚ˆ›Üˆ[›İ\ˆÛÛ\]X›HÔÒTİXÚË[ˆ[ˆZ[’S•YØZ[‹——ˆ‚ˆ“›Èš[\ˆÙ][™ÜÈÜˆš]™\ˆš[\È]™H™Y[ˆÚ[™ÙYˆÂˆ\Ë™\×ÑØYÙ]›Ü›X]H
+P–UH
+ŠH‘^]ÂˆX\ŞT™\]Y\İ
+•S	™\Ë•S
+NÂŸB‚‹ËÈXZ[ˆ[˜İ[Û‚š[XZ[Š›ÚY
+HÂˆUÓÔ‘Ü›Ü™\Â‚ˆÊˆÜ[ˆXœ˜\šY\ÈÚ]™\œÚ[ÛˆÚXÚÜË‚ˆ
+‚ˆ
+ˆVT’SQS•Sˆ[›™Y]ŒÍÈ
+[ZYØSÔÈ‹ŒÚ\™HØYÛÛË›Xœ˜\HØ\Âˆ
+ˆ[›ÙXÙY
+H˜]\ˆ[ˆHŒÎH
+[ZYØSÔÈËŒ
+H\È\ÙYÈ™\]Z\™K‚ˆ
+ˆ[Z][Û‹›Xœ˜\KÙÜ˜\XÜË›Xœ˜\KÙØYÛÛË›Xœ˜\H[^\İY]ˆ
+ˆŒÍÎÈHš]™\‹\ÚYHXœ˜\HÜ[œÈ
+ÜË›Xœ˜\KÙÜ˜\XÜË›Xœ˜\H[‚ˆ
+ˆš]™\‹Ùš]™\—ØÛÜ™K˜È[™š]™\‹ØÛÛ[X[™İX›K˜ÊH[™XYHÛ›H]™\‚ˆ
+ˆ\ÚÙY›ÜˆŒÍËˆÕÔÙ]ØYÙ]]œËHÕÖWÈYÜË[™Ù]š\İX[[™›Ê
+Bˆ
+ˆ™[İÈ\™H[ŒÍŠÈØYÛÛË›Xœ˜\HTKˆHÛ™HØ[\‹\ÚYHŒÎK[Û›Bˆ
+ˆØ[\Èš[HXZÙ\ËØZ[™\İ[J
+H
+Ü˜\XÜË›Xœ˜\HŒÎKˆ
+ˆX\šÙ\‹XÛÛİ\ˆ[šÈİš\
+K\ÈÙ\\˜][HİX\™Y]]ÈØ[Ú]HBˆ
+ˆÙYH\™K‚ˆ
+‚ˆ
+ˆ“ÕQUTÒPĞSHÓÓ‘’T“QQÛˆ™X[[ZYØSÔÈ‹ŒÌ‹Œ\™Ø\™HÜ‚ˆ
+ˆ[][][ÛˆH[›ZÙH]™\Hİ\ˆ[ZYØSÔË]™\œÚ[ÛˆÛZ[H[ˆ\ÈÛÙX˜\ÙKˆ
+ˆÚXÚÛ›HÙ]ÈXYHY\ˆH™X[\İ
+ÙYH‘PQQK›Y	ÜÈÚ[™Ù[ÙÈ[™ˆ
+ˆØÜËÓÔÌÌWÔÕTÔ•›Y›Üˆ]ÛÛ™[[ÛŠKˆ\È\È^XİH]ˆ
+ˆ[™[™È\İÈHŒÍËXÛ\ÜÈŞ\İ[HX^Hİ[]ÛÛYHİ\ˆŒÎ
+Ë[Û›Bˆ
+ˆ™Z]š[İ\ˆ\È]Y]Z\ÜÙYˆ
+‹Âˆ[Z][Û˜\ÙHH
+İXİ[Z][Û˜\ÙH
+ŠSÜ[“Xœ˜\Jš[Z][Û‹›Xœ˜\H‹ÍÊNÂˆYˆ
+R[Z][Û˜\ÙJHÂˆš[Š‘˜Z[YÈÜ[ˆ[Z][Û‹›Xœ˜\WˆŠNÂˆ™]\›ˆNÂˆB‚ˆÙ˜\ÙHH
+İXİÙ˜\ÙH
+ŠSÜ[“Xœ˜\J™Ü˜\XÜË›Xœ˜\H‹ÍÊNÂˆYˆ
+QÙ˜\ÙJHÂˆš[Š‘˜Z[YÈÜ[ˆÜ˜\XÜË›Xœ˜\WˆŠNÂˆÛÜÙSXœ˜\J
+İXİXœ˜\H
+ŠR[Z][Û˜\ÙJNÂˆ™]\›ˆNÂˆB‚ˆØYÛÛĞ˜\ÙHHÜ[“Xœ˜\J™ØYÛÛË›Xœ˜\H‹ÍÊNÂˆYˆ
+QØYÛÛĞ˜\ÙJHÂˆš[Š”™\]Z\™\ÈŒÍÈØYÛÛË›Xœ˜\WˆŠNÂˆÛÜÙSXœ˜\J
+İXİXœ˜\H
+ŠQÙ˜\ÙJNÂˆÛÜÙSXœ˜\J
+İXİXœ˜\H
+ŠR[Z][Û˜\ÙJNÂˆ™]\›ˆNÂˆB‚ˆYˆ
+[\ÛÜ[—İÜÜİXÚÊ
+JHÂˆš[ŠHÛÜšÚ[™ÈœÙÛØÚÙ]›Xœ˜\HÔÒTİXÚÈ\È™\]Z\™YˆŠNÂˆ\ÜÚİ×İÜÜİXÚ×Ü™\]Z\™Y
+
+NÂˆÛÜÙSXœ˜\JØYÛÛĞ˜\ÙJNÂˆÛÜÙSXœ˜\J
+İXİXœ˜\H
+ŠQÙ˜\ÙJNÂˆÛÜÙSXœ˜\J
+İXİXœ˜\H
+ŠR[Z][Û˜\ÙJNÂˆ™]\›ˆNÂˆB‚ˆÊˆØ[YHÜ^‹™›ÛÚ^™H
+
+HØYÛÛÈ[™XYHÜ[œÈ›Üˆ]™\HØYÙ][‚ˆ
+ˆ\ÈÚ[™İÈšXH™×Õ^]ˆH›İHÙ\\˜]HÚ^™KMˆ˜\šX[\Âˆ
+ˆ\ÙYÈ™\]Y\İÚXÚH™X[Z\™Ø\™H™\ÜYYÈÛÜ™ÛÜˆ
+ˆ]š[™È™Y[ˆ[ˆ™Xİš[
+Hİ]\È›Ş	ÜÈ›Ü™\‹Ø˜XÚÙÜ›İ[™
+Bˆ
+ˆÙ\˜]Ú[™Èš[™KÛ›H^
+
+H\Ú[™È\È›Û›ÙXÙY›İ[™Ëˆ
+ˆÛÛœÚ\İ[Ú]]ÜXÚYšXÈ›Û˜\šX[	ÜÈÛ\]H™Z[™ÈBˆ
+ˆÛ™H[™Èœ›ÚÙ[ˆ˜]\ˆ[ˆ\ÈÚ[™İËÔ˜\İÜ[ˆÙ[™\˜[ˆ
+‹Âˆ›ÛHÜ[‘›Û
+	•Ü^
+NÂˆYˆ
+Y›Û
+HÂˆš[Š‘˜Z[YÈÜ[ˆÜ^ˆ›ÛˆŠNÂˆÛÜÙSXœ˜\JÛØÚÙ]˜\ÙJNÂˆÛÜÙSXœ˜\JØYÛÛĞ˜\ÙJNÂˆÛÜÙSXœ˜\J
+İXİXœ˜\H
+ŠQÙ˜\ÙJNÂˆÛÜÙSXœ˜\J
+İXİXœ˜\H
+ŠR[Z][Û˜\ÙJNÂˆ™]\›ˆNÂˆB‚ˆËÈØÚÈHY˜][X›XÈØÜ™Y[‚ˆØÜ™Y[ˆHØÚÔX”ØÜ™Y[Š•S
+NÂˆYˆ
+\ØÜ™Y[ŠHÂˆš[ŠÛİ[›İØÚÈX›XÈØÜ™Y[—ˆŠNÂˆÛÜÙQ›Û
+›Û
+NÂˆÛÜÙSXœ˜\JÛØÚÙ]˜\ÙJNÂˆÛÜÙSXœ˜\JØYÛÛĞ˜\ÙJNÂˆÛÜÙSXœ˜\J
+İXİXœ˜\H
+ŠQÙ˜\ÙJNÂˆÛÜÙSXœ˜\J
+İXİXœ˜\H
+ŠR[Z][Û˜\ÙJNÂˆ™]\›ˆNÂˆB‚ˆËÈÙ]š\İX[[™›ÂˆšHHÙ]š\İX[[™›ÊØÜ™Y[‹Q×ÑÓ‘JNÂˆYˆ
+]šJHÂˆš[Š‘˜Z[YÈÙ]š\İX[[™›×ˆŠNÂˆ[›ØÚÔX”ØÜ™Y[Š•SØÜ™Y[ŠNÂˆÛÜÙQ›Û
+›Û
+NÂˆÛÜÙSXœ˜\JÛØÚÙ]˜\ÙJNÂˆÛÜÙSXœ˜\JØYÛÛĞ˜\ÙJNÂˆÛÜÙSXœ˜\J
+İXİXœ˜\H
+ŠQÙ˜\ÙJNÂˆÛÜÙSXœ˜\J
+İXİXœ˜\H
+ŠR[Z][Û˜\ÙJNÂˆ™]\›ˆNÂˆB‚ˆËÈØ[İ[]HÜ›Ü™\‚ˆÜ›Ü™\ˆHØÜ™Y[‹O•Ğ›Ü•Ü
+È
+ØÜ™Y[‹O‘›ÛOWÖTÚ^™H
+ÈJNÂˆ×İÜ›Ü™\ˆHÜ›Ü™\ÂˆÊˆŞXÛHX™[Ú[\œÈ[™XYH\™Ù]›ØÙ\ÜË[Y™][YHİ]XÈİÜ˜YÙK‚ˆ
+ˆÙYYÜØ]™YÛÜ[Û—ÛX™[Ê
+HÜ[]YÜÙH\œ˜^\ÈX›İ™Kˆ
+‹ÂˆËÈØYHØ[YH[š]›Ùš[H\ÙYHU”Î”š[\œËÓZ[’S•‚ˆØYÙš]™\—ØÛÛ™šYÊ
+NÂˆ\ØZ[ÜÜÛÛÛÜ[ÛœÊ
+NÂˆÙYYÜØ]™YÛÜ[Û—ÛX™[Ê
+NÂ‚ˆËÈØYš[[ÙHœ›ÛHS•‚ˆØYÜš[Û[ÙJ
+NÂ‚ˆËÈÙYYH[š]›ÜİÛ‰ÜÈX™[Èœ›ÛHÚ]]™\ˆ\ÈØ]™YÛˆ\ÚË‚ˆ™Yœ™\Úİ[š]Ù›ÜİÛŠ•S
+NÂ‚ˆËÈÜ™X]HØYÙ]ÂˆYˆ
+XÜ™X]P[ØYÙ]Ê	™Û\İšKÜ›Ü™\ŠJHÂˆš[Š‘˜Z[YÈÜ™X]HØYÙ]×ˆŠNÂˆœ™YUš\İX[[™›ÊšJNÂˆ[›ØÚÔX”ØÜ™Y[Š•SØÜ™Y[ŠNÂˆÛÜÙQ›Û
+›Û
+NÂˆÛÜÙSXœ˜\JÛØÚÙ]˜\ÙJNÂˆÛÜÙSXœ˜\JØYÛÛĞ˜\ÙJNÂˆÛÜÙSXœ˜\J
+İXİXœ˜\H
+ŠQÙ˜\ÙJNÂˆÛÜÙSXœ˜\J
+İXİXœ˜\H
+ŠR[Z][Û˜\ÙJNÂˆ™]\›ˆNÂˆB‚ˆËÈÜ[ˆÚ[™İÂˆÚ[™İÈHÜ[•Ú[™İÕYÜÊ•SˆĞWÕ]K
+SÓ‘ÊH“Z[š[Ù][™ÜÈ‹ˆĞWÑØYÙ]Ë
+SÓ‘ÊYÛ\İˆĞWĞ]]ĞY\İ•QKˆĞWÕÚYLŒˆĞWÓZ[•ÚYLŒˆÊˆÙY\HÛÛ\Xİ\İÜšXØ[ZYÚˆÕUUÕÔ\ÈÜÚ][Û™YÛÂˆ
+ˆHÛÛ\]H[™Y˜]Ûˆİ]\È›Ş™[XZ[œÈ[œÚYH\ÈÌMˆ
+ˆ˜\İÜÚ]›È[\ÙYİš\™[İÈ]ˆ
+‹ÂˆĞWÒ[›™\’ZYÚÌMˆĞWÓZ[’ZYÚÌMˆĞWÑ˜YĞ˜\‹•QKˆĞWÑ\ØYÙ]•QKˆĞWĞXİ]˜]K•QKˆĞWĞÛÜÙQØYÙ]•QKˆĞWÔÚ^™QØYÙ]•QKˆĞWÔÚ[\T™Yœ™\Ú•QKˆĞWÓ™]ÓÛÚÓY[\Ë•QKˆĞWÒQÓTQÓTĞÓÔÑUÒS‘ÕÈQÓTÔ‘Q”‘TÒÒS‘ÕÈÕ’S‘ÒQÓT•UÓ’QÓTÖPÓRQÓTQÓTÓQS•TPÒËˆĞWÔX”ØÜ™Y[‹
+SÓ‘Ê\ØÜ™Y[‹ˆQ×ÑÓ‘JNÂ‚ˆYˆ
+]Ú[™İÊHÂˆš[Š‘˜Z[YÈÜ[ˆÚ[™İ×ˆŠNÂˆœ™YQØYÙ]ÊÛ\İ
+NÂˆœ™YUš\İX[[™›ÊšJNÂˆ[›ØÚÔX”ØÜ™Y[Š•SØÜ™Y[ŠNÂˆÛÜÙQ›Û
+›Û
+NÂˆÛÜÙSXœ˜\JÛØÚÙ]˜\ÙJNÂˆÛÜÙSXœ˜\JØYÛÛĞ˜\ÙJNÂˆÛÜÙSXœ˜\J
+İXİXœ˜\H
+ŠQÙ˜\ÙJNÂˆÛÜÙSXœ˜\J
+İXİXœ˜\H
+ŠR[Z][Û˜\ÙJNÂˆ™]\›ˆNÂˆB‚ˆÊˆ˜]ÈHİ]\È›Ş	ÜÈ[\H›Ü™\ˆ[[YYX][K˜]\ˆ[ˆX]š[™Âˆ
+ˆ][š\ÚX›H[[Hš\œİİ]\È[™H\[œÈÈ˜]È]ˆ
+‹Âˆİ\İÛWÜš[ŠÓPTˆŠNÂˆ\Ù˜]×ÛX\šÙ\—Üİš\Ê
+NÂˆ\Ù˜]×ÜÚY\×Ú[
+
+NÂ‚ˆËÈÙ]H[š]X[İ]HÙˆHš[[ÙH˜Y[È]ÛœÂˆİXİØYÙ]
+œš[Û[ÙWÙØYÙ]HÛ\İÂˆÚ[H
+š[Û[ÙWÙØYÙ]	‰ˆš[Û[ÙWÙØYÙ]O‘ØYÙ]QOHĞQÔ’S•ÓSÑJHÂˆš[Û[ÙWÙØYÙ]Hš[Û[ÙWÙØYÙ]O“™^ØYÙ]ÂˆBˆYˆ
+š[Û[ÙWÙØYÙ]
+HÂˆÕÔÙ]ØYÙ]]œÊš[Û[ÙWÙØYÙ]Ú[™İË•SˆÕÖWĞXİ]™Kš[Û[ÙKˆQ×ÑÓ‘JNÂˆB‚ˆY[HHÜ™X]SY[\ÊY[Wİ[\]KQ×ÑÓ‘JNÂˆYˆ
+Y[JHÂˆ^[İ]Y[\ÊY[KšKˆÕS—Ó™]ÓÛÚÓY[\Ë•QKËÈ[˜X›Hİ[™\™Ú]KÙÜ™^HÛÚÂˆÕS—Ñœ›Û[‹KËÈ^[ˆ
+\İX[H›XÚÊBˆÕ“WĞ˜XÚÔ[‹ËÈ˜XÚÙÜ›İ[™[ˆ
+\İX[HÚ]JBˆQ×ÑÓ‘JNÂˆÙ]Y[Tİš\
+Ú[™İËY[JNÂˆH[ÙHÂˆš[Š‘˜Z[YÈÜ™X]HY[\×ˆŠNÂˆB‚ˆËÈ™Yœ™\ÚÚ[™İÂˆÕÔ™Yœ™\ÚÚ[™İÊÚ[™İË•S
+NÂ‚ˆËÈÙ™™\ˆÈ[œİ[U”Î”š[\œËÓZ[’S•Yˆ]\ÈZ\ÜÚ[™Ë‚ˆÚXÚ×Ø[™ÛÙ™™\—Ùš]™\—Ú[œİ[
+Ú[™İÊNÂ‚ˆYˆ
+ØYØØ\Xš[]WØØXÚWÙ›Ü—Øİ\œ™[Ù[™Ú[
+
+JHÂˆ\WØØXÚYØØ\Xš[]Y\ÊÚ[™İÊNÂˆš[Š“ØYYØXÚYš[\ˆØ\Xš[]Y\×ˆŠNÂˆH[ÙHÂˆ\WÜØ]™YÛÜ[Û—Üİ]JÚ[™İÊNÂˆÊˆ\WÜØ]™YÛÜ[Û—Üİ]J
+H]Ù[ˆ™]™\ˆÙÜÈ[][™ÈHÚ]İ]ˆ
+ˆ\ËHİ\\Ú\™HHØ\Xš[]HØXÚHÙ\Û‰İX]ÚBˆ
+ˆİ\œ™[ÜİÜÜÜ]
+[]Y™]™\ˆ]Y\šYYY]ÜˆBˆ
+ˆ[™Ú[Ú[™ÙY
+HX]™\ÈHİ]\È›ŞÛÛ\][HÚ[[ÚXÚˆ
+ˆ™XYÈ\È˜œ›ÚÙ[ˆˆ˜]\ˆ[ˆ››İ[™ÈØXÚYY]‹ˆ
+‹Âˆš[Š“›ÈØXÚYØ\Xš[]Y\È›Üˆ\È[™Ú[H™\ÜÈ]Y\WˆŠNÂˆB‚ˆÊˆ™Yœ™\Ú]™Hš[\ˆİ]H
+\ÜXÚX[H[šËİÛ™\ˆ]™[ÊHÛˆİ\\ˆ
+ˆÚ[ˆ\È[š][™XYH\ÈHØ]™Y[™Ú[ˆ™]\ÙH^XİHHØ[YBˆ
+ˆ]Y\H›İÈ\ÈH]ÛˆÛÈÜ˜[˜XÚËØ\Xš[]H\]\ËØXÚBˆ
+ˆ™Yœ™\Ú[™X\šÙ\ˆ™Y˜]È™Z]š[İ\ˆİ^H[ˆÛ™HXÙKˆH™]ËØ›[šÂˆ
+ˆ[œİ[\È[ˆ[\H\ØY™™\ˆ[™[X™\˜][HÙ\È›İ[™È\™Kˆ
+‹ÂˆYˆ
+\ØY™™\–ÌJHÂˆÚ\ˆİ\\Ú\ÍNÂˆ[İ\\ÜÜHLNÂ‚ˆYˆ
+\œÙWÚ\Ø[™ÜÜ
+\ØY™™\‹İ\\Ú\ˆÚ^™[ÙŠİ\\Ú\
+K	œİ\\ÜÜ
+JHÂˆš[Š”™Yœ™\Ú[™ÈØ]™Yš[\ˆİ]\ÈÛˆİ\\ˆ	\×ˆ‹\ØY™™\ŠNÂˆ\™›Ü›WÜ]Y\WÙ›İ×Ø[ØØ]Y
+Ú[™İËİ\\Ú\İ\\ÜÜ
+NÂˆH[ÙHÂˆš[Š”Ø]™Yš[\ˆY™\ÜÈ	É\ÉÈ\È[˜[YHÚÚ\[™Èİ\\]Y\Wˆ‹ˆ\ØY™™\ŠNÂˆBˆB‚ˆÊˆÚXÚ×Ø[™ÛÙ™™\—Ùš]™\—Ú[œİ[
+
+HX›İ™HØ[ˆÜ[ˆX\ŞT™\]Y\İÛˆÜˆ
+ˆÙˆ\ÈÚ[™İÈ™Y›Ü™HH]™[ÛÜ™[İÈ\È]™[ˆİ\YÛÈ[Bˆ
+ˆQÓTÔ‘Q”‘TÒÒS‘ÕÈ]X[ÙÉÜÈÛÜÙHÙ[™\˜]\ÈÚ]È[š[™Yˆ
+ˆ[[›ØÙ\Ü×İÚ[™İ×Ù]™[Ê
+HÙ]È\›İ[™È]HHÚXÚÚ[ˆ
+ˆH[™Y˜]Ûˆİ]\È›Ş
+ÙYH™Y˜]×Ûİ]]Ø›Ş
+
+IÜÈÛÛ[Y[
+HX^Bˆ
+ˆ[™XYH]™H™Y[ˆ[XYÙY[™™\Z[YÚ]›İ[™È[ˆ]ˆÛ™Bˆ
+ˆš[˜[Ş[˜Ú›Û›İ\È™\Z[\™KY\ˆ[ÙˆHX›İ™Hİ\\ˆ
+ˆXİ]š]H\ÈÙ]Y[™[[YYX][H™Y›Ü™HHÚ[™İÈ\ÈXİX[Bˆ
+ˆÚİÛˆÈH\Ù\‹Ù\Û‰İ\[™Ûˆ]]™[]™\ˆ\œš]š[™È[‚ˆ
+ˆ[YKˆ
+‹Âˆ™Y˜]×Ûİ]]Ø›Ş
+
+NÂˆ\Ù˜]×ÛX\šÙ\—Üİš\Ê
+NÂˆ\Ù˜]×ÜÚY\×Ú[
+
+NÂ‚ˆËÈ›ØÙ\ÜÈ]™[Âˆ›ØÙ\Ü×İÚ[™İ×Ù]™[ÊÚ[™İÊNÂ‚ˆËÈØ]™Hš[[ÙH™Y›Ü™H^][™ÂˆØ]™WÜš[Û[ÙJ
+NÂ‚ˆËÈÛX[\ˆËÈ[œİ\™HÜ\˜][Û—Ú[—Ü›ÙÜ™\ÜÈ\È™\Ù]ˆÜ\˜][Û—Ú[—Ü›ÙÜ™\ÜÈHSÑNÂ‚ˆËÈ›ØÙ\ÜÈ[H™[XZ[š[™ÈY\ÜØYÙ\È[ˆHÚ[™İÉÜÈ\Ù\”ÜˆYˆ
+Ú[™İÊHÂˆİXİ[ZSY\ÜØYÙH
+š[\ÙÎÂˆÚ[H
+
+[\ÙÈHÕÑÙ]S\ÙÊÚ[™İËO•\Ù\”Ü
+JJHÂˆÕÔ™\RS\ÙÊ[\ÙÊNÂˆBˆB‚ˆ\Ùœ™YWÜÚY\×Ú[Ú[XYÙ\Ê
+NÂ‚ˆÊˆÛÜœ™XİØYÛÛÈX\™İÛˆÜ™\ˆš\œİ]XÚY[\È[™ÛÜÙHBˆ
+ˆÚ[™İË[ˆœ™YHØYÙ]Ë[ˆ™[X\ÙHHX™[˜XÚÚ[™ÈY[[ÜK‚ˆ
+‹ÂˆYˆ
+Ú[™İÈ	‰ˆY[JHÂˆÛX\“Y[Tİš\
+Ú[™İÊNÂˆB‚ˆYˆ
+Ú[™İÊHÂˆÛÜÙUÚ[™İÊÚ[™İÊNÂˆÚ[™İÈH•SÂˆB‚ˆYˆ
+Û\İ
+HÂˆœ™YQØYÙ]ÊÛ\İ
+NÂˆÛ\İH•SÂˆB‚ˆÊˆŞXÛHØYÙ]X™[È\™Hİ]XÈ›ØÙ\ÜË[Y™][YHİÜ˜YÙKˆ
+‹ÂˆÛX[\Ù›ÜİÛ—ÛX™[Ê
+NÂ‚ˆYˆ
+Y[JHÂˆœ™YSY[\ÊY[JNÂˆY[HH•SÂˆB‚ˆÊ‚ˆ
+ˆØYÛÛÈš\İX[[™›È™[Û™ÜÈÈHØÜ™Y[ˆ]Ø\ÈØZ[™Yœ›ÛK‚ˆ
+ˆ]]\İ™H™[X\ÙYÚ[HHX›XË\ØÜ™Y[ˆØÚÈ\Èİ[[‚ˆ
+‚ˆ
+ˆHÛÜ™\ˆY[›ØÚÔX”ØÜ™Y[Š
+Hš\œİ[™Û›H[ˆØ[Yˆ
+ˆœ™YUš\İX[[™›Ê
+Kˆ]X]™\ÈØYÛÛÈ\Ú[™ÈØÜ™Y[‹\™[]Yİ]Bˆ
+ˆY\ˆİ\ˆİX\˜[YH]HØÜ™Y[ˆÚ[\ˆ\Èİ[˜[Y\ÈÛÛ™Kˆ
+ˆ[™\È\Xİ[\›H[™œšY[™HÈHÛ\ÜÚXÈÔÌËŒHXœ˜\šY\Ë‚ˆ
+‚ˆ
+ˆÛÜœ™XİY™][YN‚ˆ
+ˆœ™YQØYÙ]ÈÈœ™YSY[\Âˆ
+ˆœ™YUš\İX[[™›Âˆ
+ˆ[›ØÚÔX”ØÜ™Y[‚ˆ
+‹ÂˆYˆ
+šJHÂˆœ™YUš\İX[[™›ÊšJNÂˆšHH•SÂˆB‚ˆÊˆ[šËİÛ™\ˆ˜\ˆ[œÈ\™H[XÜ›ÜÜÈ™Y˜]ÜÈ
+ÙYH\ÛX\šÙ\—Ü[œÖ×Bˆ
+ˆ™X\ˆ\Ù˜]×ÛX\šÙ\—Üİš\Ê
+JH˜]\ˆ[ˆ™[X\ÙY[[YYX][HY\‚ˆ
+ˆ˜]Ú[™ËÛÈ^H]\İ™H^XÚ]Hœ™YY\™HÛÈH\È\ÈBˆ
+ˆÒT‘QX›XÈØÜ™Y[‹[™X]š[™È[œÈ[ØØ]YÛˆ]\İ^]ˆ
+ˆÛİ[\›X[™[HYH\H™]ÈÙˆ]ÈÛÛİ\ˆ™YÚ\İ\œËˆ
+‹Âˆ\Ü™[X\ÙWÛX\šÙ\—Ü[œÊ
+NÂ‚ˆYˆ
+ØÜ™Y[ŠHÂˆ[›ØÚÔX”ØÜ™Y[Š•SØÜ™Y[ŠNÂˆØÜ™Y[ˆH•SÂˆB‚ˆËÈÛÜÙHH›ÛÛ›HY\ˆØYÛÛÈ›ÈÛ™Ù\ˆ\Èš\İX[[™›È\Ú[™È]‚ˆYˆ
+›Û
+HÂˆÛÜÙQ›Û
+›Û
+NÂˆ›ÛH•SÂˆB‚ˆËÈÛÜÙHXœ˜\šY\È[ˆ™]™\œÙHÜ™\ˆÙˆÜ[š[™Âˆ\ØÛX\—Üš[\—ÚXÛÛŠ
+NÂˆYˆ
+ÛØÚÙ]˜\ÙJHÂˆÛÜÙSXœ˜\JÛØÚÙ]˜\ÙJNÂˆÛØÚÙ]˜\ÙHH•SÂˆBˆYˆ
+ØYÛÛĞ˜\ÙJHÂˆÛÜÙSXœ˜\JØYÛÛĞ˜\ÙJNÂˆØYÛÛĞ˜\ÙHH•SÂˆBˆYˆ
+Ù˜\ÙJHÂˆÛÜÙSXœ˜\J
+İXİXœ˜\H
+ŠQÙ˜\ÙJNÂˆÙ˜\ÙHH•SÂˆBˆYˆ
+[Z][Û˜\ÙJHÂˆÛÜÙSXœ˜\J
+İXİXœ˜\H
+ŠR[Z][Û˜\ÙJNÂˆ[Z][Û˜\ÙHH•SÂˆB‚ˆ™]\›ˆÂŸB

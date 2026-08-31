@@ -1,5 +1,13 @@
 #include "dpi_options.h"
 
+#include <string.h>
+
+int mp_dpi_engine_allows_compat(const char *engine)
+{
+    return engine &&
+           (strcmp(engine, "pwg-raster") == 0 || strcmp(engine, "urf") == 0);
+}
+
 static int mp_dpi_valid(int dpi)
 {
     return dpi == 300 || dpi == 600;
@@ -16,7 +24,7 @@ static int mp_dpi_find(const struct MPDpiOptions *options, int dpi)
 }
 
 void mp_dpi_build_options(const int *reported, int reported_count,
-                          int pwg_raster, int requested,
+                          int raster_compat, int requested,
                           int requested_explicit,
                           struct MPDpiOptions *out)
 {
@@ -48,7 +56,7 @@ void mp_dpi_build_options(const int *reported, int reported_count,
         }
     }
 
-    if (pwg_raster && out->count > 0 && !reported_300 &&
+    if (raster_compat && out->count > 0 && !reported_300 &&
         out->count < MP_DPI_MAX_OPTIONS) {
         out->values[out->count] = 300;
         out->compatibility[out->count] = 1;

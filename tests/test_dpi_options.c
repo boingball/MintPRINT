@@ -9,6 +9,13 @@ int main(void)
     int only_600[] = { 600 };
     int both[] = { 300, 600 };
 
+    assert(mp_dpi_engine_allows_compat("pwg-raster"));
+    assert(mp_dpi_engine_allows_compat("urf"));
+    assert(!mp_dpi_engine_allows_compat("jpeg"));
+    assert(!mp_dpi_engine_allows_compat("pdf"));
+    assert(!mp_dpi_engine_allows_compat("postscript"));
+    assert(!mp_dpi_engine_allows_compat(NULL));
+
     mp_dpi_build_options(only_600, 1, 1, 300, 0, &options);
     assert(options.count == 2);
     assert(options.values[0] == 600 && options.compatibility[0] == 0);
