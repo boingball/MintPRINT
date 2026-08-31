@@ -1833,16 +1833,26 @@ static void mp_test_print_release(struct Window *win)
 static void mp_test_print_complete(struct Window *win)
 {
     LONG ioerr;
+    LONG request_error;
 
     if (!test_print_job.active || !test_print_job.request) return;
     ioerr = WaitIO((struct IORequest *)test_print_job.request);
-    if (ioerr != 0 || test_print_job.request->io_Error != 0) {
-        printf("Test Print failed: WaitIO=%ld io_Error=%ld\n",
-               ioerr, (LONG)test_print_job.request->io_Error);
-    } else {
-        printf("Test Print completed successfully\n");
-    }
+    request_error = (LONG)test_print_job.request->io_Error;
+    /* CloseDevice may still submit a pending/duplex page. Finish that
+     * before reporting completion, saving the request errors before the
+     * release helper deletes the IORequest. */
     mp_test_print_release(win);
+    if (ioerr != 0 || request_error != 0) {
+        printf("Test Print failed: WaitIO=%ld io_Error=%ld\n",
+               ioerr, request_error);
+    } else {
+        /* A real OS 2.04 capture returned no I/O error despite the driver
+         * logging an IPP connection timeout during Render(4). A completed
+         * raster request therefore cannot confirm delivery, and even IPP
+         * acceptance would not prove that paper has physically printed. */
+        printf("Test Print request finished; delivery is not confirmed\n");
+        printf("Check printer output, retained job status or Debug driver log\n");
+    }
 }
 
 static void mp_test_print_cancel(struct Window *win)
@@ -1866,8 +1876,10 @@ static void mp_test_print_cancel(struct Window *win)
  * that canvas's own dimensions/aspect - not something specific to any one
  * MintPRINT encoder. Going back to the previously-proven 320x453 source
  * (kept identical for JPEG, PWG Raster and PDF - same bitmap, same source
- * dimensions, same configured-media DestCols/DestRows, same
- * SPECIAL_ASPECT|SPECIAL_CENTER) sidesteps it again.
+ * dimensions, same configured-media DestCols/DestRows) preserves the
+ * intended page aspect. Do not add SPECIAL_CENTER: the OS 2.04 capture
+ * below shows that it pads even this full-page canvas against the driver's
+ * much larger maximum width.
  *
  * The private ColorMap exists because pen 0 on a live Workbench screen is
  * whatever grey the user's background happens to be, not white - dumping
@@ -2138,8 +2150,7 @@ static BOOL mintprint_test_page(struct Window *win) {
     } else {
         /* JPEG, PWG Raster, PDF and Apple Raster (URF) all reach this
          * branch identically: same source bitmap, same source dimensions,
-         * same configured-media-derived destination, same
-         * SPECIAL_ASPECT|SPECIAL_CENTER.
+         * same configured-media-derived destination, same SPECIAL_ASPECT.
          * printer.device does not derive the destination from the
          * configured media when DestCols/DestRows are left at 0 - a real
          * test print showed ~3113x3015px, unrelated to iso_a4_210x297mm -
@@ -2155,7 +2166,16 @@ static BOOL mintprint_test_page(struct Window *win) {
             (LONG)((media_w_100mm * dpi + 1270UL) / 2540UL);
         test_print_job.request->io_DestRows =
             (LONG)((media_h_100mm * dpi + 1270UL) / 2540UL);
-        test_print_job.request->io_Special = SPECIAL_ASPECT | SPECIAL_CENTER;
+        /* This bitmap already represents the whole page. SPECIAL_CENTER
+         * centres it against printer.device's legacy maximum width rather
+         * than the requested paper: the OS 2.04 capture at 300 DPI had
+         * MaxXDots=4096, scaledWidth=2478 and pi_xpos=(4096-2478)/2=809,
+         * producing a 3287x3508 raster instead of the A4-sized image.
+         * With Media=auto the driver's known-media clamp cannot remove
+         * that padding. Leave the full-page image left-aligned instead;
+         * retain aspect handling, explicit dimensions and the user's
+         * saved media choice. Application-driven centring is unchanged. */
+        test_print_job.request->io_Special = SPECIAL_ASPECT;
     }
 
     printf("Test Print: sending page through printer.device (dest %ld x %ld)...\n",
