@@ -1,6 +1,7 @@
 CROSS   ?= m68k-amigaos-
 CC       = $(CROSS)gcc
 HOSTCC  ?= cc
+PYTHON  ?= python3
 NM       = $(CROSS)nm
 CFLAGS  ?= -Os -m68000 -Wall -Wextra -fomit-frame-pointer -fno-builtin
 
@@ -13,7 +14,7 @@ DRIVER31_OUT := $(DRIVER31_BUILD)/MintPRINT
 TEST_BUILD := build/tests
 RELEASE_DIR := release/MintPRINT
 
-.PHONY: all gui test check test-http test-dpi test-jpeg test-ipp-enum test-postscript test-urf driver driver31 driver-symbols driver-symbols31 release clean help
+.PHONY: all gui test check test-http test-dpi test-jpeg test-ipp-enum test-postscript test-urf test-graphics-boundary driver driver31 driver-symbols driver-symbols31 release clean help
 
 all: gui
 
@@ -30,6 +31,7 @@ help:
 	@echo "  make driver-symbols31 - show ABI symbols used by the OS3.1 driver"
 	@echo "  make test-postscript - host-test and Ghostscript-validate the PostScript writer"
 	@echo "  make test-urf - run host-side Apple Raster (URF) writer tests"
+	@echo "  make test-graphics-boundary - host-test graphics FF/reset callbacks"
 	@echo "  make release  - build both drivers and the GUI, stage one distributable"
 	@echo "                  bundle (release/MintPRINT/) with both drivers under"
 	@echo "                  Drivers/ - MintPrintSettings picks the right one at runtime"
@@ -174,7 +176,12 @@ test-urf: | $(TEST_BUILD)
 # decoding, and the Ghostscript-validated PostScript writer, which needs
 # `gs` on PATH). This is what CI runs; it never touches the m68k cross
 # toolchain, so it needs no Amiga SDK to work.
-check: test test-http test-ipp-enum test-postscript
+check: test test-http test-ipp-enum test-postscript test-graphics-boundary
+
+# Compile the actual boundary callbacks with mocked Amiga I/O. No SDK,
+# printer connection or physical output is needed. Python uses stdlib only.
+test-graphics-boundary:
+	$(PYTHON) tests/test_graphics_boundary.py --cc "$(HOSTCC)"
 
 driver: $(DRIVER_OUT)
 	@echo

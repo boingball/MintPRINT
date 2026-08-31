@@ -7,3 +7,4 @@
 *:Zone.Identifier
 build/
 release/
+__pycache__/

@@ -16,6 +16,17 @@ to this page; replace that summary when preparing the next release.
 
 ## Unreleased
 
+- **Graphics form-feed/reset page boundaries (driver 41.13).** A processed
+  form-feed or `aRIS` reset now finalizes any pending
+  `SPECIAL_NOFORMFEED` graphics page before the following page begins. This
+  closes the gap where a short FinalWriter/Wordsworth page that had not
+  reached a media or short-strip heuristic could absorb the next page. The
+  existing engine finalizer is used, preserving duplex streams, Wordsworth
+  margin reconstruction and FinalWriter's stable variable-width canvas;
+  redundant boundaries and orphan tiny control bands create no blank job.
+  Page-finalization failures are latched and later dumps refused until the
+  driver is closed and reopened. Inspired by Andreas Stürmer's equivalent
+  graphics-boundary handling in AmiAirPrint 1.2, shared with permission.
 - **Test Print page placement with Media set to auto.** Removed redundant
   printer.device centring from the full-page JPEG/PWG/PDF/URF test request.
   An OS 2.04 capture showed it adding 809 blank columns before the image,
