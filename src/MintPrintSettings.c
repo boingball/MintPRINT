@@ -3881,15 +3881,40 @@ static int mp_screen_pen_count(struct Screen *scr, struct ColorMap *cm) {
     return count;
 }
 
-/* Ordered neutral dithering is only useful on palette/indexed screens.
- * On RTG true-colour/high-depth screens the source PNG/IFF can already be
- * represented smoothly; applying the 4x4 Bayer pattern there visibly adds
- * texture that was not present in the printer artwork. BitMap->Depth is the
- * same old, reliable depth signal used by mp_screen_pen_count() above, so
- * keep the classic fallback through 8-bit (<=256-colour) screens and leave
- * higher-depth screens on the normal nearest-colour path. */
+/* Ordered neutral dithering is only useful on classic planar screens.
+ * Do not trust BitMap->Depth on RTG: CyberGraphX/Picasso96 compatibility
+ * bitmaps can expose an 8-ish legacy field even when the real display is
+ * 16/24/32-bit. On V39+ ask graphics.library for the effective bitmap depth
+ * and flags instead. BMF_STANDARD specifically identifies the normal planar
+ * Amiga bitmap representation; RTG bitmaps are therefore kept on the smooth
+ * nearest-colour path even if a compatibility field reports <=8 bits.
+ *
+ * GetBitMapAttr() itself is V39, so AmigaOS 2.04 keeps the direct structure
+ * fallback. That is safe there because the classic V37 graphics system only
+ * has the planar bitmap representation this dither was written for. */
 static BOOL mp_should_dither_neutral(struct Screen *scr) {
-    return scr && scr->RastPort.BitMap && scr->RastPort.BitMap->Depth <= 8;
+    static struct BitMap *cached_bitmap = NULL;
+    static BOOL cached_result = FALSE;
+    struct BitMap *bm;
+
+    if (!scr || !scr->RastPort.BitMap)
+        return FALSE;
+
+    bm = scr->RastPort.BitMap;
+    if (bm == cached_bitmap)
+        return cached_result;
+
+    cached_bitmap = bm;
+    if (GfxBase && GfxBase->LibNode.lib_Version >= 39) {
+        ULONG depth = GetBitMapAttr(bm, BMA_DEPTH);
+        ULONG flags = GetBitMapAttr(bm, BMA_FLAGS);
+        cached_result = (depth > 0 && depth <= 8 &&
+                         (flags & BMF_STANDARD)) ? TRUE : FALSE;
+    } else {
+        cached_result = (bm->Depth <= 8) ? TRUE : FALSE;
+    }
+
+    return cached_result;
 }
 
 /* A pixel counts as "near-neutral" (grey-ish rather than a real hue) when
