@@ -19,7 +19,9 @@ to this page; replace that summary when preparing the next release.
 - **Capture-only output regression suite (driver 41.15).** MintPrint Settings
   can now run a 32-case coverage matrix through all five document engines and
   retain the generated jobs plus per-case logs/manifest under `T:` without
-  making any IPP submission. The suite is hard-gated on driver 41.15+ so an
+  making any IPP submission. Duplex cases are genuine two-page documents with
+  asymmetric page-2 marks for backside transform inspection. The suite is
+  hard-gated on driver 41.15+ so an
   older driver can never accidentally turn the regression run into real print
   jobs.
 - **Strict Apple Raster page-header compatibility (driver 41.14).** The URF

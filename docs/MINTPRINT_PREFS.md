@@ -144,7 +144,8 @@ scaling, sides, sheet-back transform and margin settings used for every case.
 This is a bounded coverage matrix rather than the Cartesian product of every
 setting: all five engines are exercised with all five scaling modes while
 300/600 DPI, colour/monochrome, draft/normal/high quality and A4/Letter are
-crossed through those cases; PWG/URF receive additional duplex cases and
+crossed through those cases; PWG/URF receive additional **two-page** duplex cases (page 2 carries
+asymmetric corner marks so backside rotation/flipping can be verified) and
 PostScript receives an explicit non-zero-margin case. This keeps the result
 set practical for `T:`, which is normally RAM:, while still touching every
 important output path. The suite never modifies saved Unit0 settings and
