@@ -186,13 +186,14 @@ reported resolution capabilities. Some printers under-report this
 list - for example, a printer may advertise only 600 DPI over IPP but
 still print 300-DPI PWG Raster correctly (and considerably faster).
 
-When PWG Raster is selected and the printer reports resolutions but
-does not report 300 DPI, Settings adds an extra entry marked
+When PWG Raster or Apple Raster (URF) is selected and the printer
+reports resolutions but does not report 300 DPI, Settings adds an entry marked
 "300* dpi". The asterisk means "compatibility option: not actually
 reported by the printer" - it is a deliberate override, not a printer
 capability. It is never auto-selected for a brand new, unsaved
 profile, but a previously saved 300 DPI choice is kept across future
-queries and restarts.
+queries and restarts. A URF printer that advertises only RS600 may still
+reject the experimental 300-DPI stream; the star does not claim support.
 
 If your printer's real resolution list does not include a working 300
 DPI mode, leave DPI on one of the plain (non-starred) entries.

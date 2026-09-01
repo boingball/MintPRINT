@@ -506,6 +506,7 @@ static BOOL mp_text_begin_encoder(int engine, ULONG width, ULONG height,
                                        mp_text_file_write, NULL) ? TRUE : FALSE;
         case MP_TEXT_ENGINE_URF:
             return mp_urf_begin(&g_text_urf, width, height, dpi,
+                                mp_urf_quality_value(g_text_config.quality),
                                 scratch, scratch_bytes,
                                 mp_text_file_write, NULL) ? TRUE : FALSE;
         default:

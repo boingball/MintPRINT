@@ -48,9 +48,9 @@ Page header (32 bytes), all multi-byte fields big-endian:
 ```text
 byte 0:      cupsBitsPerPixel   (24 - 8-bit sRGB, chunked RGB)
 byte 1:      colorspace         (1 - sRGB)
-byte 2:      duplex/tumble mode (0 = no duplex, 1 = duplex, short side
-             [two-sided-short-edge], 2 = duplex, long side [two-sided-long-edge])
-byte 3:      print quality      (0 - unspecified)
+byte 2:      duplex/tumble mode (1 = no duplex, 2 = duplex, short side
+             [two-sided-short-edge], 3 = duplex, long side [two-sided-long-edge])
+byte 3:      print quality      (3 = draft, 4 = normal, 5 = high)
 byte 4:      media type         (0 - unspecified)
 byte 5:      media position     (0 - auto)
 bytes 6-11:  reserved, zero
@@ -60,13 +60,15 @@ bytes 20-23: resolution (dpi - one figure used for both axes)
 bytes 24-31: reserved, zero
 ```
 
-The byte 2 (duplex/tumble) values above were corrected after real-hardware
-testing (see "Duplex and strip-printing accumulation" below) - the
-original CUPS-source-derived implementation used 1/2/3 instead of 0/1/2,
-which was independently caught against a second, unrelated source: a
-published from-scratch reverse-engineering of the on-the-wire format
-against a real HP DesignJet T230. Every other field's offset and size in
-this table was confirmed correct against that same source.
+The byte 2 values follow
+[CUPS's Apple Raster output path](https://github.com/OpenPrinting/cups/blob/0c432288c1566872b0ca36de17fffeac1b197c3d/cups/raster-stream.c#L1371-L1372).
+Driver revision 34
+temporarily changed them to the unofficial `0/1/2` mapping after a Brother
+duplex investigation; that Brother accepted the stream, but a stricter HP
+Color LaserJet M255/M256 later rejected a one-sided value of `0` in its URF
+parser. Driver revision 41.14 restores CUPS's on-wire `1/2/3` values and also
+stops writing unspecified quality `0`, which was outside that HP's advertised
+`PQ3-4-5` capability set. The page-layout offsets and sizes are unchanged.
 
 Unlike PWG Raster's page header, Apple Raster's compact 32-byte header has
 no CrossFeedTransform/FeedTransform-equivalent fields for describing a
@@ -166,25 +168,19 @@ printer *still* rejected the job with the identical
 `server-error-job-canceled`, immediately and synchronously (confirmed via
 `ipp_client.c`'s `rc=-16` path, which only fires when the printer's own
 IPP response to the submission itself carries an error status - this
-isn't a later async rasterization failure). The cause was the duplex/tumble
-byte values themselves: the original implementation, derived from a CUPS
-source paraphrase, used 1 = no duplex, 2 = short side, 3 = long side.
-Cross-checking against a second, independent, real-world source (see
-"Format layout" above) showed the actual on-the-wire values are 0 = no
-duplex, 1 = short side, 2 = long side - so a `two-sided-long-edge` job was
-sending byte value 3, which isn't a defined value in that second source at
-all. Driver revision 34 fixes the enum in `mp_urf_write_page_header()`.
-Notably, the one-sided test that confirmed URF's row/header layout back at
-driver revision 30 used the old scheme's "simplex" value (1), which under
-the corrected enum actually means "duplex, short side" - it likely worked
-anyway because that job's IPP-level `sides=one-sided` never told the
-printer's duplexer to engage at all, so the page-embedded hint went
-unchecked; the stricter duplex path evidently does check it.
+isn't a later async rasterization failure). The suspected cause was the
+duplex/tumble byte values themselves: the original CUPS-derived implementation
+used 1 = no duplex, 2 = short side, 3 = long side. Cross-checking against a
+second, independent, real-world source led revision 34 to adopt 0 = no duplex,
+1 = short side, 2 = long side. That was a useful interoperability workaround
+for this Brother, but it was not the CUPS on-wire mapping and was superseded
+by driver 41.14 after a strict HP Color LaserJet rejected simplex value 0 in
+its URF parser. Current builds again use CUPS's 1/2/3 values.
 
 **A fourth test, on driver revision 34, ruled out the duplex/tumble byte
 as the (whole) explanation.** The retained `T:MintPRINT-job.urf` was
 independently decoded byte-for-byte: 2 pages, both exactly 2478x3562,
-300dpi, `duplex=2` (the corrected "long side" value, matching the job's
+300dpi, `duplex=2` (revision 34's then-current "long side" value, matching the job's
 `sides=two-sided-long-edge`), every row's PackBits data decodes cleanly,
 and the file ends exactly at the last row of page 2 with zero trailing or
 missing bytes - about as byte-perfect as a duplex URF stream can be. The

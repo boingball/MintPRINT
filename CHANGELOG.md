@@ -16,6 +16,20 @@ to this page; replace that summary when preparing the next release.
 
 ## Unreleased
 
+- **Strict Apple Raster page-header compatibility (driver 41.14).** The URF
+  header now uses CUPS's canonical simplex/short-edge/long-edge values
+  `1/2/3` and writes the selected Draft/Normal/High quality as `3/4/5`
+  (defaulting to Normal), instead of the unofficial `0/1/2` mode mapping
+  and unspecified quality `0`. This targets the HP Color LaserJet
+  M255/M256 parser failure reported in
+  [issue #81](https://github.com/boingball/MintPRINT/issues/81): that printer
+  advertises `PQ3-4-5` and returned `PARSER / Not Implemented` for the old
+  one-sided header. Byte-exact host regressions cover all modes and quality
+  values. The Windows probe also recognizes URF as a valid multi-page duplex
+  transport. Settings now offers its explicit, never-auto-selected `300* dpi`
+  compatibility override for URF as well as PWG Raster; the reporting HP says
+  `RS600`, so 300 DPI remains experimental rather than a claimed capability.
+  Physical output on the reporting HP remains to be confirmed.
 - **Graphics form-feed/reset page boundaries (driver 41.13).** A processed
   form-feed or `aRIS` reset now finalizes any pending
   `SPECIAL_NOFORMFEED` graphics page before the following page begins. This
@@ -365,10 +379,11 @@ and the following Wordsworth strip-printing fixes:
   target while the back only got padded to it) - fixed in rev 33 by
   flooring every later page's target at the tallest page the job has
   finalized so far; then, with both pages byte-perfect and an exactly
-  matching height, the printer still rejected the job - the duplex/tumble
-  byte itself was wrong (1/2/3 for no-duplex/short/long instead of the
-  correct 0/1/2, caught by cross-checking a second, independent real-world
-  URF reverse-engineering against an HP DesignJet T230) - fixed in rev 34.
+  matching height, the printer still rejected the job. Revision 34 changed
+  CUPS's 1/2/3 mode mapping to an unofficial 0/1/2 mapping after comparison
+  with an HP DesignJet reverse-engineering report. That Brother later accepted
+  duplex, but driver 41.14 supersedes the mapping after a strict HP Color
+  LaserJet rejected simplex value 0; current builds again follow CUPS's 1/2/3.
   A fourth test on rev 34 hit the same strip-accumulator page-boundary bug
   PWG Raster hit (see the strip-printing fixes below); once revs 35-36
   landed, **two-sided long-edge duplex over `ENGINE=urf` is physically

@@ -55,7 +55,7 @@
  * MP_DRIVER_REV (the version half) only bumps for something that
  * warrants a new version number outright, not on every rebuild. */
 #define MP_DRIVER_REV 41
-#define MP_DRIVER_SUBREV 13
+#define MP_DRIVER_SUBREV 14
 
 struct ExecBase *SysBase = NULL;
 struct DosLibrary *DOSBase = NULL;
@@ -1068,6 +1068,7 @@ static BOOL mp_job_begin(ULONG width, ULONG height)
             g_urf_page_header_offset = g_job_file_bytes +
                                        (write_file_header ? 12UL : 0UL);
             if (!mp_urf_begin_page(&g_urf, width, height, g_config.resolution,
+                                   mp_urf_quality_value(g_config.quality),
                                    write_file_header, duplex, tumble,
                                    g_urf_scratch, g_urf_scratch_bytes,
                                    mp_job_file_write, NULL)) {

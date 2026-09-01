@@ -2384,7 +2384,7 @@ void update_dpi_dropdown(struct Window *win) {
     BOOL has_compat = FALSE;
 
     mp_dpi_build_options(supported_dpi, num_supported_dpi,
-                         strcmp(driver_engine_buffer, "pwg-raster") == 0,
+                         mp_dpi_engine_allows_compat(driver_engine_buffer),
                          driver_resolution,
                          driver_resolution_explicit ? 1 : 0,
                          &mp_dpi_options);
@@ -8107,10 +8107,10 @@ query_receive_pump_gui:
     ensure_quality_defaults();
     if (window) update_quality_dropdown(window);
     /* update_engine_dropdown() must run before update_dpi_dropdown(): it is
-     * what settles driver_engine_buffer on "pwg-raster" for a printer that
-     * advertises it (see mp_rebuild_engine_options_from_query()), and the
-     * DPI dropdown only offers the 300* compatibility entry when the engine
-     * buffer already reads "pwg-raster" at the time it is built. Building
+     * what settles driver_engine_buffer on "pwg-raster" or "urf" for a
+     * printer that advertises it (see mp_rebuild_engine_options_from_query()),
+     * and the DPI dropdown only offers the 300* compatibility entry when the
+     * engine buffer already names one of those raster engines. Building
      * DPI first left a fresh Query showing plain "600 dpi" with no compat
      * entry until the config was saved and the app reopened, when the
      * cached-capabilities path (apply_cached_capabilities()) happened to

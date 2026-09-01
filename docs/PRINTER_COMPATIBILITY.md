@@ -5,7 +5,7 @@ version, TCP/IP stack, document engine and the settings needed to reproduce a
 working print. It deliberately distinguishes physical output from an IPP job
 that merely reports success.
 
-Last reviewed: **30 August 2026**
+Last reviewed: **31 August 2026**
 
 ## Status key
 
@@ -29,6 +29,7 @@ accepts a job and silently discards it.
 | **Brother HL-L2350DW** on A4000, CSMkII 060/50 and Ariadne-II, wired | ✅ Working | 3.2.3 | Roadshow | Multi-page printing fully fixed - confirmed in issue #8 after a beta build, and fully in released 1.1.0 | 1.1.0; scaling `auto` |
 | **Canon TS8360** (IPP identifies it as **TS8300 series**) | ✅ Working | 3.2.3 | Not reported | PWG Raster text and colour pictures physically confirmed; JPEG pictures also work | Port `631`; path `/ipp/print`; PWG Raster; **`300* dpi` compatibility mode**; A4; source `auto`; scaling as required. Printer advertises only 600 DPI but accepts 300 DPI |
 | **HP OfficeJet 8014e** on A4000, 68060, Wi-Fi | ✅ Working | 3.2.3 | Not reported | Detection/Query and Test Print fully fixed - confirmed in issue #30 after a beta build, and fully in released 1.1.0 | Port `631`; path `/ipp/print`; advertises both JPEG and PWG Raster - a fresh add now defaults to PWG Raster |
+| **HP Color LaserJet M255/M256** | 🧪 Testing | Not reported | Not reported | Apple Raster reached the printer but driver 41.12 was rejected with `PARSER / Not Implemented`; driver 41.14 corrects the non-CUPS header mode and quality values ([issue #81](https://github.com/boingball/MintPRINT/issues/81)) | Port `631`; path `/ipp/print`; URF; reported `600 dpi`; optional experimental `300* dpi`; one-sided; normal quality; colour; physical retest pending |
 | **Samsung C480W / C48x Series** | 🟡 Partial (PostScript only) | 3.9 Boing Bag 2; Kickstart 3.1 | Not reported | JPEG is silently discarded; PWG Raster and PDF are rejected. PostScript engine confirmed physically printing, but is slow since this printer only accepts PostScript | Port `631`; path `/ipp/print`; `300 dpi`; A4; tray `tray-1`; normal quality; scaling `auto`; allow 3–4 minutes for PostScript |
 | **OKI B412** | 🧪 Testing | Not reported | Not reported | Advertises only `application/octet-stream, application/vnd.hp-PCL, image/urf` - none of MintPRINT's four existing engines. Motivated the new `ENGINE=urf` Apple Raster backend ([docs/URF_ENGINE.md](URF_ENGINE.md)); not yet physically test-printed | Port `631`; path `/ipp/print`; Engine `urf` (auto-selected after Query, since no other MintPRINT engine is advertised) |
 
@@ -98,15 +99,13 @@ each exposing a different real bug:
 3. **Driver revision 33.** Both pages now came out byte-perfect and an
    exactly matching 3562 rows each - and the printer *still* rejected the
    job with the identical IPP status, immediately and synchronously. The
-   cause was the duplex/tumble byte itself (page header offset 2): the
-   original CUPS-source-derived implementation used 1/2/3 for no-duplex/
-   short-side/long-side; cross-checking against a second, independent,
-   real-world URF reverse-engineering (against an HP DesignJet T230) found
-   the correct values are 0/1/2 - meaning this printer was being sent byte
-   value 3 for a `two-sided-long-edge` job, which isn't a defined value in
-   that second source at all. Fixed in driver revision 34 - see
-   `docs/URF_ENGINE.md`'s "Format layout" section for the corrected table
-   and citation.
+   suspected cause was the duplex/tumble byte itself (page header offset 2).
+   Revision 34 changed CUPS's 1/2/3 mapping to an unofficial 0/1/2 mapping
+   after comparison with an HP DesignJet reverse-engineering report, and the
+   Brother later printed duplex with it. Driver 41.14 supersedes that mapping:
+   a strict HP Color LaserJet rejected simplex value 0, while CUPS's actual
+   Apple-output path writes 1/2/3. See `docs/URF_ENGINE.md` for the current
+   table and the full sequence of findings.
 
 See `docs/URF_ENGINE.md` for all three fixes in detail. Apple Raster
 two-sided long-edge duplex is now physically confirmed on this printer (see
