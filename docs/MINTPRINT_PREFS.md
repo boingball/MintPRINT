@@ -126,6 +126,33 @@ neither SSDP nor mDNS, or that sits behind a router blocking multicast, will
 not appear. If nothing is found, enter the IP manually and use **Query** as
 before.
 
+## Output regression Test Suite
+
+MintPrint Settings includes a **Test Suite** button for developer/regression
+testing. It requires the installed `DEVS:Printers/MintPRINT` driver to be
+**41.15 or newer**; Settings refuses to start the suite with an older driver
+because older builds do not understand capture-only mode.
+
+The suite creates a fresh `T:MintPRINT-TestSuite` drawer (or `-2`, `-3`, ...
+if one already exists) and runs 32 normal `printer.device` Test Print
+renders. **No IPP Print-Job is submitted to the printer.** Driver 41.15's
+temporary capture-only config retains each JPEG, PWG Raster, PDF, PostScript
+or Apple Raster document in that drawer instead. A matching driver log and
+`manifest.txt` describe the exact engine, resolution, media, colour, quality,
+scaling, sides, sheet-back transform and margin settings used for every case.
+
+This is a bounded coverage matrix rather than the Cartesian product of every
+setting: all five engines are exercised with all five scaling modes while
+300/600 DPI, colour/monochrome, draft/normal/high quality and A4/Letter are
+crossed through those cases; PWG/URF receive additional duplex cases and
+PostScript receives an explicit non-zero-margin case. This keeps the result
+set practical for `T:`, which is normally RAM:, while still touching every
+important output path. The suite never modifies saved Unit0 settings and
+restores the live Settings controls when it finishes or is aborted.
+
+After the run, archive/upload the complete TestSuite drawer when reporting a
+rendering regression; the manifest makes each binary output reproducible.
+
 ## Make and model
 
 Query Printer now also requests `printer-make-and-model` and logs it (e.g.

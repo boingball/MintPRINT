@@ -16,6 +16,12 @@ to this page; replace that summary when preparing the next release.
 
 ## Unreleased
 
+- **Capture-only output regression suite (driver 41.15).** MintPrint Settings
+  can now run a 32-case coverage matrix through all five document engines and
+  retain the generated jobs plus per-case logs/manifest under `T:` without
+  making any IPP submission. The suite is hard-gated on driver 41.15+ so an
+  older driver can never accidentally turn the regression run into real print
+  jobs.
 - **Strict Apple Raster page-header compatibility (driver 41.14).** The URF
   header now uses CUPS's canonical simplex/short-edge/long-edge values
   `1/2/3` and writes the selected Draft/Normal/High quality as `3/4/5`

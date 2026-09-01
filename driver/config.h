@@ -7,10 +7,12 @@
 #define MP_CONFIG_PATH_MAX 96
 #define MP_CONFIG_OPTION_MAX 64
 #define MP_CONFIG_ENGINE_MAX 16
+#define MP_CONFIG_CAPTURE_PATH_MAX 160
 
 #define MP_CONFIG_SOURCE_DEFAULTS 0
 #define MP_CONFIG_SOURCE_ENV      1
 #define MP_CONFIG_SOURCE_ENVARC   2
+#define MP_CONFIG_SOURCE_TEST     3
 
 /* Drawer name job files spool into on a real hard drive Spooler location
  * (never used for "RAM" - that keeps spooling flat under T: exactly as
@@ -47,6 +49,11 @@ struct MPConfig {
      * this flag (see driver_core.c's mp_job_begin()). See SPOOL_KEEP=
      * below. */
     BOOL spool_keep;
+    /* Development-only output regression capture. This is honoured only
+     * when config.c loaded T:MintPRINT-testsuite.cfg, never from a
+     * normal ENV:/ENVARC: Unit0. capture_path is restricted to T:. */
+    BOOL capture_only;
+    char capture_path[MP_CONFIG_CAPTURE_PATH_MAX];
     /* IPP media-*-margin values, in hundredths of a millimetre. */
     ULONG margin_left_100mm;
     ULONG margin_right_100mm;

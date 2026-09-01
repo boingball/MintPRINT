@@ -212,6 +212,8 @@ void mp_config_defaults(struct MPConfig *cfg)
     mp_cfg_copy(cfg->pwg_sheet_back, sizeof(cfg->pwg_sheet_back), "normal");
     mp_cfg_copy(cfg->spool, sizeof(cfg->spool), "RAM");
     cfg->spool_keep = FALSE;
+    cfg->capture_only = FALSE;
+    cfg->capture_path[0] = 0;
     cfg->margin_left_100mm = 0;
     cfg->margin_right_100mm = 0;
     cfg->margin_top_100mm = 0;
@@ -244,12 +246,22 @@ LONG mp_config_load(struct MPConfig *cfg)
 
     if (!DOSBase) return MP_CONFIG_SOURCE_DEFAULTS;
 
-    fh = Open((CONST_STRPTR)"ENV:MintPRINT/Unit0", MODE_OLDFILE);
+    /* MintPrint Settings' regression suite writes a complete, one-job
+     * override here. It deliberately wins over Unit0 so the suite never
+     * mutates the user's saved printer profile. DriverOpen removes it
+     * after loading; Init may read it first when the driver is cold, so
+     * config.c itself must not consume/delete it. */
+    fh = Open((CONST_STRPTR)"T:MintPRINT-testsuite.cfg", MODE_OLDFILE);
     if (fh) {
-        source = MP_CONFIG_SOURCE_ENV;
+        source = MP_CONFIG_SOURCE_TEST;
     } else {
-        fh = Open((CONST_STRPTR)"ENVARC:MintPRINT/Unit0", MODE_OLDFILE);
-        if (fh) source = MP_CONFIG_SOURCE_ENVARC;
+        fh = Open((CONST_STRPTR)"ENV:MintPRINT/Unit0", MODE_OLDFILE);
+        if (fh) {
+            source = MP_CONFIG_SOURCE_ENV;
+        } else {
+            fh = Open((CONST_STRPTR)"ENVARC:MintPRINT/Unit0", MODE_OLDFILE);
+            if (fh) source = MP_CONFIG_SOURCE_ENVARC;
+        }
     }
 
     if (!fh) return source;
@@ -366,6 +378,18 @@ LONG mp_config_load(struct MPConfig *cfg)
             cfg->spool_keep = (value[0] == '0') ? FALSE : TRUE;
             continue;
         }
+        if (mp_cfg_starts(g_config_line, "CAPTURE_ONLY=")) {
+            value = g_config_line + 13;
+            cfg->capture_only = (value[0] == '0') ? FALSE : TRUE;
+            continue;
+        }
+        if (mp_cfg_starts(g_config_line, "CAPTURE_PATH=")) {
+            value = g_config_line + 13;
+            /* Regression captures are intentionally confined to T:. */
+            if (value[0] == 'T' && value[1] == ':')
+                mp_cfg_copy(cfg->capture_path, sizeof(cfg->capture_path), value);
+            continue;
+        }
         if (mp_cfg_starts(g_config_line, "PWG_SHEET_BACK=")) {
             value = g_config_line + 15;
             if ((mp_cfg_starts(value, "normal") && mp_cfg_len(value) == 6) ||
@@ -402,6 +426,18 @@ LONG mp_config_load(struct MPConfig *cfg)
 
     Close(fh);
 
+    /* CAPTURE_* is never a persisted Unit0 feature. Even a hand-edited
+     * ENV:/ENVARC: file containing those keys cannot disable printing.
+     * Only the dedicated T: test-suite override may enable it. */
+    if (source != MP_CONFIG_SOURCE_TEST) {
+        cfg->capture_only = FALSE;
+        cfg->capture_path[0] = 0;
+    } else if (cfg->capture_only) {
+        cfg->debug = TRUE;
+        mp_cfg_copy(cfg->spool, sizeof(cfg->spool), "RAM");
+        cfg->spool_keep = FALSE;
+    }
+
     /* Config loading already runs inside MintPRINT's dedicated spool
      * Process (see spool.c), where bsdsocket calls are safe. For explicit
      * PostScript Fit, resolve the real printer imageable area here so an old
@@ -411,7 +447,8 @@ LONG mp_config_load(struct MPConfig *cfg)
      * diagnostics; otherwise the IPP query is cached per endpoint by
      * ipp_client.c. Missing/conflicting IPP values resolve to zero, preserving
      * rev28's full-page target rather than guessing. */
-    if (mp_cfg_starts(cfg->engine, "postscript") &&
+    if (!cfg->capture_only &&
+        mp_cfg_starts(cfg->engine, "postscript") &&
         mp_cfg_len(cfg->engine) == 10 &&
         mp_cfg_starts(cfg->scaling, "fit") && mp_cfg_len(cfg->scaling) == 3 &&
         cfg->margin_left_100mm == 0 && cfg->margin_right_100mm == 0 &&
