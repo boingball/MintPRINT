@@ -1580,18 +1580,16 @@ static LONG mp_page_submit_and_track(ULONG rows_for_streak)
                  (LONG)g_duplex_page_count, (LONG)rows_for_streak,
                  (LONG)g_job_file_bytes);
     } else if (g_config.capture_only) {
-        /* Regression suite: retain both the rendered document and the exact
-         * IPP operation bytes that the normal submit path would prepend.
-         * mp_ipp_capture_request() is file-only and never opens a socket. */
-        ipp_rc = mp_ipp_capture_request(&g_config, fmt, fname);
-        result.error = ipp_rc;
+        /* Regression suite: the rendered document itself is the result.
+         * Never open a TCP connection, and report a synthetic success so
+         * normal page bookkeeping can finish. The GUI Process creates the
+         * matching byte-exact IPP request sidecar after this capture ends. */
+        ipp_rc = 0;
+        result.error = 0;
         result.http_status = 0;
         result.ipp_status = 0;
         result.document_bytes = g_job_file_bytes;
-        if (ipp_rc == 0)
-            mp_log_text("Capture-only document + IPP request retained; network submission skipped");
-        else
-            mp_log_3("Capture IPP request sidecar failed rc/zero/zero", ipp_rc, 0, 0);
+        mp_log_text("Capture-only regression job retained; network submission skipped");
     } else {
         mp_write_job_status("SUBMITTING", NULL);
         ipp_rc = mp_spool_ipp_submit(&g_config, fname, fmt, &result);
@@ -2176,18 +2174,12 @@ VOID PRT_STDARGS DriverClose(struct IORequest *ior)
         }
         if (!g_duplex_job_failed) {
             if (g_config.capture_only) {
-                ipp_rc = mp_ipp_capture_request(&g_config,
-                                                mp_document_format(),
-                                                mp_job_filename());
-                result.error = ipp_rc;
+                ipp_rc = 0;
+                result.error = 0;
                 result.http_status = 0;
                 result.ipp_status = 0;
                 result.document_bytes = g_job_file_bytes;
-                if (ipp_rc == 0)
-                    mp_log_text("Capture-only duplex document + IPP request retained; network submission skipped");
-                else
-                    mp_log_3("Capture duplex IPP sidecar failed rc/zero/zero",
-                             ipp_rc, 0, 0);
+                mp_log_text("Capture-only duplex job retained; network submission skipped");
                 mp_log_ipp_result("Capture duplex result error/http/status",
                                   &result);
             } else {

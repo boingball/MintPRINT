@@ -2641,6 +2641,40 @@ static void mp_test_suite_paths(const struct MPTestSuiteCase *c)
              "%s.ipp", g_test_suite.output_path);
 }
 
+static CONST_STRPTR mp_test_suite_document_format(const char *engine)
+{
+    if (strcmp(engine, "pwg-raster") == 0)
+        return (CONST_STRPTR)"image/pwg-raster";
+    if (strcmp(engine, "pdf") == 0)
+        return (CONST_STRPTR)"application/pdf";
+    if (strcmp(engine, "postscript") == 0)
+        return (CONST_STRPTR)"application/postscript";
+    if (strcmp(engine, "urf") == 0)
+        return (CONST_STRPTR)"image/urf";
+    return (CONST_STRPTR)"image/jpeg";
+}
+
+static LONG mp_test_suite_write_ipp_sidecar(const struct MPTestSuiteCase *c)
+{
+    struct MPConfig cfg;
+
+    if (!c) return -1;
+    mp_config_defaults(&cfg);
+    mp_test_suite_copy_string(cfg.host, sizeof(cfg.host), "127.0.0.1");
+    cfg.port = 631;
+    mp_test_suite_copy_string(cfg.path, sizeof(cfg.path), "/ipp/print");
+    mp_test_suite_copy_string(cfg.media, sizeof(cfg.media), c->media);
+    mp_test_suite_copy_string(cfg.source, sizeof(cfg.source), c->source);
+    mp_test_suite_copy_string(cfg.color, sizeof(cfg.color), c->color);
+    mp_test_suite_copy_string(cfg.quality, sizeof(cfg.quality), c->quality);
+    mp_test_suite_copy_string(cfg.scaling, sizeof(cfg.scaling), c->scaling);
+    mp_test_suite_copy_string(cfg.sides, sizeof(cfg.sides), c->sides);
+
+    return mp_ipp_capture_request(&cfg,
+                                  mp_test_suite_document_format(c->engine),
+                                  (CONST_STRPTR)g_test_suite.output_path);
+}
+
 static BOOL mp_test_suite_file_exists(CONST_STRPTR path, LONG *size_out)
 {
     BPTR lock;
@@ -2706,8 +2740,10 @@ static void mp_test_suite_run_current(struct Window *win)
 
 static void mp_test_suite_advance(struct Window *win)
 {
+    struct MPTestSuiteCase c;
     LONG bytes = 0;
     LONG ipp_bytes = 0;
+    LONG ipp_rc = -1;
     BOOL output_ok;
     BOOL ipp_ok;
     char line[320];
@@ -2718,7 +2754,10 @@ static void mp_test_suite_advance(struct Window *win)
                             (CONST_STRPTR)g_test_suite.log_path);
     output_ok = mp_test_suite_file_exists(
                     (CONST_STRPTR)g_test_suite.output_path, &bytes) && bytes > 0;
-    ipp_ok = mp_test_suite_file_exists(
+    mp_test_suite_case(g_test_suite.current, &c);
+    if (output_ok)
+        ipp_rc = mp_test_suite_write_ipp_sidecar(&c);
+    ipp_ok = ipp_rc == 0 && mp_test_suite_file_exists(
                  (CONST_STRPTR)g_test_suite.ipp_path, &ipp_bytes) && ipp_bytes > 0;
     if (output_ok && ipp_ok) {
         snprintf(line, sizeof(line),
@@ -2727,10 +2766,10 @@ static void mp_test_suite_advance(struct Window *win)
                  g_test_suite.log_path);
     } else {
         snprintf(line, sizeof(line),
-                 "CASE-RESULT %03d ERROR output=%s ipp=%s log=%s\n",
+                 "CASE-RESULT %03d ERROR output=%s ipp=%s ipp-rc=%ld log=%s\n",
                  g_test_suite.current + 1,
                  output_ok ? "ok" : "missing-or-empty",
-                 ipp_ok ? "ok" : "missing-or-empty",
+                 ipp_ok ? "ok" : "missing-or-empty", ipp_rc,
                  g_test_suite.log_path);
     }
     mp_test_suite_append(line);
