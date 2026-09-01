@@ -1983,10 +1983,6 @@ static const char *mp_test_print_engine_name(void)
 static BOOL mintprint_test_page(struct Window *win) {
     ULONG mode_id = 0;
     int requested_extra_pages = mp_test_print_extra_pages_requested;
-
-    /* Consume this up front so an early-return failure cannot leak a duplex
-     * request into a later ordinary Test Print. */
-    mp_test_print_extra_pages_requested = 0;
     LONG left = 16, right = MP_TESTPAGE_WIDTH - 17;
     LONG swatch_area, swatch_w, i;
     unsigned long media_w_100mm, media_h_100mm;
@@ -2004,6 +2000,11 @@ static BOOL mintprint_test_page(struct Window *win) {
     char info_lines[9][80];
     int num_info_lines = 0;
     BOOL is_postscript;
+
+    /* Consume this after declarations so the function stays friendly to the
+     * older GCC dialect used by classic AmigaOS builds. An early return can
+     * therefore never leak a suite duplex request into a later normal test. */
+    mp_test_print_extra_pages_requested = 0;
 
     if (test_print_job.active) {
         printf("Test Print is already running\n");
@@ -10304,10 +10305,13 @@ void process_window_events(struct Window *win) {
                             break;
 
                         case GAD_SAVE_BUTTON:
-                            if (save_driver_config(win))
+                            if (g_test_suite.active) {
+                                printf("Save is disabled while Test Suite is running.\n");
+                            } else if (save_driver_config(win)) {
                                 printf("MintPRINT Unit%d saved to ENV: and ENVARC:\n", current_unit_index);
-                            else
+                            } else {
                                 printf("Failed to save MintPRINT Unit%d settings\n", current_unit_index);
+                            }
                             break;
 
                         case GAD_EXIT_BUTTON:
@@ -10344,11 +10348,15 @@ void process_window_events(struct Window *win) {
                             if (menu_num == 0) { // File menu
                                 switch (item_num) {
                                     case 0: // Save Settings
-                                        save_print_mode();
-                                        if (save_driver_config(win))
-                                            printf("MintPRINT Unit%d saved to ENV: and ENVARC:\n", current_unit_index);
-                                        else
-                                            printf("Failed to save MintPRINT Unit%d settings\n", current_unit_index);
+                                        if (g_test_suite.active) {
+                                            printf("Save is disabled while Test Suite is running.\n");
+                                        } else {
+                                            save_print_mode();
+                                            if (save_driver_config(win))
+                                                printf("MintPRINT Unit%d saved to ENV: and ENVARC:\n", current_unit_index);
+                                            else
+                                                printf("Failed to save MintPRINT Unit%d settings\n", current_unit_index);
+                                        }
                                         break;
 
                                     case 1: // Load Settings
