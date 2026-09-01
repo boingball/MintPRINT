@@ -24,6 +24,7 @@ jobs:
           path = Path("src/MintPrintSettings.c")
           s = path.read_text()
           nl = "\n"
+          bs = chr(92)
 
           old = nl.join([
               "        int idx;",
@@ -60,9 +61,9 @@ jobs:
               "        old_port = (idx >= 0) ? results[idx].ipp_port : 0;",
               "        if (idx >= 0) {",
               "            strncpy(old_path, results[idx].ipp_path, sizeof(old_path) - 1);",
-              "            old_path[sizeof(old_path) - 1] = '\\0';",
+              "            old_path[sizeof(old_path) - 1] = '" + bs + "0';",
               "        } else {",
-              "            old_path[0] = '\\0';",
+              "            old_path[0] = '" + bs + "0';",
               "        }",
               "",
               "        memset(&ep, 0, sizeof(ep));",
@@ -111,25 +112,27 @@ jobs:
               raise SystemExit("fallback anchor count = %d" % s.count(old))
           s = s.replace(old, new, 1)
 
-          old = nl.join([
-              "        printf(\"Discovery: found %s\\\\n\", results[idx].label);",
-              "        mdns_send_detail_query(sockfd, &dest, &results[idx]);",
-          ])
-          new = nl.join([
+          lines = s.splitlines()
+          hit = -1
+          for i, line in enumerate(lines):
+              if line.lstrip().startswith('printf("Discovery: found %s') and "results[idx].label" in line:
+                  hit = i
+                  break
+          if hit < 0 or hit + 1 >= len(lines) or "mdns_send_detail_query" not in lines[hit + 1]:
+              raise SystemExit("logging line anchor not found")
+          repl = [
               "        if (was_new) {",
-              "            printf(\"Discovery: found %s\\\\n\", results[idx].label);",
+              '            printf("Discovery: found %s' + bs + 'n", results[idx].label);',
               "        } else if (old_port != results[idx].ipp_port ||",
               "                   strcmp(old_path, results[idx].ipp_path) != 0) {",
-              "            printf(\"Discovery: mDNS endpoint %s:%d%s\\\\n\",",
+              '            printf("Discovery: mDNS endpoint %s:%d%s' + bs + 'n",',
               "                   results[idx].ip, results[idx].ipp_port,",
               "                   results[idx].ipp_path);",
               "        }",
-              "        mdns_send_detail_query(sockfd, &dest, &results[idx]);",
-          ])
-          if s.count(old) != 1:
-              raise SystemExit("logging anchor count = %d" % s.count(old))
-          s = s.replace(old, new, 1)
-          path.write_text(s)
+              lines[hit + 1],
+          ]
+          lines[hit:hit + 2] = repl
+          path.write_text(nl.join(lines) + nl)
       - name: Remove one-shot workflow and commit
         run: |
           rm .github/workflows/issue75-polish.yml
