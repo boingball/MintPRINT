@@ -26,6 +26,13 @@ LONG mp_ipp_query_imageable_margins(const struct MPConfig *cfg,
                                     ULONG *top_100mm,
                                     ULONG *bottom_100mm);
 
+/* Capture the exact IPP Print-Job operation body (attributes through
+ * end-of-attributes, excluding document bytes) next to document_filename as
+ * <document_filename>.ipp. No socket is opened. Used by the regression suite. */
+LONG mp_ipp_capture_request(const struct MPConfig *cfg,
+                            CONST_STRPTR document_format,
+                            CONST_STRPTR document_filename);
+
 LONG mp_ipp_print_document(const struct MPConfig *cfg, CONST_STRPTR filename,
                            CONST_STRPTR document_format,
                            struct MPIPPResult *result);

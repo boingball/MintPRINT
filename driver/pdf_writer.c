@@ -189,8 +189,9 @@ int mp_pdf_begin(MPPdfEncoder *e, unsigned long width, unsigned long height,
     if (!mp_pdf_lit(e, " /ColorSpace /DeviceRGB /BitsPerComponent 8"
                         " /Filter /DCTDecode /Length 6 0 R >>\nstream\n")) return 0;
 
-    if (!mp_jpeg_begin(&e->jpeg, width, height, scratch, scratch_size,
-                       mp_pdf_jpeg_write_fn, e)) {
+    if (!mp_jpeg_begin_dpi(&e->jpeg, width, height, dpi,
+                           scratch, scratch_size,
+                           mp_pdf_jpeg_write_fn, e)) {
         e->failed = 1;
         return 0;
     }
