@@ -58,6 +58,7 @@ typedef long ssize_t;
 #include "config.h"
 #include "ipp_client.h"
 #include "ipp_enum.h"
+#include "mdns_endpoint.h"
 #include "lodepng.h"
 
 /* All status/progress output goes to the on-screen status box, never a
@@ -143,6 +144,10 @@ extern struct ExecBase *SysBase;
 struct DiscoveredPrinter {
     char ip[16];
     char label[80];
+    char ipp_path[MP_MDNS_PATH_MAX];
+    char mdns_instance[MP_MDNS_NAME_MAX];
+    int ipp_port;
+    BOOL mdns_details_asked;
 };
 
 /* Test Print must outlive the gadget callback that starts it. Keeping the
@@ -5023,70 +5028,86 @@ static int ssdp_discover_printers(struct DiscoveredPrinter *results, int max_res
 /* ---------------------------------------------------------------------
  * LAN printer discovery (mDNS / Bonjour / AirPrint)
  *
- * Most current printers advertise IPP over mDNS-SD (_ipp._tcp.local),
- * not SSDP, so this is the discovery path that actually matters for
- * AirPrint-style printers. Builds a minimal DNS PTR query by hand (no
- * name compression in the query - only ever one question) with the "QU"
- * unicast-response bit set, so responders reply directly to our source
- * port instead of over multicast. That means this never needs to join
- * the 224.0.0.251 multicast group to receive replies, keeping it on the
- * same plain send/WaitSelect/recvfrom shape already proven for SSDP.
- *
- * Deliberately does not decode the DNS response payload (PTR/SRV/TXT
- * records, name-compression pointers, ...): that is real parsing work
- * with real edge cases, and getting it wrong risks the same kind of
- * lock-up/crash this file has already hit twice on this NDK. All that is
- * used from a reply is which address it came from - good enough to
- * populate the picker; the follow-up IPP query after selection is what
- * actually pulls in the printer's real details.
+ * Issue #75 exposed the limit of the original deliberately-minimal mDNS
+ * pass: it remembered only the source IP and discarded DNS-SD's SRV port
+ * and TXT rp= resource path.  That is enough for common printers at
+ * 631:/ipp/print, but not for older/quirkier AirPrint devices whose actual
+ * endpoint is explicitly advertised.  Parse just the DNS-SD records needed
+ * for IPP and ask for SRV/TXT details when the initial PTR response does not
+ * include them.  The byte parser lives in mdns_endpoint.c so it is host-
+ * tested independently of bsdsocket/GadTools.
  * ------------------------------------------------------------------- */
-static int build_mdns_ptr_query(unsigned char *buf, int buf_size) {
+static int build_mdns_name_query(unsigned char *buf, int buf_size,
+                                 const char *name, unsigned int qtype) {
     static const unsigned char header[12] = {
-        0x00, 0x00, /* ID - unused, mDNS clients don't need to match it */
-        0x00, 0x00, /* Flags - standard query */
-        0x00, 0x01, /* QDCOUNT = 1 */
-        0x00, 0x00, /* ANCOUNT */
-        0x00, 0x00, /* NSCOUNT */
-        0x00, 0x00  /* ARCOUNT */
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x01, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00
     };
-    static const char *labels[] = { "_ipp", "_tcp", "local", NULL };
+    const char *label;
     int off;
-    int i;
 
-    if (buf_size < 33) return 0;
-
+    if (!buf || !name || buf_size < 32) return 0;
     memcpy(buf, header, sizeof(header));
-    off = sizeof(header);
-
-    for (i = 0; labels[i]; i++) {
-        int len = (int)strlen(labels[i]);
+    off = (int)sizeof(header);
+    label = name;
+    while (*label) {
+        const char *dot = strchr(label, '.');
+        int len = dot ? (int)(dot - label) : (int)strlen(label);
+        if (len <= 0 || len > 63 || off + len + 6 >= buf_size) return 0;
         buf[off++] = (unsigned char)len;
-        memcpy(buf + off, labels[i], len);
+        memcpy(buf + off, label, (size_t)len);
         off += len;
+        if (!dot) break;
+        label = dot + 1;
     }
-    buf[off++] = 0x00; /* root label terminator */
-
-    buf[off++] = 0x00; buf[off++] = 0x0C; /* QTYPE = PTR (12) */
-    buf[off++] = 0x80; buf[off++] = 0x01; /* QCLASS = IN, QU bit set */
-
+    buf[off++] = 0;
+    buf[off++] = (unsigned char)((qtype >> 8) & 0xffU);
+    buf[off++] = (unsigned char)(qtype & 0xffU);
+    buf[off++] = 0x80; buf[off++] = 0x01; /* IN + QU */
     return off;
 }
 
-/* Appends newly-found, distinct, non-loopback responders to results[],
- * starting at index *count_io, up to max_results. Returns the new count. */
+static int discovery_find_ip(struct DiscoveredPrinter *results, int count,
+                             const char *ip) {
+    int i;
+    for (i = 0; i < count; ++i)
+        if (strcmp(results[i].ip, ip) == 0) return i;
+    return -1;
+}
+
+static void mdns_send_detail_query(int sockfd, struct sockaddr_in *dest,
+                                   struct DiscoveredPrinter *result) {
+    unsigned char query[384];
+    int len;
+
+    if (!result || result->mdns_details_asked || !result->mdns_instance[0])
+        return;
+    result->mdns_details_asked = TRUE;
+
+    len = build_mdns_name_query(query, sizeof(query), result->mdns_instance, 33U);
+    if (len > 0)
+        sendto(sockfd, (char *)query, len, 0,
+               (struct sockaddr *)dest, sizeof(*dest));
+    len = build_mdns_name_query(query, sizeof(query), result->mdns_instance, 16U);
+    if (len > 0)
+        sendto(sockfd, (char *)query, len, 0,
+               (struct sockaddr *)dest, sizeof(*dest));
+}
+
 static int mdns_discover_printers(struct DiscoveredPrinter *results, int count_io, int max_results) {
     int sockfd;
     struct sockaddr_in dest;
-    unsigned char query[64];
+    unsigned char query[96];
     int query_len;
-    char *buf;
+    unsigned char *buf;
     int count = count_io;
     int poll_num;
-    const int max_polls = 10; /* ~500ms per poll => ~5s total scan time */
+    const int max_polls = 10;
 
     if (count >= max_results) return count;
-
-    query_len = build_mdns_ptr_query(query, sizeof(query));
+    query_len = build_mdns_name_query(query, sizeof(query),
+                                      "_ipp._tcp.local", 12U);
     if (query_len <= 0) {
         printf("Discovery: could not build mDNS query\n");
         return count;
@@ -5097,7 +5118,6 @@ static int mdns_discover_printers(struct DiscoveredPrinter *results, int count_i
         printf("Discovery: could not create mDNS socket\n");
         return count;
     }
-
     memset(&dest, 0, sizeof(dest));
     dest.sin_family = AF_INET;
     dest.sin_port = htons(5353);
@@ -5110,71 +5130,107 @@ static int mdns_discover_printers(struct DiscoveredPrinter *results, int count_i
         return count;
     }
 
-    buf = malloc(1024);
-    if (!buf) {
-        CloseSocket(sockfd);
-        return count;
-    }
+    buf = malloc(1500);
+    if (!buf) { CloseSocket(sockfd); return count; }
 
-    for (poll_num = 0; poll_num < max_polls && count < max_results; poll_num++) {
+    for (poll_num = 0; poll_num < max_polls; ++poll_num) {
         fd_set readfds;
         struct timeval tv;
         long ready;
         struct sockaddr_in from;
         socklen_t fromlen;
         ssize_t received;
+        char ipstr[16];
+        const unsigned char *addr_bytes;
+        int idx;
+        struct MPMdnsEndpoint ep;
+        BOOL was_new;
+        int old_port;
+        char old_path[MP_MDNS_PATH_MAX];
 
         if (window) {
             struct IntuiMessage *imsg;
-            while ((imsg = GT_GetIMsg(window->UserPort))) {
-                GT_ReplyIMsg(imsg);
-            }
+            while ((imsg = GT_GetIMsg(window->UserPort))) GT_ReplyIMsg(imsg);
         }
 
-        FD_ZERO(&readfds);
-        FD_SET(sockfd, &readfds);
-        tv.tv_sec = 0;
-        tv.tv_usec = 500000;
+        FD_ZERO(&readfds); FD_SET(sockfd, &readfds);
+        tv.tv_sec = 0; tv.tv_usec = 500000;
         ready = WaitSelect(sockfd + 1, &readfds, NULL, NULL, &tv, NULL);
-        if (ready <= 0) {
-            continue;
-        }
+        if (ready <= 0) continue;
 
         fromlen = sizeof(from);
         memset(&from, 0, sizeof(from));
-        received = recvfrom(sockfd, buf, 1023, 0, (struct sockaddr *)&from, &fromlen);
-        /* A real DNS response needs at least a 12-byte header with a
-         * non-zero answer count, and a unicast QU reply comes from the
-         * responder's own port 5353. Cheap enough sanity checks to reject
-         * unrelated UDP traffic without decoding the message itself. */
-        if (received < 12 || from.sin_port != htons(5353)) {
+        received = recvfrom(sockfd, (char *)buf, 1500, 0,
+                            (struct sockaddr *)&from, &fromlen);
+        if (received < 12 || from.sin_port != htons(5353)) continue;
+
+        addr_bytes = (const unsigned char *)&from.sin_addr;
+        if (addr_bytes[0] == 127) continue;
+        snprintf(ipstr, sizeof(ipstr), "%u.%u.%u.%u",
+                 addr_bytes[0], addr_bytes[1], addr_bytes[2], addr_bytes[3]);
+        idx = discovery_find_ip(results, count, ipstr);
+        was_new = (idx < 0) ? TRUE : FALSE;
+        old_port = (idx >= 0) ? results[idx].ipp_port : 0;
+        if (idx >= 0) {
+            strncpy(old_path, results[idx].ipp_path, sizeof(old_path) - 1);
+            old_path[sizeof(old_path) - 1] = '\0';
+        } else {
+            old_path[0] = '\0';
+        }
+
+        memset(&ep, 0, sizeof(ep));
+        if (idx >= 0) {
+            strncpy(ep.instance, results[idx].mdns_instance, sizeof(ep.instance) - 1);
+            strncpy(ep.path, results[idx].ipp_path, sizeof(ep.path) - 1);
+            ep.port = results[idx].ipp_port;
+        }
+        if (!mp_mdns_parse_endpoint(buf, (size_t)received, &ep) || !ep.is_ipp)
             continue;
+
+        if (idx < 0) {
+            if (count >= max_results) continue;
+            idx = count++;
+            memset(&results[idx], 0, sizeof(results[idx]));
+            strncpy(results[idx].ip, ipstr, sizeof(results[idx].ip) - 1);
         }
-        if (buf[6] == 0 && buf[7] == 0) {
-            continue; /* ANCOUNT == 0: not actually answering anything */
+
+        /* Keep the normal IPP/AirPrint endpoint as a conservative fallback
+         * even when this address was inserted by SSDP before mDNS enriched
+         * it. SRV/TXT below can still replace either value with what the
+         * printer actually advertised. */
+        if (!results[idx].ipp_path[0])
+            strcpy(results[idx].ipp_path, "/ipp/print");
+        if (results[idx].ipp_port <= 0)
+            results[idx].ipp_port = 631;
+
+        if (ep.instance[0]) {
+            strncpy(results[idx].mdns_instance, ep.instance,
+                    sizeof(results[idx].mdns_instance) - 1);
+            results[idx].mdns_instance[sizeof(results[idx].mdns_instance) - 1] = '\0';
         }
-
-        {
-            char ipstr[16];
-            const unsigned char *addr_bytes = (const unsigned char *)&from.sin_addr;
-
-            snprintf(ipstr, sizeof(ipstr), "%u.%u.%u.%u",
-                     addr_bytes[0], addr_bytes[1], addr_bytes[2], addr_bytes[3]);
-
-            if (addr_bytes[0] == 127) {
-                continue;
-            }
-
-            if (!discovery_ip_seen(results, count, ipstr)) {
-                strncpy(results[count].ip, ipstr, sizeof(results[count].ip) - 1);
-                results[count].ip[sizeof(results[count].ip) - 1] = '\0';
-                snprintf(results[count].label, sizeof(results[count].label),
-                         "%s (mDNS/IPP)", ipstr);
-
-                printf("Discovery: found %s\n", results[count].label);
-                count++;
-            }
+        if (ep.path[0]) {
+            strncpy(results[idx].ipp_path, ep.path, sizeof(results[idx].ipp_path) - 1);
+            results[idx].ipp_path[sizeof(results[idx].ipp_path) - 1] = '\0';
         }
+        if (ep.port > 0) results[idx].ipp_port = ep.port;
+
+        if (ep.label[0])
+            snprintf(results[idx].label, sizeof(results[idx].label),
+                     "%s (%s)", ipstr, ep.label);
+        else
+            snprintf(results[idx].label, sizeof(results[idx].label),
+                     "%s (mDNS/IPP %d%s)", ipstr, results[idx].ipp_port,
+                     results[idx].ipp_path);
+
+        if (was_new) {
+            printf("Discovery: found %s\n", results[idx].label);
+        } else if (old_port != results[idx].ipp_port ||
+                   strcmp(old_path, results[idx].ipp_path) != 0) {
+            printf("Discovery: mDNS endpoint %s:%d%s\n",
+                   results[idx].ip, results[idx].ipp_port,
+                   results[idx].ipp_path);
+        }
+        mdns_send_detail_query(sockfd, &dest, &results[idx]);
     }
 
     free(buf);
@@ -5204,7 +5260,10 @@ static BOOL run_discovery_selection(struct Window *parent,
                                      struct DiscoveredPrinter *results,
                                      int count,
                                      char *chosen_ip,
-                                     int chosen_ip_size) {
+                                     int chosen_ip_size,
+                                     char *chosen_path,
+                                     int chosen_path_size,
+                                     int *chosen_port) {
     struct Screen *dscreen;
     APTR dvi;
     struct Gadget *dglist = NULL;
@@ -5355,6 +5414,12 @@ static BOOL run_discovery_selection(struct Window *parent,
                     if (selected < (ULONG)count) {
                         strncpy(chosen_ip, results[selected].ip, chosen_ip_size - 1);
                         chosen_ip[chosen_ip_size - 1] = '\0';
+                        if (chosen_path && chosen_path_size > 0) {
+                            strncpy(chosen_path, results[selected].ipp_path,
+                                    chosen_path_size - 1);
+                            chosen_path[chosen_path_size - 1] = '\0';
+                        }
+                        if (chosen_port) *chosen_port = results[selected].ipp_port;
                         picked = TRUE;
                     }
                     terminated = TRUE;
@@ -9575,7 +9640,11 @@ void process_window_events(struct Window *win) {
                             struct DiscoveredPrinter found[MAX_DISCOVERY_RESULTS];
                             int found_count;
                             char chosen_ip[16];
+                            char chosen_path[MP_MDNS_PATH_MAX];
+                            int chosen_port = 0;
 
+                            memset(found, 0, sizeof(found));
+                            chosen_path[0] = '\0';
                             GT_RefreshWindow(win, NULL);
                             printf("CLEAR");
 
@@ -9586,22 +9655,45 @@ void process_window_events(struct Window *win) {
                                 printf("Enter the printer IP manually and press Query.\n");
                             } else {
                                 printf("Found %d candidate device(s).\n", found_count);
-                                if (run_discovery_selection(win, found, found_count, chosen_ip, sizeof(chosen_ip))) {
+                                if (run_discovery_selection(win, found, found_count,
+                                                            chosen_ip, sizeof(chosen_ip),
+                                                            chosen_path, sizeof(chosen_path),
+                                                            &chosen_port)) {
                                     struct Gadget *disc_ip_gadget = glist;
+                                    struct Gadget *disc_path_gadget = glist;
 
-                                    strncpy(ip_buffer, chosen_ip, sizeof(ip_buffer) - 1);
-                                    ip_buffer[sizeof(ip_buffer) - 1] = '\0';
-
-                                    while (disc_ip_gadget && disc_ip_gadget->GadgetID != GAD_IP_STRING) {
-                                        disc_ip_gadget = disc_ip_gadget->NextGadget;
+                                    if (chosen_port > 0 && chosen_port != 631)
+                                        snprintf(ip_buffer, sizeof(ip_buffer), "%s:%d",
+                                                 chosen_ip, chosen_port);
+                                    else {
+                                        strncpy(ip_buffer, chosen_ip, sizeof(ip_buffer) - 1);
+                                        ip_buffer[sizeof(ip_buffer) - 1] = '\0';
                                     }
-                                    if (disc_ip_gadget) {
+
+                                    while (disc_ip_gadget && disc_ip_gadget->GadgetID != GAD_IP_STRING)
+                                        disc_ip_gadget = disc_ip_gadget->NextGadget;
+                                    if (disc_ip_gadget)
                                         GT_SetGadgetAttrs(disc_ip_gadget, win, NULL,
                                                           GTST_String, (ULONG)ip_buffer,
                                                           TAG_DONE);
+
+                                    if (chosen_path[0]) {
+                                        strncpy(driver_path_buffer, chosen_path,
+                                                sizeof(driver_path_buffer) - 1);
+                                        driver_path_buffer[sizeof(driver_path_buffer) - 1] = '\0';
+                                        while (disc_path_gadget && disc_path_gadget->GadgetID != GAD_IPP_PATH)
+                                            disc_path_gadget = disc_path_gadget->NextGadget;
+                                        if (disc_path_gadget)
+                                            GT_SetGadgetAttrs(disc_path_gadget, win, NULL,
+                                                              GTST_String, (ULONG)driver_path_buffer,
+                                                              TAG_DONE);
+                                        printf("Discovery: using advertised IPP endpoint %s:%d%s\n",
+                                               chosen_ip,
+                                               chosen_port > 0 ? chosen_port : 631,
+                                               driver_path_buffer);
                                     }
 
-                                    perform_query_flow_allocated(win, chosen_ip, 0);
+                                    perform_query_flow_allocated(win, chosen_ip, chosen_port);
                                 } else {
                                     printf("Discovery selection cancelled.\n");
                                 }

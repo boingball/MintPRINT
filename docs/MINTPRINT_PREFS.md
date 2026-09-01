@@ -108,17 +108,18 @@ Clicking **Discover** runs two passes, each taking about 5 seconds:
    use to advertise IPP/AirPrint, so it is the pass that matters most in
    practice - SSDP is a bonus for devices that also happen to answer it.
 
-Both passes only look at *which address replied*, not the reply's content
-(no SSDP header or DNS record parsing) - that keeps the scan simple and
-predictable. Distinct, non-loopback responders from either pass are merged
-into one list.
+SSDP remains address-only. The mDNS pass now parses the IPP service's DNS-SD
+PTR/SRV/TXT records as well: the advertised SRV port and TXT `rp=` resource
+path are retained, with `/ipp/print` and port 631 as conservative fallbacks.
+If the first PTR response omits the detail records, Settings asks the service
+instance directly for SRV and TXT before the discovery window closes. This
+matters for older AirPrint printers that do not use the most common endpoint.
 
 Results appear in a small selection window. Picking one and choosing
-**Use Selected** fills in the Printer IPv4 field and runs the same
-capability query as the **Query** button (trying the given port, then 631),
-so the fetched media/colour/quality/scaling values and the printer's
-supported document formats are pulled in immediately - this is where the
-printer's actual name/details come from, not the discovery scan itself.
+**Use Selected** fills in Printer IPv4, applies any advertised IPP path/port,
+and runs the same capability query as the **Query** button. The fetched
+media/colour/quality/scaling values and document formats still come from the
+IPP query; discovery only supplies the endpoint needed to reach it.
 
 This is a best-effort LAN scan, not a guarantee: a printer that answers
 neither SSDP nor mDNS, or that sits behind a router blocking multicast, will
