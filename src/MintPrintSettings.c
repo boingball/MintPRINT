@@ -5144,6 +5144,9 @@ static int mdns_discover_printers(struct DiscoveredPrinter *results, int count_i
         const unsigned char *addr_bytes;
         int idx;
         struct MPMdnsEndpoint ep;
+        BOOL was_new;
+        int old_port;
+        char old_path[MP_MDNS_PATH_MAX];
 
         if (window) {
             struct IntuiMessage *imsg;
@@ -5166,6 +5169,14 @@ static int mdns_discover_printers(struct DiscoveredPrinter *results, int count_i
         snprintf(ipstr, sizeof(ipstr), "%u.%u.%u.%u",
                  addr_bytes[0], addr_bytes[1], addr_bytes[2], addr_bytes[3]);
         idx = discovery_find_ip(results, count, ipstr);
+        was_new = (idx < 0) ? TRUE : FALSE;
+        old_port = (idx >= 0) ? results[idx].ipp_port : 0;
+        if (idx >= 0) {
+            strncpy(old_path, results[idx].ipp_path, sizeof(old_path) - 1);
+            old_path[sizeof(old_path) - 1] = '\0';
+        } else {
+            old_path[0] = '\0';
+        }
 
         memset(&ep, 0, sizeof(ep));
         if (idx >= 0) {
@@ -5181,9 +5192,16 @@ static int mdns_discover_printers(struct DiscoveredPrinter *results, int count_i
             idx = count++;
             memset(&results[idx], 0, sizeof(results[idx]));
             strncpy(results[idx].ip, ipstr, sizeof(results[idx].ip) - 1);
-            strcpy(results[idx].ipp_path, "/ipp/print");
-            results[idx].ipp_port = 631;
         }
+
+        /* Keep the normal IPP/AirPrint endpoint as a conservative fallback
+         * even when this address was inserted by SSDP before mDNS enriched
+         * it. SRV/TXT below can still replace either value with what the
+         * printer actually advertised. */
+        if (!results[idx].ipp_path[0])
+            strcpy(results[idx].ipp_path, "/ipp/print");
+        if (results[idx].ipp_port <= 0)
+            results[idx].ipp_port = 631;
 
         if (ep.instance[0]) {
             strncpy(results[idx].mdns_instance, ep.instance,
@@ -5204,7 +5222,14 @@ static int mdns_discover_printers(struct DiscoveredPrinter *results, int count_i
                      "%s (mDNS/IPP %d%s)", ipstr, results[idx].ipp_port,
                      results[idx].ipp_path);
 
-        printf("Discovery: found %s\n", results[idx].label);
+        if (was_new) {
+            printf("Discovery: found %s\n", results[idx].label);
+        } else if (old_port != results[idx].ipp_port ||
+                   strcmp(old_path, results[idx].ipp_path) != 0) {
+            printf("Discovery: mDNS endpoint %s:%d%s\n",
+                   results[idx].ip, results[idx].ipp_port,
+                   results[idx].ipp_path);
+        }
         mdns_send_detail_query(sockfd, &dest, &results[idx]);
     }
 
