@@ -310,7 +310,7 @@ def normalize_target(raw):
 
 def base_request(operation_id, request_id, printer_uri):
     body = bytearray()
-    body += b"\x02\x00"                 # IPP/2.0; widely accepted by IPP Everywhere printers.
+    body += b"\x01\x01"                 # IPP/1.1; mirrors MintPRINT and older AirPrint devices.
     body += be16(operation_id)
     body += be32(request_id)
     body += b"\x01"                     # operation-attributes-tag
@@ -501,7 +501,7 @@ def parse_collection(data, pos):
 
 def parse_ipp_response(data):
     if len(data) < 8:
-        raise IPPError("IPP response is shorter than the 8-byte header")
+        raise IPPError("IPP response is shorter than the 8-byte header (%d bytes; check the advertised rp= path/port)" % len(data))
 
     version = "%d.%d" % (data[0], data[1])
     status = int.from_bytes(data[2:4], "big")

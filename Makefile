@@ -14,7 +14,7 @@ DRIVER31_OUT := $(DRIVER31_BUILD)/MintPRINT
 TEST_BUILD := build/tests
 RELEASE_DIR := release/MintPRINT
 
-.PHONY: all gui test check test-http test-dpi test-jpeg test-ipp-enum test-postscript test-urf test-graphics-boundary driver driver31 driver-symbols driver-symbols31 release clean help
+.PHONY: all gui test check test-http test-dpi test-jpeg test-ipp-enum test-mdns test-postscript test-urf test-graphics-boundary driver driver31 driver-symbols driver-symbols31 release clean help
 
 all: gui
 
@@ -50,8 +50,8 @@ gui: MintPrintSettings
 # that file's own SocketBase comment for why it no longer defines that
 # global (driver_core.c does, for the driver build; this GUI's own
 # pre-existing SocketBase below covers this build).
-MintPrintSettings: src/MintPrintSettings.c src/http_response.c src/http_response.h src/dpi_options.c src/dpi_options.h src/ipp_enum.c src/ipp_enum.h driver/media_size.c driver/media_size.h driver/ipp_client.c driver/ipp_client.h src/lodepng.c src/lodepng.h $(IFF_DIR_ESC)/iff-loader.c $(IFF_DIR_ESC)/iff-loader.h
-	$(CC) -O2 -DLODEPNG_NO_COMPILE_ENCODER -DLODEPNG_NO_COMPILE_DISK -DLODEPNG_NO_COMPILE_ANCILLARY_CHUNKS -DLODEPNG_NO_COMPILE_ERROR_TEXT -I"$(IFF_DIR)" -Isrc -Idriver -o $@ src/MintPrintSettings.c src/http_response.c src/dpi_options.c src/ipp_enum.c src/lodepng.c driver/media_size.c driver/ipp_client.c "$(IFF_DIR)/iff-loader.c" -lamiga -lm
+MintPrintSettings: src/MintPrintSettings.c src/http_response.c src/http_response.h src/dpi_options.c src/dpi_options.h src/ipp_enum.c src/ipp_enum.h src/mdns_endpoint.c src/mdns_endpoint.h driver/media_size.c driver/media_size.h driver/ipp_client.c driver/ipp_client.h src/lodepng.c src/lodepng.h $(IFF_DIR_ESC)/iff-loader.c $(IFF_DIR_ESC)/iff-loader.h
+	$(CC) -O2 -DLODEPNG_NO_COMPILE_ENCODER -DLODEPNG_NO_COMPILE_DISK -DLODEPNG_NO_COMPILE_ANCILLARY_CHUNKS -DLODEPNG_NO_COMPILE_ERROR_TEXT -I"$(IFF_DIR)" -Isrc -Idriver -o $@ src/MintPrintSettings.c src/http_response.c src/dpi_options.c src/ipp_enum.c src/mdns_endpoint.c src/lodepng.c driver/media_size.c driver/ipp_client.c "$(IFF_DIR)/iff-loader.c" -lamiga -lm
 
 $(TEST_BUILD):
 	mkdir -p $@
@@ -75,6 +75,12 @@ test-ipp-enum: | $(TEST_BUILD)
 	$(HOSTCC) -std=c89 -Wall -Wextra -Werror -Isrc \
 		tests/test_ipp_enum.c src/ipp_enum.c -o $(TEST_BUILD)/test_ipp_enum
 	$(TEST_BUILD)/test_ipp_enum
+
+
+test-mdns: | $(TEST_BUILD)
+	$(HOSTCC) -std=c89 -Wall -Wextra -Werror -Isrc \
+		tests/test_mdns_endpoint.c src/mdns_endpoint.c -o $(TEST_BUILD)/test_mdns_endpoint
+	$(TEST_BUILD)/test_mdns_endpoint
 
 $(DRIVER_BUILD):
 	mkdir -p $@
@@ -176,7 +182,7 @@ test-urf: | $(TEST_BUILD)
 # decoding, and the Ghostscript-validated PostScript writer, which needs
 # `gs` on PATH). This is what CI runs; it never touches the m68k cross
 # toolchain, so it needs no Amiga SDK to work.
-check: test test-http test-ipp-enum test-postscript test-graphics-boundary
+check: test test-http test-ipp-enum test-mdns test-postscript test-graphics-boundary
 
 # Compile the actual boundary callbacks with mocked Amiga I/O. No SDK,
 # printer connection or physical output is needed. Python uses stdlib only.
