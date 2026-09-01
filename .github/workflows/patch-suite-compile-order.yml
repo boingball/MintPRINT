@@ -1,0 +1,29 @@
+name: Apply Test Suite compile-order fix
+
+on:
+  push:
+    branches:
+      - feature/output-regression-suite
+    paths:
+      - .github/workflows/patch-suite-compile-order.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/output-regression-suite
+      - name: Fix source ordering
+        run: python3 .github/patch-suite-compile-order.py
+      - name: Commit and remove helper
+        run: |
+          rm .github/patch-suite-compile-order.py .github/workflows/patch-suite-compile-order.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Fix Test Suite canvas constant ordering"
+          git push origin HEAD:feature/output-regression-suite
