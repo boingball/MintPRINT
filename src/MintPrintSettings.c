@@ -1803,6 +1803,13 @@ static void mp_update_spool_keep_gadget(struct Window *win)
     }
 }
 
+/* Shared Test Print canvas dimensions. Keep these before the async completion
+ * helpers as the regression suite's page-2 marker also uses them. */
+#define MP_TESTPAGE_WIDTH  320
+#define MP_TESTPAGE_HEIGHT 453
+#define MP_TESTPAGE_DEPTH  3   /* 8 pens: 2^3 */
+#define MP_TESTPAGE_COLORS 8
+
 static void mp_test_print_release(struct Window *win)
 {
     if (test_print_job.request && test_print_job.device_open) {
@@ -1950,11 +1957,6 @@ static void mp_test_print_cancel(struct Window *win)
  * (called from the main event loop) and mp_test_print_cancel() (called on
  * window close) finish the job and release its resources, including the
  * ColorMap allocated here. */
-#define MP_TESTPAGE_WIDTH  320
-#define MP_TESTPAGE_HEIGHT 453
-#define MP_TESTPAGE_DEPTH  3   /* 8 pens: 2^3 */
-#define MP_TESTPAGE_COLORS 8
-
 /* PostScript alone still gets an exact small physical target
  * (SPECIAL_MILCOLS/MILROWS, no SPECIAL_CENTER) since the PostScript writer
  * centres the image on /PageSize itself; asking printer.device to also
