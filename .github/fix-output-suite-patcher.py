@@ -33,9 +33,17 @@ new = '''    if count != 1:
             s = s.replace(ps_old, ps_new, 1)
             p.write_text(s)
             return
+        if label == "changelog suite entry" and count == 0:
+            heading = "## Unreleased\\n\\n"
+            if s.count(heading) != 1:
+                raise SystemExit("changelog Unreleased anchor failed")
+            prefix = "# Changelog\\n\\n"
+            body = new[len(prefix):] if new.startswith(prefix) else new
+            p.write_text(s.replace(heading, heading + body, 1))
+            return
         raise SystemExit(f"{label}: expected 1 anchor, found {count}")
     p.write_text(s.replace(old, new, 1))'''
 if s.count(old) != 1:
     raise SystemExit('replace_once helper anchor failed')
 p.write_text(s.replace(old, new, 1))
-print('patcher adjusted for current config.c tail')
+print('patcher adjusted for current config.c and changelog')
