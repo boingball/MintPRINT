@@ -29,3 +29,4 @@ jobs:
           git add -A
           git commit -m "Add capture-only output regression suite"
           git push origin HEAD:feature/output-regression-suite
+# retry 3: current config/changelog anchors
