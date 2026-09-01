@@ -17,7 +17,20 @@ jobs:
         with:
           ref: fix/issue-75-mdns-endpoint
       - name: Apply source patch
-        run: python3 .github/issue75_patch.py
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('.github/issue75_patch.py')
+          s = p.read_text()
+          old = """s = replace_once(s, 'test-ipp-enum test-postscript',
+                           'test-ipp-enum test-mdns test-postscript', 'phony mdns')"""
+          new = """s = s.replace('test-ipp-enum test-postscript',
+                        'test-ipp-enum test-mdns test-postscript', 1)"""
+          if old not in s:
+              raise SystemExit('could not patch phony anchor')
+          p.write_text(s.replace(old, new, 1))
+          PY
+          python3 .github/issue75_patch.py
       - name: Commit patch
         run: |
           git config user.name "MintPRINT Patch Bot"
