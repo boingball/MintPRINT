@@ -9861,8 +9861,11 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
         return NULL;
     }
 
-    /* Developer regression capture. Stays on the existing button row
-     * so the OS 2.x-safe window geometry does not grow again. */
+#ifdef MINTPRINT_RELEASE_TEST
+    /* Developer regression capture. Public release builds deliberately do
+     * not create this gadget; make releasetest defines the build flag and
+     * stages a separate QA bundle so it cannot be confused with the public
+     * release drawer. */
     ng.ng_LeftEdge = 105;
     ng.ng_Width = 90;
     ng.ng_GadgetText = (STRPTR)"Test _Suite";
@@ -9874,13 +9877,20 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
         printf("Failed to create test suite button\n");
         return NULL;
     }
+#endif
 
     // Enable/disable diagnostic logs and retained rendered jobs. Shares
     // the button row's spare space between Test Print and Save; the
     // cycle's own label text ("Debug On"/"Debug Off") is self-explanatory
     // so it needs no separate GadgetText prefix, unlike the stacked
     // Printer Engine/Spooler cycles above.
+#ifdef MINTPRINT_RELEASE_TEST
     ng.ng_LeftEdge = 200;
+#else
+    /* Four public-release controls are spaced evenly across the row when
+     * the developer-only Test Suite gadget is absent. */
+    ng.ng_LeftEdge = 140;
+#endif
     ng.ng_TopEdge = 198 + topborder;
     ng.ng_Width = 90;
     ng.ng_Height = 12;
@@ -9896,7 +9906,11 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     }
 
     // Save button - same action as File -> Save Driver Settings.
+#ifdef MINTPRINT_RELEASE_TEST
     ng.ng_LeftEdge = 300;
+#else
+    ng.ng_LeftEdge = 270;
+#endif
     ng.ng_Width = 90;
     ng.ng_TopEdge = 198 + topborder;
     ng.ng_Height = 12;
@@ -10377,9 +10391,11 @@ void process_window_events(struct Window *win) {
                         }
                         break;
 
+#ifdef MINTPRINT_RELEASE_TEST
                         case GAD_TEST_SUITE:
                             mp_test_suite_start(win);
                             break;
+#endif
 
                         case GAD_SAVE_BUTTON:
                             if (g_test_suite.active) {

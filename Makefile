@@ -13,8 +13,9 @@ DRIVER31_BUILD := build/driver31
 DRIVER31_OUT := $(DRIVER31_BUILD)/MintPRINT
 TEST_BUILD := build/tests
 RELEASE_DIR := release/MintPRINT
+RELEASETEST_DIR := release/MintPRINT-ReleaseTest
 
-.PHONY: all gui test check test-http test-dpi test-jpeg test-ipp-enum test-mdns test-postscript test-urf test-graphics-boundary driver driver31 driver-symbols driver-symbols31 release clean help
+.PHONY: all gui gui-test test check test-http test-dpi test-jpeg test-ipp-enum test-mdns test-postscript test-urf test-graphics-boundary driver driver31 driver-symbols driver-symbols31 release releasetest clean help
 
 all: gui
 
@@ -32,9 +33,11 @@ help:
 	@echo "  make test-postscript - host-test and Ghostscript-validate the PostScript writer"
 	@echo "  make test-urf - run host-side Apple Raster (URF) writer tests"
 	@echo "  make test-graphics-boundary - host-test graphics FF/reset callbacks"
-	@echo "  make release  - build both drivers and the GUI, stage one distributable"
+	@echo "  make release  - build both drivers and the public GUI, stage one distributable"
 	@echo "                  bundle (release/MintPRINT/) with both drivers under"
 	@echo "                  Drivers/ - MintPrintSettings picks the right one at runtime"
+	@echo "  make releasetest - also stage release/MintPRINT-ReleaseTest/ with the"
+	@echo "                     developer-only Test Suite button enabled"
 	@echo "  make test     - run host-side geometry regression tests"
 	@echo "  make check    - run every host-side test (test target plus HTTP,"
 	@echo "                  IPP-enum and Ghostscript-validated PostScript) -"
@@ -42,6 +45,8 @@ help:
 	@echo "  make clean"
 
 gui: MintPrintSettings
+
+gui-test: MintPrintSettingsReleaseTest
 
 # driver/ipp_client.c (Spooler window Retry/Reprint - see run_spooler_window()
 # in src/MintPrintSettings.c) needs http_response.c and media_size.c, both
@@ -52,6 +57,9 @@ gui: MintPrintSettings
 # pre-existing SocketBase below covers this build).
 MintPrintSettings: src/MintPrintSettings.c src/http_response.c src/http_response.h src/dpi_options.c src/dpi_options.h src/ipp_enum.c src/ipp_enum.h src/mdns_endpoint.c src/mdns_endpoint.h driver/media_size.c driver/media_size.h driver/ipp_client.c driver/ipp_client.h src/lodepng.c src/lodepng.h $(IFF_DIR_ESC)/iff-loader.c $(IFF_DIR_ESC)/iff-loader.h
 	$(CC) -O2 -DLODEPNG_NO_COMPILE_ENCODER -DLODEPNG_NO_COMPILE_DISK -DLODEPNG_NO_COMPILE_ANCILLARY_CHUNKS -DLODEPNG_NO_COMPILE_ERROR_TEXT -I"$(IFF_DIR)" -Isrc -Idriver -o $@ src/MintPrintSettings.c src/http_response.c src/dpi_options.c src/ipp_enum.c src/mdns_endpoint.c src/lodepng.c driver/media_size.c driver/ipp_client.c "$(IFF_DIR)/iff-loader.c" -lamiga -lm
+
+MintPrintSettingsReleaseTest: src/MintPrintSettings.c src/http_response.c src/http_response.h src/dpi_options.c src/dpi_options.h src/ipp_enum.c src/ipp_enum.h src/mdns_endpoint.c src/mdns_endpoint.h driver/media_size.c driver/media_size.h driver/ipp_client.c driver/ipp_client.h src/lodepng.c src/lodepng.h $(IFF_DIR_ESC)/iff-loader.c $(IFF_DIR_ESC)/iff-loader.h
+	$(CC) -O2 -DMINTPRINT_RELEASE_TEST -DLODEPNG_NO_COMPILE_ENCODER -DLODEPNG_NO_COMPILE_DISK -DLODEPNG_NO_COMPILE_ANCILLARY_CHUNKS -DLODEPNG_NO_COMPILE_ERROR_TEXT -I"$(IFF_DIR)" -Isrc -Idriver -o $@ src/MintPrintSettings.c src/http_response.c src/dpi_options.c src/ipp_enum.c src/mdns_endpoint.c src/lodepng.c driver/media_size.c driver/ipp_client.c "$(IFF_DIR)/iff-loader.c" -lamiga -lm
 
 $(TEST_BUILD):
 	mkdir -p $@
@@ -276,5 +284,17 @@ release: gui driver driver31
 	@echo "drawer (not inside it) per Aminet convention: name it to match"
 	@echo "whatever .lha/.zip archive you make of $(RELEASE_DIR)/."
 
+# Developer/QA bundle. Keep the ordinary release drawer pristine, then clone
+# it and replace only MintPrintSettings with the flagged build that exposes
+# the capture Test Suite button. Never package this drawer for Aminet/users.
+releasetest: release MintPrintSettingsReleaseTest
+	rm -rf $(RELEASETEST_DIR)
+	cp -a $(RELEASE_DIR) $(RELEASETEST_DIR)
+	cp MintPrintSettingsReleaseTest $(RELEASETEST_DIR)/MintPrintSettings
+	@echo
+	@echo "Release-test bundle staged in $(RELEASETEST_DIR)/"
+	@echo "  QA ONLY: Test Suite button is enabled in MintPrintSettings"
+	@echo "  Public release remains unchanged in $(RELEASE_DIR)/"
+
 clean:
-	rm -rf build release MintPrintSettings
+	rm -rf build release MintPrintSettings MintPrintSettingsReleaseTest

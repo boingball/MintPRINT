@@ -24,7 +24,9 @@ to this page; replace that summary when preparing the next release.
   same Print-Job attribute builder as the live submission path, verifies the
   sidecar exists, and expands PWG duplex coverage to 33 total cases so every
   CrossFeed/Feed transform sign combination is exercised. Suite completion
-  text now explicitly says no printer job was sent.
+  text now explicitly says no printer job was sent. The Test Suite button is
+  hidden from ordinary `make release` builds; `make releasetest` stages a
+  separate QA-only bundle with the developer control enabled.
 - **Capture-only output regression suite (driver 41.15).** MintPrint Settings
   can now run a 32-case coverage matrix through all five document engines and
   retain the generated jobs plus per-case logs/manifest under `T:` without
