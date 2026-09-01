@@ -2659,7 +2659,13 @@ static LONG mp_test_suite_write_ipp_sidecar(const struct MPTestSuiteCase *c)
     struct MPConfig cfg;
 
     if (!c) return -1;
-    mp_config_defaults(&cfg);
+    /* This helper is linked into MintPrintSettings, not the printer driver.
+     * Do not depend on driver/config.c merely for mp_config_defaults(): that
+     * module also owns driver-only Render compatibility state and is not part
+     * of the GUI link. The serializer below only consumes the endpoint and
+     * job-template fields populated here, so a zeroed local config is the
+     * correct minimal starting point. */
+    memset(&cfg, 0, sizeof(cfg));
     mp_test_suite_copy_string(cfg.host, sizeof(cfg.host), "127.0.0.1");
     cfg.port = 631;
     mp_test_suite_copy_string(cfg.path, sizeof(cfg.path), "/ipp/print");
