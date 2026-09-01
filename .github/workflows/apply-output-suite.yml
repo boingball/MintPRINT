@@ -17,11 +17,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: feature/output-regression-suite
+      - name: Adjust patcher for current main
+        run: python3 .github/fix-output-suite-patcher.py
       - name: Apply regression suite source patch
         run: python3 .github/apply-output-suite.py
-      - name: Commit source changes and remove helper
+      - name: Commit source changes and remove helpers
         run: |
-          rm .github/apply-output-suite.py .github/workflows/apply-output-suite.yml
+          rm .github/apply-output-suite.py .github/fix-output-suite-patcher.py .github/workflows/apply-output-suite.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
