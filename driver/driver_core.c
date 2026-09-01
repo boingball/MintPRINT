@@ -55,7 +55,7 @@
  * MP_DRIVER_REV (the version half) only bumps for something that
  * warrants a new version number outright, not on every rebuild. */
 #define MP_DRIVER_REV 41
-#define MP_DRIVER_SUBREV 14
+#define MP_DRIVER_SUBREV 15
 
 struct ExecBase *SysBase = NULL;
 struct DosLibrary *DOSBase = NULL;
@@ -114,7 +114,7 @@ struct TagItem DriverTags[] = {
  * "slot" mp_spool_aux_*() provides is safe. */
 #define MP_JOB_BASE_ACCUM ((const char *)"MintPRINT-accum.rgb")
 
-#define MP_SPOOL_PATH_MAX (MP_CONFIG_OPTION_MAX + 40) /* + "MPSPOOL/" + base name */
+#define MP_SPOOL_PATH_MAX (MP_CONFIG_CAPTURE_PATH_MAX + 8)
 static char g_job_file_jpeg[MP_SPOOL_PATH_MAX];
 static char g_job_file_pwg[MP_SPOOL_PATH_MAX];
 static char g_job_file_pdf[MP_SPOOL_PATH_MAX];
@@ -324,6 +324,8 @@ static int mp_detect_engine(const struct MPConfig *cfg)
 
 static CONST_STRPTR mp_job_filename(void)
 {
+    if (g_config.capture_only && g_config.capture_path[0])
+        return (CONST_STRPTR)g_config.capture_path;
     switch (g_engine) {
         case MP_ENGINE_PWG: return (CONST_STRPTR)g_job_file_pwg;
         case MP_ENGINE_PDF: return (CONST_STRPTR)g_job_file_pdf;
@@ -616,6 +618,8 @@ static void mp_log_config(const struct MPConfig *cfg, LONG source)
         mp_log_append("ENV");
     else if (source == MP_CONFIG_SOURCE_ENVARC)
         mp_log_append("ENVARC");
+    else if (source == MP_CONFIG_SOURCE_TEST)
+        mp_log_append("T: regression suite");
     else
         mp_log_append("defaults");
     mp_log_append(" host=");
@@ -1573,13 +1577,25 @@ static LONG mp_page_submit_and_track(ULONG rows_for_streak)
         mp_log_3("Duplex page queued pages/rows/bytes",
                  (LONG)g_duplex_page_count, (LONG)rows_for_streak,
                  (LONG)g_job_file_bytes);
+    } else if (g_config.capture_only) {
+        /* Regression suite: the rendered document itself is the result.
+         * Never open a TCP connection, and report a synthetic success so
+         * normal page bookkeeping can finish. */
+        ipp_rc = 0;
+        result.error = 0;
+        result.http_status = 0;
+        result.ipp_status = 0;
+        result.document_bytes = g_job_file_bytes;
+        mp_log_text("Capture-only regression job retained; network submission skipped");
     } else {
         mp_write_job_status("SUBMITTING", NULL);
         ipp_rc = mp_spool_ipp_submit(&g_config, fname, fmt, &result);
         mp_write_job_status(ipp_rc == 0 ? "DONE" : "FAILED",
                             ipp_rc == 0 ? NULL : &result);
     }
-    mp_log_ipp_result("IPP result error/http/status", &result);
+    mp_log_ipp_result(g_config.capture_only ?
+                      "Capture result error/http/status" :
+                      "IPP result error/http/status", &result);
 
     if (ipp_rc == 0) {
         if (rows_for_streak < MP_TINY_PAGE_ROWS) {
@@ -1598,7 +1614,8 @@ static LONG mp_page_submit_and_track(ULONG rows_for_streak)
      * failure alike - that retention is the entire point of the Spooler
      * management window. Untracked jobs keep the original Debug-only
      * retention behaviour. */
-    if (!g_config.debug && !mp_duplex_requested() && !g_job_status_path[0])
+    if (!g_config.capture_only && !g_config.debug &&
+        !mp_duplex_requested() && !g_job_status_path[0])
         mp_spool_job_delete(fname);
     return ipp_rc;
 }
@@ -2094,6 +2111,11 @@ int PRT_STDARGS DriverOpen(struct IORequest *ior)
      * first page, so it needs the real configured resolution available
      * here already, not just Init()'s one-time compiled-in default. */
     g_config_source = mp_spool_config_load(&g_config);
+    /* Init may have read this file first on a cold driver load. Consume
+     * it only here, after DriverOpen has definitely loaded the same
+     * capture configuration for the print request about to run. */
+    if (g_config_source == MP_CONFIG_SOURCE_TEST)
+        mp_spool_job_delete((CONST_STRPTR)"T:MintPRINT-testsuite.cfg");
     mp_build_spool_paths();
     g_engine = mp_detect_engine(&g_config);
     if (g_config.sides[0] == 't' &&
@@ -2146,19 +2168,30 @@ VOID PRT_STDARGS DriverClose(struct IORequest *ior)
             g_job_open = FALSE;
         }
         if (!g_duplex_job_failed) {
-            mp_write_job_status("SUBMITTING", NULL);
-            ipp_rc = mp_spool_ipp_submit(&g_config, mp_job_filename(),
-                                          mp_document_format(), &result);
-            mp_log_ipp_result("IPP duplex Print-Job error/http/status",
-                              &result);
+            if (g_config.capture_only) {
+                ipp_rc = 0;
+                result.error = 0;
+                result.http_status = 0;
+                result.ipp_status = 0;
+                result.document_bytes = g_job_file_bytes;
+                mp_log_text("Capture-only duplex job retained; network submission skipped");
+                mp_log_ipp_result("Capture duplex result error/http/status",
+                                  &result);
+            } else {
+                mp_write_job_status("SUBMITTING", NULL);
+                ipp_rc = mp_spool_ipp_submit(&g_config, mp_job_filename(),
+                                              mp_document_format(), &result);
+                mp_log_ipp_result("IPP duplex Print-Job error/http/status",
+                                  &result);
+                mp_write_job_status(ipp_rc == 0 ? "DONE" : "FAILED",
+                                    ipp_rc == 0 ? NULL : &result);
+            }
             if (ipp_rc != 0) g_duplex_job_failed = TRUE;
-            mp_write_job_status(ipp_rc == 0 ? "DONE" : "FAILED",
-                                ipp_rc == 0 ? NULL : &result);
         } else {
             mp_log_text("Duplex job discarded after page failure");
             mp_write_job_status("FAILED", NULL);
         }
-        if (!g_config.debug && !g_job_status_path[0])
+        if (!g_config.capture_only && !g_config.debug && !g_job_status_path[0])
             mp_spool_job_delete(mp_job_filename());
     }
     mp_job_cleanup();
