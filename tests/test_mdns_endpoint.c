@@ -32,7 +32,10 @@ static size_t rr_hdr(unsigned char *p, size_t off, const char *owner,
     off = put_name(p, off, owner);
     u16(p, off, type); off += 2;
     u16(p, off, 1); off += 2;
-    p[off++] = p[off++] = p[off++] = p[off++] = 0;
+    p[off++] = 0;
+    p[off++] = 0;
+    p[off++] = 0;
+    p[off++] = 0;
     u16(p, off, rdlen); off += 2;
     return off;
 }
@@ -58,7 +61,10 @@ int main(void)
     (void)start;
 
     off = rr_hdr(p, off, instance, 33, 6);
-    p[off++] = p[off++] = p[off++] = p[off++] = 0;
+    p[off++] = 0;
+    p[off++] = 0;
+    p[off++] = 0;
+    p[off++] = 0;
     u16(p, off, 631); off += 2;
 
     off = put_name(p, off, instance);
