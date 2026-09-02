@@ -178,6 +178,17 @@ is confirmed yet, so check the
 [printer compatibility page](docs/PRINTER_COMPATIBILITY.md) for your specific
 model - see `docs/` for open issues and design history.
 
+## Credits
+
+MintPRINT is by Darren Banfi (boingball), developed with assistance from
+Anthropic Claude.
+
+Special thanks to **Andreas Stürmer**, author of
+[AmiAirPrint](https://github.com/Andiweli/AmiAirprint), for friendly
+cross-project collaboration: sharing compatibility findings and recent fixes,
+allowing MintPRINT's implementation to be compared against AmiAirPrint, and
+helping identify gaps in classic application and printer compatibility.
+
 ## License
 
 [MIT](LICENSE) - Copyright (c) 2026 Darren Banfi (boingball).
