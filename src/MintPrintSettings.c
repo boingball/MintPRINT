@@ -2622,18 +2622,16 @@ static void mp_test_suite_paths(const struct MPTestSuiteCase *c)
 {
     const char *short_engine = mp_test_suite_engine_short(c->engine);
     const char *ext = mp_test_suite_extension(c->engine);
-    if (strcmp(c->sides, "one-sided") != 0) {
-        snprintf(g_test_suite.output_path, sizeof(g_test_suite.output_path),
-                 "%s/%03d-%s-%s-%s.%s", g_test_suite.drawer,
-                 g_test_suite.current + 1, short_engine,
-                 strstr(c->sides, "short") ? "short" : "long",
-                 c->sheet_back, ext);
-    } else {
-        snprintf(g_test_suite.output_path, sizeof(g_test_suite.output_path),
-                 "%s/%03d-%s-%s-%ddpi-%s-%s.%s", g_test_suite.drawer,
-                 g_test_suite.current + 1, short_engine, c->scaling,
-                 c->resolution, c->color, c->quality, ext);
-    }
+
+    /* Classic AmigaDOS filesystems cap component names at 30 chars.
+     * Keep both the rendered document AND its .ipp sibling well
+     * below that limit. The manifest already records every matrix
+     * setting, so descriptive long filenames add no information and
+     * can alias after truncation on OS 2.x (letting the .ipp sidecar
+     * overwrite the document). */
+    snprintf(g_test_suite.output_path, sizeof(g_test_suite.output_path),
+             "%s/%03d-%s.%s", g_test_suite.drawer,
+             g_test_suite.current + 1, short_engine, ext);
     snprintf(g_test_suite.log_path, sizeof(g_test_suite.log_path),
              "%s/%03d-driver.log", g_test_suite.drawer,
              g_test_suite.current + 1);
@@ -2748,6 +2746,7 @@ static void mp_test_suite_advance(struct Window *win)
 {
     struct MPTestSuiteCase c;
     LONG bytes = 0;
+    LONG bytes_after = 0;
     LONG ipp_bytes = 0;
     LONG ipp_rc = -1;
     BOOL output_ok;
@@ -2765,6 +2764,13 @@ static void mp_test_suite_advance(struct Window *win)
         ipp_rc = mp_test_suite_write_ipp_sidecar(&c);
     ipp_ok = ipp_rc == 0 && mp_test_suite_file_exists(
                  (CONST_STRPTR)g_test_suite.ipp_path, &ipp_bytes) && ipp_bytes > 0;
+    /* Re-check after sidecar creation. On a classic 30-character
+     * filesystem two different long path strings can resolve to the
+     * same truncated file; this catches the sidecar clobbering the
+     * rendered document instead of falsely reporting OK. */
+    output_ok = output_ok && mp_test_suite_file_exists(
+                    (CONST_STRPTR)g_test_suite.output_path,
+                    &bytes_after) && bytes_after == bytes;
     if (output_ok && ipp_ok) {
         snprintf(line, sizeof(line),
                  "CASE-RESULT %03d OK bytes=%ld ipp-bytes=%ld log=%s\n",

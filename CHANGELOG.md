@@ -16,6 +16,7 @@ to this page; replace that summary when preparing the next release.
 
 ## Unreleased
 
+- **OS2-safe regression capture filenames.** ReleaseTest now uses short numbered output names (for example `001-jpeg.jpg`) so the document and its `.ipp` sidecar remain distinct on classic 30-character AmigaDOS filesystems. The suite also re-checks the rendered document after writing the sidecar and rejects a case if its size changed. This fixes the OS 2.1 capture where long names aliased and the sidecars overwrote otherwise successful output files.
 - **Regression-suite follow-up and JPEG density metadata (driver 41.16).**
   Raw JPEG now writes the selected capture DPI into its JFIF X/Y density
   fields instead of always claiming 300 dpi; embedded JPEG streams in PDF
