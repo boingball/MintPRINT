@@ -55,7 +55,7 @@
  * MP_DRIVER_REV (the version half) only bumps for something that
  * warrants a new version number outright, not on every rebuild. */
 #define MP_DRIVER_REV 41
-#define MP_DRIVER_SUBREV 15
+#define MP_DRIVER_SUBREV 16
 
 struct ExecBase *SysBase = NULL;
 struct DosLibrary *DOSBase = NULL;
@@ -1086,8 +1086,10 @@ static BOOL mp_job_begin(ULONG width, ULONG height)
             break;
         }
         default:
-            if (!mp_jpeg_begin(&g_jpeg, width, height, g_jpeg_scratch,
-                               g_jpeg_scratch_bytes, mp_job_file_write, NULL)) {
+            if (!mp_jpeg_begin_dpi(&g_jpeg, width, height,
+                                   g_config.resolution, g_jpeg_scratch,
+                                   g_jpeg_scratch_bytes,
+                                   mp_job_file_write, NULL)) {
                 mp_log_text("JPEG encoder begin failed");
                 g_job_failed = TRUE;
                 mp_job_cleanup();
@@ -1580,7 +1582,8 @@ static LONG mp_page_submit_and_track(ULONG rows_for_streak)
     } else if (g_config.capture_only) {
         /* Regression suite: the rendered document itself is the result.
          * Never open a TCP connection, and report a synthetic success so
-         * normal page bookkeeping can finish. */
+         * normal page bookkeeping can finish. The GUI Process creates the
+         * matching byte-exact IPP request sidecar after this capture ends. */
         ipp_rc = 0;
         result.error = 0;
         result.http_status = 0;
@@ -1747,8 +1750,10 @@ static BOOL mp_deferred_finalize(ULONG width, ULONG content_rows,
             break;
         }
         default: /* MP_ENGINE_JPEG */
-            if (!mp_jpeg_begin(&g_jpeg, width, final_height, g_jpeg_scratch,
-                               g_jpeg_scratch_bytes, mp_job_file_write, NULL)) {
+            if (!mp_jpeg_begin_dpi(&g_jpeg, width, final_height,
+                                   g_config.resolution, g_jpeg_scratch,
+                                   g_jpeg_scratch_bytes,
+                                   mp_job_file_write, NULL)) {
                 mp_log_text("Deferred JPEG encoder begin failed");
                 g_job_failed = TRUE;
                 return FALSE;

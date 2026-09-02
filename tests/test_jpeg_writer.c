@@ -110,16 +110,42 @@ static void fill_random(short *block, unsigned int *seed)
 struct TestSink {
     unsigned long bytes;
     unsigned long calls;
+    unsigned char header[32];
+    unsigned long header_used;
 };
 
 static long test_sink_write(void *ctx, const unsigned char *data,
                             unsigned long len)
 {
     struct TestSink *sink = (struct TestSink *)ctx;
-    (void)data;
+    if (sink->header_used < sizeof(sink->header)) {
+        unsigned long room = sizeof(sink->header) - sink->header_used;
+        unsigned long copy = len < room ? len : room;
+        memcpy(sink->header + sink->header_used, data, copy);
+        sink->header_used += copy;
+    }
     sink->bytes += len;
     ++sink->calls;
     return (long)len;
+}
+
+
+static void test_jfif_density(void)
+{
+    MPJpegEncoder enc;
+    struct TestSink sink;
+    unsigned char scratch[16 * 16 * 3];
+
+    memset(&sink, 0, sizeof(sink));
+    assert(mp_jpeg_begin_dpi(&enc, 16, 16, 600UL,
+                             scratch, sizeof(scratch),
+                             test_sink_write, &sink));
+    /* SOI(2) + APP0 marker(2) + length(2) + JFIF data. Units byte is file
+     * offset 13; X/Y density are offsets 14..17. */
+    assert(sink.header_used >= 18UL);
+    assert(sink.header[13] == 1); /* pixels per inch */
+    assert(sink.header[14] == 0x02 && sink.header[15] == 0x58);
+    assert(sink.header[16] == 0x02 && sink.header[17] == 0x58);
 }
 
 static void test_flat_encoder_fast_path(void)
@@ -133,6 +159,7 @@ static void test_flat_encoder_fast_path(void)
 
     sink.bytes = 0;
     sink.calls = 0;
+    sink.header_used = 0;
     for (i = 0; i < (int)sizeof(row); ++i) row[i] = 255;
 
     scratch_size = mp_jpeg_scratch_size(16);
@@ -162,6 +189,7 @@ static void test_nonflat_encoder_still_uses_dct(void)
 
     sink.bytes = 0;
     sink.calls = 0;
+    sink.header_used = 0;
     assert(mp_jpeg_begin(&enc, 16, 16, scratch, sizeof(scratch),
                          test_sink_write, &sink));
     for (y = 0; y < 16; ++y) {
@@ -222,6 +250,7 @@ int main(void)
     printf("random sweep (500 blocks): worst-case max error %.3f\n",
            max_seen);
 
+    test_jfif_density();
     test_flat_encoder_fast_path();
     test_nonflat_encoder_still_uses_dct();
 

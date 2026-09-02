@@ -175,6 +175,7 @@ static struct MPTestPrintJob test_print_job;
  * CloseDevice/DriverClose finalises the document. */
 static int mp_test_print_extra_pages_requested = 0;
 static BOOL mp_test_print_skip_config_save = FALSE;
+static BOOL mp_test_suite_capture_mode = FALSE;
 
 // Saved printer profiles: ENV:MintPRINT/Unit0 .. Unit(MAX_UNITS-1). Only
 // Unit0 is what the driver actually reads at print time; the others are
@@ -1910,6 +1911,8 @@ static void mp_test_print_complete(struct Window *win)
     if (ioerr != 0 || request_error != 0) {
         printf("Test Print failed: WaitIO=%ld io_Error=%ld\n",
                ioerr, request_error);
+    } else if (mp_test_suite_capture_mode) {
+        printf("Test Suite capture complete; no printer job was sent\n");
     } else {
         /* A real OS 2.04 capture returned no I/O error despite the driver
          * logging an IPP connection timeout during Render(4). A completed
@@ -2265,7 +2268,7 @@ static BOOL mintprint_test_page(struct Window *win) {
  *
  * This is a developer/test facility, not another way to print. It runs the
  * normal printer.device DUMPRPORT test page through a bounded coverage
- * matrix and asks driver 41.15+ to retain each finished document under T:
+ * matrix and asks driver 41.16+ to retain each finished document under T:
  * without performing the IPP submission. The matrix is deliberately not a
  * Cartesian product: that would create hundreds/thousands of page-sized
  * files in T: (normally RAM:). Instead every engine sees every scaling mode,
@@ -2273,7 +2276,7 @@ static BOOL mintprint_test_page(struct Window *win) {
  * PWG/URF then get their duplex-specific cases too. A manifest records every
  * exact input so the captured files can be audited off-Amiga afterwards.
  * ------------------------------------------------------------------- */
-#define MP_TEST_SUITE_CASES 32
+#define MP_TEST_SUITE_CASES 33
 #define MP_TEST_SUITE_PATH_MAX 160
 
 struct MPTestSuiteCase {
@@ -2295,6 +2298,7 @@ struct MPTestSuiteState {
     char drawer[80];
     char output_path[MP_TEST_SUITE_PATH_MAX];
     char log_path[MP_TEST_SUITE_PATH_MAX];
+    char ipp_path[MP_TEST_SUITE_PATH_MAX + 8];
     char old_engine[32];
     char old_media[MAX_ATTR_LEN];
     char old_source[MAX_ATTR_LEN];
@@ -2381,18 +2385,28 @@ static void mp_test_suite_case(int index, struct MPTestSuiteCase *c)
     strcpy(c->quality, "normal");
     strcpy(c->scaling, "auto-fit");
 
-    if (index < 29) {
-        static const char *backs[4] = {
-            "normal", "rotated", "flipped", "manual-tumble"
+    if (index < 30) {
+        /* Five PWG cases cover every sheet-back keyword AND every actual
+         * CrossFeed/Feed sign pair: +/+, -/-, +/- and -/+. The old four-case
+         * alternation accidentally paired rotated with short-edge, where
+         * rotated is intentionally a no-op, so -/+ was never exercised. */
+        static const char *backs[5] = {
+            "normal", "rotated", "flipped", "flipped", "manual-tumble"
+        };
+        static const char *sides[5] = {
+            "two-sided-long-edge",  /* normal:        +/+ */
+            "two-sided-long-edge",  /* rotated:       -/- */
+            "two-sided-long-edge",  /* flipped:       +/- */
+            "two-sided-short-edge", /* flipped:       -/+ */
+            "two-sided-short-edge"  /* manual-tumble: -/- */
         };
         int v = index - 25;
         strcpy(c->engine, "pwg-raster");
-        strcpy(c->sides, (v & 1) ? "two-sided-short-edge" :
-                                  "two-sided-long-edge");
+        strcpy(c->sides, sides[v]);
         strcpy(c->sheet_back, backs[v]);
-    } else if (index < 31) {
+    } else if (index < 32) {
         strcpy(c->engine, "urf");
-        strcpy(c->sides, index == 29 ? "two-sided-long-edge" :
+        strcpy(c->sides, index == 30 ? "two-sided-long-edge" :
                                       "two-sided-short-edge");
     } else {
         /* Explicit non-zero imageable margins: catches the PostScript
@@ -2546,6 +2560,7 @@ static void mp_test_suite_finish(struct Window *win, BOOL aborted)
     mp_test_suite_append(line);
     mp_test_suite_restore(win);
     g_test_suite.active = FALSE;
+    mp_test_suite_capture_mode = FALSE;
     mp_test_suite_set_button(win, TRUE);
     if (aborted)
         printf("Test Suite aborted; captures kept in %s\n", g_test_suite.drawer);
@@ -2622,14 +2637,56 @@ static void mp_test_suite_paths(const struct MPTestSuiteCase *c)
     snprintf(g_test_suite.log_path, sizeof(g_test_suite.log_path),
              "%s/%03d-driver.log", g_test_suite.drawer,
              g_test_suite.current + 1);
+    snprintf(g_test_suite.ipp_path, sizeof(g_test_suite.ipp_path),
+             "%s.ipp", g_test_suite.output_path);
 }
 
-static BOOL mp_test_suite_capture_exists(LONG *size_out)
+static CONST_STRPTR mp_test_suite_document_format(const char *engine)
+{
+    if (strcmp(engine, "pwg-raster") == 0)
+        return (CONST_STRPTR)"image/pwg-raster";
+    if (strcmp(engine, "pdf") == 0)
+        return (CONST_STRPTR)"application/pdf";
+    if (strcmp(engine, "postscript") == 0)
+        return (CONST_STRPTR)"application/postscript";
+    if (strcmp(engine, "urf") == 0)
+        return (CONST_STRPTR)"image/urf";
+    return (CONST_STRPTR)"image/jpeg";
+}
+
+static LONG mp_test_suite_write_ipp_sidecar(const struct MPTestSuiteCase *c)
+{
+    struct MPConfig cfg;
+
+    if (!c) return -1;
+    /* This helper is linked into MintPrintSettings, not the printer driver.
+     * Do not depend on driver/config.c merely for mp_config_defaults(): that
+     * module also owns driver-only Render compatibility state and is not part
+     * of the GUI link. The serializer below only consumes the endpoint and
+     * job-template fields populated here, so a zeroed local config is the
+     * correct minimal starting point. */
+    memset(&cfg, 0, sizeof(cfg));
+    mp_test_suite_copy_string(cfg.host, sizeof(cfg.host), "127.0.0.1");
+    cfg.port = 631;
+    mp_test_suite_copy_string(cfg.path, sizeof(cfg.path), "/ipp/print");
+    mp_test_suite_copy_string(cfg.media, sizeof(cfg.media), c->media);
+    mp_test_suite_copy_string(cfg.source, sizeof(cfg.source), c->source);
+    mp_test_suite_copy_string(cfg.color, sizeof(cfg.color), c->color);
+    mp_test_suite_copy_string(cfg.quality, sizeof(cfg.quality), c->quality);
+    mp_test_suite_copy_string(cfg.scaling, sizeof(cfg.scaling), c->scaling);
+    mp_test_suite_copy_string(cfg.sides, sizeof(cfg.sides), c->sides);
+
+    return mp_ipp_capture_request(&cfg,
+                                  mp_test_suite_document_format(c->engine),
+                                  (CONST_STRPTR)g_test_suite.output_path);
+}
+
+static BOOL mp_test_suite_file_exists(CONST_STRPTR path, LONG *size_out)
 {
     BPTR lock;
     struct FileInfoBlock fib;
     if (size_out) *size_out = 0;
-    lock = Lock((CONST_STRPTR)g_test_suite.output_path, ACCESS_READ);
+    lock = Lock(path, ACCESS_READ);
     if (!lock) return FALSE;
     memset(&fib, 0, sizeof(fib));
     if (Examine(lock, &fib) && size_out) *size_out = fib.fib_Size;
@@ -2649,10 +2706,11 @@ static void mp_test_suite_run_current(struct Window *win)
         DeleteFile((CONST_STRPTR)"T:MintPRINT-driver.log");
 
         snprintf(line, sizeof(line),
-                 "CASE %03d file=%s engine=%s dpi=%d media=%s source=%s "
+                 "CASE %03d file=%s ipp=%s engine=%s dpi=%d media=%s source=%s "
                  "color=%s quality=%s scaling=%s sides=%s sheet-back=%s "
                  "margin100mm=%lu\n",
                  g_test_suite.current + 1, g_test_suite.output_path,
+                 g_test_suite.ipp_path,
                  c.engine, c.resolution, c.media, c.source, c.color,
                  c.quality, c.scaling, c.sides, c.sheet_back,
                  (unsigned long)c.margin_100mm);
@@ -2688,19 +2746,37 @@ static void mp_test_suite_run_current(struct Window *win)
 
 static void mp_test_suite_advance(struct Window *win)
 {
+    struct MPTestSuiteCase c;
     LONG bytes = 0;
-    char line[256];
+    LONG ipp_bytes = 0;
+    LONG ipp_rc = -1;
+    BOOL output_ok;
+    BOOL ipp_ok;
+    char line[320];
 
     if (!g_test_suite.active) return;
 
     mp_test_suite_copy_file((CONST_STRPTR)"T:MintPRINT-driver.log",
                             (CONST_STRPTR)g_test_suite.log_path);
-    if (mp_test_suite_capture_exists(&bytes) && bytes > 0) {
-        snprintf(line, sizeof(line), "CASE-RESULT %03d OK bytes=%ld log=%s\n",
-                 g_test_suite.current + 1, bytes, g_test_suite.log_path);
+    output_ok = mp_test_suite_file_exists(
+                    (CONST_STRPTR)g_test_suite.output_path, &bytes) && bytes > 0;
+    mp_test_suite_case(g_test_suite.current, &c);
+    if (output_ok)
+        ipp_rc = mp_test_suite_write_ipp_sidecar(&c);
+    ipp_ok = ipp_rc == 0 && mp_test_suite_file_exists(
+                 (CONST_STRPTR)g_test_suite.ipp_path, &ipp_bytes) && ipp_bytes > 0;
+    if (output_ok && ipp_ok) {
+        snprintf(line, sizeof(line),
+                 "CASE-RESULT %03d OK bytes=%ld ipp-bytes=%ld log=%s\n",
+                 g_test_suite.current + 1, bytes, ipp_bytes,
+                 g_test_suite.log_path);
     } else {
-        snprintf(line, sizeof(line), "CASE-RESULT %03d ERROR missing-or-empty-output log=%s\n",
-                 g_test_suite.current + 1, g_test_suite.log_path);
+        snprintf(line, sizeof(line),
+                 "CASE-RESULT %03d ERROR output=%s ipp=%s ipp-rc=%ld log=%s\n",
+                 g_test_suite.current + 1,
+                 output_ok ? "ok" : "missing-or-empty",
+                 ipp_ok ? "ok" : "missing-or-empty", ipp_rc,
+                 g_test_suite.log_path);
     }
     mp_test_suite_append(line);
     ++g_test_suite.current;
@@ -2722,11 +2798,11 @@ static void mp_test_suite_start(struct Window *win)
         return;
     }
 
-    /* Hard safety gate: 41.14 and older do not understand CAPTURE_ONLY and
-     * would treat the temporary file as an ordinary printer configuration. */
+    /* 41.15 introduced safe CAPTURE_ONLY. 41.16 additionally emits the
+     * byte-exact IPP request sidecar that this suite now requires per case. */
     if (!mp_read_driver_version(MINTPRINT_DRIVER_DEST, &ver) ||
-        ver.version < 41 || (ver.version == 41 && ver.revision < 15)) {
-        printf("Test Suite requires installed MintPRINT driver 41.15 or newer.\n");
+        ver.version < 41 || (ver.version == 41 && ver.revision < 16)) {
+        printf("Test Suite requires installed MintPRINT driver 41.16 or newer.\n");
         printf("Update DEVS:Printers/MintPRINT from this build before running it.\n");
         return;
     }
@@ -2735,7 +2811,7 @@ static void mp_test_suite_start(struct Window *win)
     es.es_Flags = 0;
     es.es_Title = (UBYTE *)"MintPRINT Output Test Suite";
     es.es_TextFormat = (UBYTE *)
-        "Run 32 capture-only regression jobs?\n\n"
+        "Run 33 capture-only regression jobs?\n\n"
         "No job is submitted to the printer. Output documents and one\n"
         "driver log per case are retained under a new T: drawer.\n\n"
         "T: is usually RAM:, so allow sufficient free memory.";
@@ -2751,13 +2827,14 @@ static void mp_test_suite_start(struct Window *win)
 
     mp_test_suite_snapshot();
     g_test_suite.active = TRUE;
+    mp_test_suite_capture_mode = TRUE;
     g_test_suite.current = 0;
     mp_test_suite_set_button(win, FALSE);
 
     snprintf(manifest, sizeof(manifest),
              "MintPRINT output regression suite\n"
              "driver=%u.%u cases=%d capture-only=1 network-submit=disabled\n"
-             "matrix=5 engines x 5 scaling modes plus PWG/URF duplex and PostScript margin coverage\n"
+             "matrix=5 engines x 5 scaling modes plus PWG transform/URF duplex and PostScript margin coverage\n"
              "drawer=%s\n\n",
              (unsigned)ver.version, (unsigned)ver.revision,
              MP_TEST_SUITE_CASES, g_test_suite.drawer);
@@ -9784,8 +9861,11 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
         return NULL;
     }
 
-    /* Developer regression capture. Stays on the existing button row
-     * so the OS 2.x-safe window geometry does not grow again. */
+#ifdef MINTPRINT_RELEASE_TEST
+    /* Developer regression capture. Public release builds deliberately do
+     * not create this gadget; make releasetest defines the build flag and
+     * stages a separate QA bundle so it cannot be confused with the public
+     * release drawer. */
     ng.ng_LeftEdge = 105;
     ng.ng_Width = 90;
     ng.ng_GadgetText = (STRPTR)"Test _Suite";
@@ -9797,13 +9877,20 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
         printf("Failed to create test suite button\n");
         return NULL;
     }
+#endif
 
     // Enable/disable diagnostic logs and retained rendered jobs. Shares
     // the button row's spare space between Test Print and Save; the
     // cycle's own label text ("Debug On"/"Debug Off") is self-explanatory
     // so it needs no separate GadgetText prefix, unlike the stacked
     // Printer Engine/Spooler cycles above.
+#ifdef MINTPRINT_RELEASE_TEST
     ng.ng_LeftEdge = 200;
+#else
+    /* Four public-release controls are spaced evenly across the row when
+     * the developer-only Test Suite gadget is absent. */
+    ng.ng_LeftEdge = 140;
+#endif
     ng.ng_TopEdge = 198 + topborder;
     ng.ng_Width = 90;
     ng.ng_Height = 12;
@@ -9819,7 +9906,11 @@ struct Gadget *createAllGadgets(struct Gadget **glistptr, void *vi, UWORD topbor
     }
 
     // Save button - same action as File -> Save Driver Settings.
+#ifdef MINTPRINT_RELEASE_TEST
     ng.ng_LeftEdge = 300;
+#else
+    ng.ng_LeftEdge = 270;
+#endif
     ng.ng_Width = 90;
     ng.ng_TopEdge = 198 + topborder;
     ng.ng_Height = 12;
@@ -10300,9 +10391,11 @@ void process_window_events(struct Window *win) {
                         }
                         break;
 
+#ifdef MINTPRINT_RELEASE_TEST
                         case GAD_TEST_SUITE:
                             mp_test_suite_start(win);
                             break;
+#endif
 
                         case GAD_SAVE_BUTTON:
                             if (g_test_suite.active) {

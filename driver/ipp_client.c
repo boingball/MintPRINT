@@ -661,6 +661,98 @@ static LONG mp_file_size(BPTR fh)
     return end;
 }
 
+
+LONG mp_ipp_capture_request(const struct MPConfig *cfg,
+                            CONST_STRPTR document_format,
+                            CONST_STRPTR document_filename)
+{
+    static UBYTE ipp[1024];
+    static char uri[192];
+    static char output_path[MP_CONFIG_CAPTURE_PATH_MAX + 8];
+    ULONG io = 0;
+    ULONG up = 0;
+    ULONG op = 0;
+    BPTR fh;
+
+    if (!DOSBase || !cfg || !cfg->host[0] || cfg->port == 0 ||
+        cfg->path[0] != '/' || !document_format || !document_filename)
+        return -1;
+
+    uri[0] = 0;
+    if (!mp_append(uri, sizeof(uri), &up, "ipp://") ||
+        !mp_append(uri, sizeof(uri), &up, cfg->host))
+        return -2;
+    if (cfg->port != 631 &&
+        (!mp_append(uri, sizeof(uri), &up, ":") ||
+         !mp_append_ulong(uri, sizeof(uri), &up, cfg->port)))
+        return -2;
+    if (!mp_append(uri, sizeof(uri), &up, cfg->path))
+        return -2;
+
+    if (!mp_put8(ipp, sizeof(ipp), &io, 1) ||
+        !mp_put8(ipp, sizeof(ipp), &io, 1) ||
+        !mp_put16(ipp, sizeof(ipp), &io, 0x0002) ||
+        !mp_put32(ipp, sizeof(ipp), &io, 1) ||
+        !mp_put8(ipp, sizeof(ipp), &io, 0x01) ||
+        !mp_ipp_attr(ipp, sizeof(ipp), &io, 0x47,
+                     "attributes-charset", "utf-8") ||
+        !mp_ipp_attr(ipp, sizeof(ipp), &io, 0x48,
+                     "attributes-natural-language", "en") ||
+        !mp_ipp_attr(ipp, sizeof(ipp), &io, 0x45, "printer-uri", uri) ||
+        !mp_ipp_attr(ipp, sizeof(ipp), &io, 0x42,
+                     "requesting-user-name", "Amiga") ||
+        !mp_ipp_attr(ipp, sizeof(ipp), &io, 0x42,
+                     "job-name", "MintPRINT AmigaOS") ||
+        !mp_ipp_attr(ipp, sizeof(ipp), &io, 0x49,
+                     "document-format", (const char *)document_format))
+        return -3;
+
+    if (cfg->media[0] || cfg->source[0] || cfg->color[0] || cfg->quality[0] ||
+        cfg->scaling[0] || cfg->sides[0]) {
+        ULONG quality_enum = mp_quality_enum(cfg->quality);
+        ULONG media_x = 0, media_y = 0;
+        int use_media_col = cfg->media[0] && cfg->source[0] &&
+                            mp_media_dimensions_100mm(cfg->media,
+                                                      &media_x, &media_y);
+
+        if (!mp_put8(ipp, sizeof(ipp), &io, 0x02)) return -3;
+        if (use_media_col) {
+            if (!mp_media_col_attr(ipp, sizeof(ipp), &io, media_x, media_y,
+                                   cfg->source)) return -3;
+        } else if (cfg->media[0] &&
+                   !mp_ipp_attr(ipp, sizeof(ipp), &io, 0x44,
+                                "media", cfg->media)) return -3;
+        if (cfg->color[0] &&
+            !mp_ipp_attr(ipp, sizeof(ipp), &io, 0x44,
+                         "print-color-mode", cfg->color)) return -3;
+        if (quality_enum &&
+            !mp_ipp_enum_attr(ipp, sizeof(ipp), &io,
+                              "print-quality", quality_enum)) return -3;
+        if (cfg->scaling[0] &&
+            !mp_ipp_attr(ipp, sizeof(ipp), &io, 0x44,
+                         "print-scaling", cfg->scaling)) return -3;
+        if (cfg->sides[0] &&
+            !mp_ipp_attr(ipp, sizeof(ipp), &io, 0x44,
+                         "sides", cfg->sides)) return -3;
+    }
+    if (!mp_put8(ipp, sizeof(ipp), &io, 0x03)) return -3;
+
+    output_path[0] = 0;
+    if (!mp_append(output_path, sizeof(output_path), &op,
+                   (const char *)document_filename) ||
+        !mp_append(output_path, sizeof(output_path), &op, ".ipp"))
+        return -4;
+
+    fh = Open((CONST_STRPTR)output_path, MODE_NEWFILE);
+    if (!fh) return -5;
+    if (Write(fh, ipp, (LONG)io) != (LONG)io) {
+        Close(fh);
+        return -6;
+    }
+    Close(fh);
+    return 0;
+}
+
 LONG mp_ipp_print_document(const struct MPConfig *cfg, CONST_STRPTR filename,
                            CONST_STRPTR document_format,
                            struct MPIPPResult *result)

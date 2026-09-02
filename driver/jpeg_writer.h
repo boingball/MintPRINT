@@ -6,6 +6,7 @@ typedef long (*MPJpegWriteFn)(void *ctx, const unsigned char *data, unsigned lon
 typedef struct MPJpegEncoder {
     unsigned long width;
     unsigned long height;
+    unsigned long dpi;
     unsigned long rows_in;
     unsigned long mcu_rows_done;
     unsigned long blocks_total;
@@ -25,6 +26,10 @@ typedef struct MPJpegEncoder {
 } MPJpegEncoder;
 
 unsigned long mp_jpeg_scratch_size(unsigned long width);
+int mp_jpeg_begin_dpi(MPJpegEncoder *enc, unsigned long width, unsigned long height,
+                      unsigned long dpi,
+                      unsigned char *scratch, unsigned long scratch_size,
+                      MPJpegWriteFn write_fn, void *write_ctx);
 int mp_jpeg_begin(MPJpegEncoder *enc, unsigned long width, unsigned long height,
                   unsigned char *scratch, unsigned long scratch_size,
                   MPJpegWriteFn write_fn, void *write_ctx);

@@ -473,9 +473,22 @@ static int mp_encode_mcu_row(MPJpegEncoder *e)
 static int mp_write_headers(MPJpegEncoder *e)
 {
     int i, t;
-    static const unsigned char jfif[14] = {
-        'J','F','I','F',0, 1,1, 1, 1,44, 1,44, 0,0
+    unsigned int density = (unsigned int)(e->dpi ? e->dpi : 300UL);
+    unsigned char jfif[14] = {
+        'J','F','I','F',0, 1,1, 1, 0,0, 0,0, 0,0
     };
+
+    /* JFIF density is an unsigned 16-bit pixels-per-inch value. The raw
+     * JPEG engine used to hard-code 300 here even when the selected raster
+     * was 600 dpi, so a consumer using physical JPEG density rather than
+     * only IPP media/scaling could interpret the page at twice its intended
+     * size. Keep the metadata tied to the actual capture resolution. */
+    if (density == 0U) density = 300U;
+    if (density > 65535U) density = 65535U;
+    jfif[8] = (unsigned char)(density >> 8);
+    jfif[9] = (unsigned char)density;
+    jfif[10] = (unsigned char)(density >> 8);
+    jfif[11] = (unsigned char)density;
 
     if (!mp_put_marker(e, 0xd8)) return 0;
     if (!mp_put_marker(e, 0xe0) || !mp_put_u16(e, 16)) return 0;
@@ -538,9 +551,10 @@ unsigned long mp_jpeg_scratch_size(unsigned long width)
     return width * 3UL * 16UL;
 }
 
-int mp_jpeg_begin(MPJpegEncoder *e, unsigned long width, unsigned long height,
-                  unsigned char *scratch, unsigned long scratch_size,
-                  MPJpegWriteFn write_fn, void *write_ctx)
+int mp_jpeg_begin_dpi(MPJpegEncoder *e, unsigned long width, unsigned long height,
+                      unsigned long dpi,
+                      unsigned char *scratch, unsigned long scratch_size,
+                      MPJpegWriteFn write_fn, void *write_ctx)
 {
     unsigned long need;
     unsigned long i;
@@ -553,6 +567,7 @@ int mp_jpeg_begin(MPJpegEncoder *e, unsigned long width, unsigned long height,
 
     e->width = width;
     e->height = height;
+    e->dpi = dpi ? dpi : 300UL;
     e->rows_in = 0;
     e->mcu_rows_done = 0;
     e->blocks_total = 0;
@@ -568,6 +583,14 @@ int mp_jpeg_begin(MPJpegEncoder *e, unsigned long width, unsigned long height,
     e->failed = 0;
     for (i = 0; i < need; ++i) scratch[i] = 255;
     return mp_write_headers(e);
+}
+
+int mp_jpeg_begin(MPJpegEncoder *e, unsigned long width, unsigned long height,
+                  unsigned char *scratch, unsigned long scratch_size,
+                  MPJpegWriteFn write_fn, void *write_ctx)
+{
+    return mp_jpeg_begin_dpi(e, width, height, 300UL, scratch, scratch_size,
+                             write_fn, write_ctx);
 }
 
 int mp_jpeg_write_scanline(MPJpegEncoder *e, const unsigned char *rgb)

@@ -128,16 +128,18 @@ before.
 
 ## Output regression Test Suite
 
-MintPrint Settings includes a **Test Suite** button for developer/regression
-testing. It requires the installed `DEVS:Printers/MintPRINT` driver to be
-**41.15 or newer**; Settings refuses to start the suite with an older driver
-because older builds do not understand capture-only mode.
+The public `make release` build deliberately **does not show** the
+**Test Suite** button. It is a developer/regression facility, not an end-user
+printing control. Build `make releasetest` to create the separate
+`release/MintPRINT-ReleaseTest/` QA bundle with the button enabled; the normal
+`release/MintPRINT/` drawer remains the public build.
 
-The suite creates a fresh `T:MintPRINT-TestSuite` drawer (or `-2`, `-3`, ...
-if one already exists) and runs 32 normal `printer.device` Test Print
-renders. **No IPP Print-Job is submitted to the printer.** Driver 41.15's
-temporary capture-only config retains each JPEG, PWG Raster, PDF, PostScript
-or Apple Raster document in that drawer instead. A matching driver log and
+The suite requires the installed `DEVS:Printers/MintPRINT` driver to be
+**41.16 or newer**. It creates a fresh `T:MintPRINT-TestSuite` drawer (or `-2`,
+`-3`, ... if one already exists) and runs 33 normal `printer.device` Test Print
+renders. **No IPP Print-Job is submitted to the printer.** Capture-only mode
+retains each JPEG, PWG Raster, PDF, PostScript or Apple Raster document plus a
+byte-exact `.ipp` request sidecar in that drawer. A matching driver log and
 `manifest.txt` describe the exact engine, resolution, media, colour, quality,
 scaling, sides, sheet-back transform and margin settings used for every case.
 

@@ -510,9 +510,9 @@ static BOOL mp_text_begin_encoder(int engine, ULONG width, ULONG height,
                                 scratch, scratch_bytes,
                                 mp_text_file_write, NULL) ? TRUE : FALSE;
         default:
-            return mp_jpeg_begin(&g_text_jpeg, width, height,
-                                 scratch, scratch_bytes,
-                                 mp_text_file_write, NULL) ? TRUE : FALSE;
+            return mp_jpeg_begin_dpi(&g_text_jpeg, width, height, dpi,
+                                     scratch, scratch_bytes,
+                                     mp_text_file_write, NULL) ? TRUE : FALSE;
     }
 }
 

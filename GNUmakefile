@@ -14,7 +14,7 @@ FORWARD_TARGETS := gui test test-http test-dpi test-jpeg test-ipp-enum \
                    test-postscript test-urf driver driver31 driver-symbols \
                    driver-symbols31 help
 
-.PHONY: all release clean $(FORWARD_TARGETS)
+.PHONY: all release releasetest clean $(FORWARD_TARGETS)
 
 all:
 	$(MAKE) -f Makefile all
@@ -30,6 +30,23 @@ release:
 		printf '\000\170' | dd of=release/MintPRINT.info bs=1 seek=84 conv=notrunc 2>/dev/null; \
 		echo "Set drawer window height to 120: release/MintPRINT.info"; \
 	fi
+
+# Keep this explicit rather than relying on the catch-all rule: releasetest
+# intentionally creates TWO drawers.  release/MintPRINT remains the public
+# build with no regression-suite gadget; the QA binary is under the separate
+# MintPRINT-ReleaseTest drawer.  The loud final message avoids accidentally
+# copying the public GUI when doing a quick regression pass on real/emulated
+# AmigaOS.
+releasetest:
+	$(MAKE) -f Makefile releasetest
+	@echo
+	@echo "============================================================"
+	@echo " QA BUILD WITH TEST SUITE BUTTON:"
+	@echo "   release/MintPRINT-ReleaseTest/MintPrintSettings"
+	@echo
+	@echo " Public build (NO Test Suite button):"
+	@echo "   release/MintPRINT/MintPrintSettings"
+	@echo "============================================================"
 
 clean:
 	$(MAKE) -f Makefile clean
