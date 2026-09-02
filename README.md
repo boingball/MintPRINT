@@ -33,13 +33,23 @@ MintPrint Settings for setup, discovery and test printing.
 
 ## What's new in 1.3.0
 
+- **Final driver revision 41.16.**
 - **HDD spooler and job management:** retain jobs, check status, retry,
   reprint, change copies or printer, and delete jobs from **View Spooler**.
-- **AmigaOS 2.04/2.1 support:** the same settings GUI and automatic driver
-  selection now support older systems alongside AmigaOS 3.x.
-- **Strip-printing improvements:** JPEG, PDF and PostScript page buffering,
-  plus FinalWriter 97 variable-width bands in driver **41.12**. FinalWriter's
-  retained-job render test passed; physical output remains to be confirmed.
+- **AmigaOS 2.04/2.1 support:** the same settings GUI and automatic classic
+  driver selection now support older systems alongside AmigaOS 3.x; the
+  classic path completed the full 33-case output capture matrix on OS 2.1
+  emulation across all five engines, 300/600 DPI, mono/colour and duplex.
+- **Duplex printing:** PWG Raster and Apple Raster (URF) support real
+  multi-page duplex documents; PWG also supports duplex `PRT:`/`CMD_WRITE`
+  text output.
+- **Application compatibility:** improved strip/page-boundary handling for
+  WordWorth 7 and Final Writer 97 across all five engines.
+- **Discovery and printer compatibility:** mDNS now uses advertised DNS-SD
+  port/path metadata; Apple Raster headers use canonical duplex/quality values;
+  PWG/URF can expose an explicit `300* dpi` compatibility option.
+- **Output correctness:** JPEG metadata, including JPEGs embedded in PDF and
+  PostScript, now records the actual selected 300/600 DPI.
 - **Workbench artwork and help fixes:** readable artwork on low-colour
   screens, smoother RTG rendering, and an AmigaGuide viewer fallback on OS 2.x.
 

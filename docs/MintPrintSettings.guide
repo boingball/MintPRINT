@@ -1,5 +1,5 @@
 @database MintPrintSettings.guide
-@$VER: MintPrintSettings.guide 1.3.0 (30.08.2026)
+@$VER: MintPrintSettings.guide 1.3.0 (02.09.2026)
 @author "MintPRINT project (boingball)"
 @(c) "Copyright (c) 2026 Darren Banfi (boingball). MIT License."
 @width 74
@@ -83,7 +83,10 @@ seconds each:
 
     - SSDP: one UPnP-style multicast search.
     - mDNS: a DNS query for "_ipp._tcp.local", which is how most current
-      IPP/AirPrint printers actually advertise themselves.
+      IPP/AirPrint printers actually advertise themselves. MintPRINT also
+      reads the service's DNS-SD SRV/TXT records so an advertised IPP port
+      and rp= resource path are used instead of blindly assuming 631 and
+      /ipp/print.
 
 Any address that replies to either scan appears in a small selection
 list. Pick your printer and choose "Use Selected" - this fills in

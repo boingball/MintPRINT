@@ -56,6 +56,8 @@ Features
   - 68000-compatible driver
   - Graphics printing through the standard printer.device raster interface
   - Plain-text printing through PRT:/CMD_WRITE
+  - Capability-gated duplex printing with PWG Raster and Apple Raster (URF),
+    including PWG duplex for PRT:/CMD_WRITE text jobs
   - Prints using JPEG, PostScript, PWG Raster, Apple Raster (URF), or PDF,
     selectable per printer
   - LAN printer discovery using SSDP and mDNS
@@ -155,8 +157,8 @@ AmigaOS 2.x/3.0/3.1 notes
 The Drivers/MintPRINT-OS31 build uses a classic pre-V44 printer driver
 structure and a compatibility rendering path for the older printer.device
 raster format. The same ABI also covers AmigaOS 3.0. The IPP networking and
-JPEG/PostScript/PWG Raster/PDF output code is shared with the newer driver
-build.
+JPEG/PostScript/PWG Raster/PDF/URF output code is shared with the newer
+driver build.
 
 AmigaOS 2.04/2.1 compatibility follows from the V37 library requirements and
 pre-V44 printer.device ABI used by this build. The settings GUI and classic
@@ -220,12 +222,25 @@ from Anthropic Claude.
 What's new in 1.3.0
 -------------------
 
+  - Final driver revision 41.16.
   - Optional HDD spooling and retained jobs: status, retry, reprint, copies,
     printer reassignment and delete through View Spooler.
-  - AmigaOS 2.04/2.1-compatible GUI and automatic classic-driver selection.
-  - Improved strip printing across all engines, including FinalWriter 97
-    variable-width bands in driver 41.12. Its retained-job render test
-    passed; physical FinalWriter output remains to be confirmed.
+  - AmigaOS 2.04/2.1-compatible GUI and automatic classic-driver selection;
+    the classic path completed the full 33-case output capture matrix under
+    AmigaOS 2.1 emulation across all five engines, 300/600 DPI, mono/colour
+    and PWG/URF duplex.
+  - Real duplex output for PWG Raster and Apple Raster (URF), plus PWG duplex
+    for PRT:/CMD_WRITE text printing.
+  - Improved strip/page-boundary handling across all engines for WordWorth 7
+    and Final Writer 97, including variable-width bands and processed FF/reset.
+  - mDNS discovery now honours DNS-SD SRV/TXT endpoint metadata, including the
+    printer's advertised port and rp= resource path, instead of only guessing
+    the common 631 /ipp/print endpoint.
+  - Stricter Apple Raster headers use canonical duplex and quality values;
+    PWG/URF also offer an explicit 300* compatibility option when 300 DPI is
+    not advertised by the printer.
+  - JPEG, PDF and PostScript embedded JPEG metadata now records the actual
+    selected 300/600 DPI instead of always claiming 300 DPI.
   - Improved low-colour/RTG artwork and an AmigaGuide viewer fallback for
     help on AmigaOS 2.x. Supplied Workbench icon uses a 256 KiB stack.
 
