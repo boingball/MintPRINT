@@ -1,0 +1,132 @@
+name: Apply OS2 Test Suite filename fix
+
+on:
+  push:
+    paths:
+      - '.github/workflows/apply-os2-testsuite-names.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+      - name: Patch classic-safe capture filenames
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('src/MintPrintSettings.c')
+          s = p.read_text()
+
+          old = '''static void mp_test_suite_paths(const struct MPTestSuiteCase *c)
+          {
+              const char *short_engine = mp_test_suite_engine_short(c->engine);
+              const char *ext = mp_test_suite_extension(c->engine);
+              if (strcmp(c->sides, "one-sided") != 0) {
+                  snprintf(g_test_suite.output_path, sizeof(g_test_suite.output_path),
+                           "%s/%03d-%s-%s-%s.%s", g_test_suite.drawer,
+                           g_test_suite.current + 1, short_engine,
+                           strstr(c->sides, "short") ? "short" : "long",
+                           c->sheet_back, ext);
+              } else {
+                  snprintf(g_test_suite.output_path, sizeof(g_test_suite.output_path),
+                           "%s/%03d-%s-%s-%ddpi-%s-%s.%s", g_test_suite.drawer,
+                           g_test_suite.current + 1, short_engine, c->scaling,
+                           c->resolution, c->color, c->quality, ext);
+              }
+              snprintf(g_test_suite.log_path, sizeof(g_test_suite.log_path),
+                       "%s/%03d-driver.log", g_test_suite.drawer,
+                       g_test_suite.current + 1);
+              snprintf(g_test_suite.ipp_path, sizeof(g_test_suite.ipp_path),
+                       "%s.ipp", g_test_suite.output_path);
+          }
+          '''
+          new = '''static void mp_test_suite_paths(const struct MPTestSuiteCase *c)
+          {
+              const char *short_engine = mp_test_suite_engine_short(c->engine);
+              const char *ext = mp_test_suite_extension(c->engine);
+
+              /* Classic AmigaDOS filesystems cap component names at 30 chars.
+               * Keep both the rendered document AND its .ipp sibling well
+               * below that limit. The manifest already records every matrix
+               * setting, so descriptive long filenames add no information and
+               * can alias after truncation on OS 2.x (letting the .ipp sidecar
+               * overwrite the document). */
+              snprintf(g_test_suite.output_path, sizeof(g_test_suite.output_path),
+                       "%s/%03d-%s.%s", g_test_suite.drawer,
+                       g_test_suite.current + 1, short_engine, ext);
+              snprintf(g_test_suite.log_path, sizeof(g_test_suite.log_path),
+                       "%s/%03d-driver.log", g_test_suite.drawer,
+                       g_test_suite.current + 1);
+              snprintf(g_test_suite.ipp_path, sizeof(g_test_suite.ipp_path),
+                       "%s.ipp", g_test_suite.output_path);
+          }
+          '''
+          if old not in s:
+              raise SystemExit('mp_test_suite_paths anchor not found')
+          s = s.replace(old, new, 1)
+
+          old = '''    LONG bytes = 0;
+              LONG ipp_bytes = 0;
+              LONG ipp_rc = -1;
+          '''
+          new = '''    LONG bytes = 0;
+              LONG bytes_after = 0;
+              LONG ipp_bytes = 0;
+              LONG ipp_rc = -1;
+          '''
+          if old not in s:
+              raise SystemExit('byte declaration anchor not found')
+          s = s.replace(old, new, 1)
+
+          old = '''    ipp_ok = ipp_rc == 0 && mp_test_suite_file_exists(
+                           (CONST_STRPTR)g_test_suite.ipp_path, &ipp_bytes) && ipp_bytes > 0;
+              if (output_ok && ipp_ok) {
+          '''
+          new = '''    ipp_ok = ipp_rc == 0 && mp_test_suite_file_exists(
+                           (CONST_STRPTR)g_test_suite.ipp_path, &ipp_bytes) && ipp_bytes > 0;
+              /* Re-check after sidecar creation. On a classic 30-character
+               * filesystem two different long path strings can resolve to the
+               * same truncated file; this catches the sidecar clobbering the
+               * rendered document instead of falsely reporting OK. */
+              output_ok = output_ok && mp_test_suite_file_exists(
+                              (CONST_STRPTR)g_test_suite.output_path,
+                              &bytes_after) && bytes_after == bytes;
+              if (output_ok && ipp_ok) {
+          '''
+          if old not in s:
+              raise SystemExit('post-sidecar validation anchor not found')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+
+          c = Path('CHANGELOG.md')
+          cs = c.read_text()
+          needle = '## Unreleased\n\n'
+          bullet = ('- **OS2-safe regression capture filenames.** ReleaseTest now uses short '
+                    'numbered output names (for example `001-jpeg.jpg`) so the document and '
+                    'its `.ipp` sidecar remain distinct on classic 30-character AmigaDOS '
+                    'filesystems. The suite also re-checks the rendered document after writing '
+                    'the sidecar and rejects a case if its size changed. This fixes the OS 2.1 '
+                    'capture where long names aliased and the sidecars overwrote otherwise '
+                    'successful output files.\n')
+          if bullet not in cs:
+              if needle not in cs:
+                  raise SystemExit('CHANGELOG Unreleased anchor not found')
+              cs = cs.replace(needle, needle + bullet, 1)
+              c.write_text(cs)
+          PY
+      - name: Commit fix and remove helper workflow
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/apply-os2-testsuite-names.yml
+          git add src/MintPrintSettings.c CHANGELOG.md
+          git commit -m 'Fix Test Suite filenames on classic AmigaDOS'
+          git push origin HEAD:${{ github.ref_name }}
