@@ -16,70 +16,14 @@ to this page; replace that summary when preparing the next release.
 
 ## Unreleased
 
-- **OS2-safe regression capture filenames.** ReleaseTest now uses short numbered output names (for example `001-jpeg.jpg`) so the document and its `.ipp` sidecar remain distinct on classic 30-character AmigaDOS filesystems. The suite also re-checks the rendered document after writing the sidecar and rejects a case if its size changed. This fixes the OS 2.1 capture where long names aliased and the sidecars overwrote otherwise successful output files.
-- **Regression-suite follow-up and JPEG density metadata (driver 41.16).**
-  Raw JPEG now writes the selected capture DPI into its JFIF X/Y density
-  fields instead of always claiming 300 dpi; embedded JPEG streams in PDF
-  and PostScript receive the same accurate metadata. The capture suite now
-  writes a byte-exact `.ipp` sidecar for every rendered document using the
-  same Print-Job attribute builder as the live submission path, verifies the
-  sidecar exists, and expands PWG duplex coverage to 33 total cases so every
-  CrossFeed/Feed transform sign combination is exercised. Suite completion
-  text now explicitly says no printer job was sent. The Test Suite button is
-  hidden from ordinary `make release` builds; `make releasetest` stages a
-  separate QA-only bundle with the developer control enabled.
-- **Capture-only output regression suite (driver 41.15).** MintPrint Settings
-  can now run a 32-case coverage matrix through all five document engines and
-  retain the generated jobs plus per-case logs/manifest under `T:` without
-  making any IPP submission. Duplex cases are genuine two-page documents with
-  asymmetric page-2 marks for backside transform inspection. The suite is
-  hard-gated on driver 41.15+ so an
-  older driver can never accidentally turn the regression run into real print
-  jobs.
-- **Strict Apple Raster page-header compatibility (driver 41.14).** The URF
-  header now uses CUPS's canonical simplex/short-edge/long-edge values
-  `1/2/3` and writes the selected Draft/Normal/High quality as `3/4/5`
-  (defaulting to Normal), instead of the unofficial `0/1/2` mode mapping
-  and unspecified quality `0`. This targets the HP Color LaserJet
-  M255/M256 parser failure reported in
-  [issue #81](https://github.com/boingball/MintPRINT/issues/81): that printer
-  advertises `PQ3-4-5` and returned `PARSER / Not Implemented` for the old
-  one-sided header. Byte-exact host regressions cover all modes and quality
-  values. The Windows probe also recognizes URF as a valid multi-page duplex
-  transport. Settings now offers its explicit, never-auto-selected `300* dpi`
-  compatibility override for URF as well as PWG Raster; the reporting HP says
-  `RS600`, so 300 DPI remains experimental rather than a claimed capability.
-  Physical output on the reporting HP remains to be confirmed.
-- **Graphics form-feed/reset page boundaries (driver 41.13).** A processed
-  form-feed or `aRIS` reset now finalizes any pending
-  `SPECIAL_NOFORMFEED` graphics page before the following page begins. This
-  closes the gap where a short FinalWriter/Wordsworth page that had not
-  reached a media or short-strip heuristic could absorb the next page. The
-  existing engine finalizer is used, preserving duplex streams, Wordsworth
-  margin reconstruction and FinalWriter's stable variable-width canvas;
-  redundant boundaries and orphan tiny control bands create no blank job.
-  Page-finalization failures are latched and later dumps refused until the
-  driver is closed and reopened. Inspired by Andreas Stürmer's equivalent
-  graphics-boundary handling in AmiAirPrint 1.2, shared with permission.
-- **Test Print page placement with Media set to auto.** Removed redundant
-  printer.device centring from the full-page JPEG/PWG/PDF/URF test request.
-  An OS 2.04 capture showed it adding 809 blank columns before the image,
-  producing a 3287x3508 raster for an A4-sized request. Explicit destination
-  dimensions and aspect handling remain, as do saved media settings, the
-  separate PostScript test layout and application-driven printing. A fresh
-  OS 2.04 capture and physical print are still required to validate the fix.
-- **More accurate Test Print completion text.** Release the printer device
-  before reporting completion, allowing pending/duplex submission to finish.
-  Preserve reported I/O errors, but no longer claim successful delivery just
-  because printer.device returned zero: the OS 2.04 fake-IP capture returned
-  zero despite a driver-side IPP timeout. The message now directs users to
-  printer output, retained job status or the Debug driver log.
+_No unreleased changes._
 
 ## 1.3.0
 
-MintPRINT 1.3.0 is the spooler and compatibility milestone. The GUI now runs
-on AmigaOS 2.04-era systems as well as later releases, and retained jobs can
-be managed from the new Spooler window. The driver revision is **41.12**.
+MintPRINT 1.3.0 is the spooler, duplex and classic-OS compatibility milestone.
+The GUI now runs on AmigaOS 2.04-era systems as well as later releases,
+retained jobs can be managed from the new Spooler window, and the final driver
+revision is **41.16**.
 
 - **Disk-backed spooler management.** Choose RAM/T: for the traditional
   behaviour, or a mounted hard drive for a hidden `MPSPOOL` directory. Enable
@@ -92,32 +36,52 @@ be managed from the new Spooler window. The driver revision is **41.12**.
   encoder scratch and TCP/IP stack still require contiguous memory. Retained
   spool storage is limited by free HDD space and normal filesystem file-size
   limits, not by RAM.
-- **Strip-printing page buffering across all engines.**
-  JPEG, PDF and PostScript now buffer `SPECIAL_NOFORMFEED` bands on disk until
-  the complete page height is known, preventing one line per sheet and
-  sideways-looking pages. PWG Raster and Apple Raster retain their existing
-  accumulation paths.
 - **AmigaOS 2.x compatibility.** The classic pre-V44 build and settings GUI
   now use the older library interface required by AmigaOS 2.04/2.1-era
   systems. The classic driver remains the correct choice through AmigaOS 3.1;
-  V44+ systems use the extended build.
-- **Older Workbench graphics improved.** Printer and duplex artwork is kept
-  readable on constrained 16-colour screens, with grayscale-style pen
-  selection instead of garish palette colours.
-- **FinalWriter 97 variable-width strips (driver 41.12).** Bands cropped to
-  different widths now share a stable page canvas and retain correct logical
-  page boundaries. A retained-job test produced two complete pages without a
-  rendering failure; physical FinalWriter output is not yet confirmed.
-  WordWorth 7's fixed-width strip path was regression-tested. See the
-  [application compatibility notes](docs/PRINTER_COMPATIBILITY.md).
+  V44+ systems use the extended build. The final 41.16 classic path completed
+  the 33-case capture matrix under AmigaOS 2.1 emulation across all five
+  engines, 300/600 DPI, mono/colour and PWG/URF duplex.
+- **Real duplex PWG/URF graphics output.** Duplex-capable printers can receive
+  one multi-page PWG Raster or Apple Raster document per Print-Job, with PWG
+  backside transform handling and canonical URF duplex mode values.
+- **`PRT:`/CLI text duplex.** PWG Raster text printing now accumulates a real
+  multi-page document and submits the configured long/short-edge `sides=`
+  value instead of emitting separate one-sided jobs.
+- **Strip-printing page buffering across all engines.** JPEG, PDF and
+  PostScript buffer `SPECIAL_NOFORMFEED` bands until the complete page height
+  is known; PWG Raster and Apple Raster retain their accumulation paths.
+  FinalWriter 97 variable-width bands use a stable page canvas, while
+  WordWorth 7's fixed-width path remains protected by regressions.
+- **Graphics form-feed/reset boundaries (driver 41.13).** A processed form-feed
+  or `aRIS` reset finalizes a pending graphics page before the next one begins,
+  preventing short strip-printed pages from absorbing the following page.
+- **Strict Apple Raster headers (driver 41.14).** URF uses the canonical
+  simplex/short-edge/long-edge values `1/2/3` and Draft/Normal/High quality
+  values `3/4/5`. PWG/URF also expose the explicit, never-auto-selected
+  `300* dpi` compatibility override when 300 DPI is not advertised.
+- **Improved mDNS endpoint discovery.** DNS-SD PTR/SRV/TXT metadata is parsed
+  so the advertised IPP port and TXT `rp=` resource path are retained instead
+  of always guessing port 631 and `/ipp/print`; conservative fallbacks remain.
+- **JPEG density metadata corrected (driver 41.16).** Raw JPEG and embedded
+  JPEG streams in PDF/PostScript now write the actual selected 300/600 DPI in
+  JFIF density fields instead of always claiming 300 DPI.
+- **Test Print placement/reporting fixes.** The built-in full-page test no
+  longer adds redundant printer.device centring when Media is Auto, and its
+  completion text no longer claims confirmed delivery merely because
+  printer.device returned zero.
+- **Older Workbench graphics improved.** Printer and duplex artwork remains
+  readable on constrained low-colour screens, while RTG/high-depth screens
+  avoid unnecessary planar dithering.
 - **Workbench launch stack increased to 256 KiB** for discovery, printer
   selection and OS 2.x use. Use the supplied application icon.
-- **Smoother printer artwork on RTG screens.** Neutral dithering is restricted
-  to classic planar displays; RTG bitmap detection uses the effective bitmap
-  attributes rather than trusting the legacy depth field.
 - **Help viewer fallback for AmigaOS 2.x.** Help uses MultiView when installed,
   otherwise the standalone AmigaGuide viewer, and reports missing viewers or
   guide files instead of silently failing.
+- **Internal release QA.** A developer-only capture regression facility was
+  added during 1.3.0 validation. It is hidden from ordinary `make release`
+  builds; `make releasetest` stages the separate QA build. The final matrix is
+  33 cases and uses OS2-safe short filenames plus byte-exact IPP sidecars.
 
 ## 1.2.7
 
