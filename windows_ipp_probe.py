@@ -20,7 +20,7 @@ import sys
 import urllib.parse
 from collections import defaultdict
 
-VERSION = "2.3"
+VERSION = "2.4"
 
 # IPP operations
 OP_PRINT_JOB = 0x0002
@@ -212,6 +212,18 @@ REQUESTED_ATTRIBUTES = [
     "output-bin-supported",
 ]
 
+# Common endpoint spellings seen in older Epson/AirPrint implementations. The
+# diagnostic mode tests these only after the requested endpoint, so the normal
+# probe remains a single, non-invasive request.
+DIAGNOSTIC_PATHS = (
+    "/ipp/print",
+    "/ipp",
+    "/printers/print",
+    "/printers/EPSON_XP-345",
+)
+
+IPP_VERSIONS = ((1, 1), (1, 0), (2, 0))
+
 
 class IPPError(Exception):
     pass
@@ -308,9 +320,9 @@ def normalize_target(raw):
     }
 
 
-def base_request(operation_id, request_id, printer_uri):
+def base_request(operation_id, request_id, printer_uri, ipp_version=(1, 1)):
     body = bytearray()
-    body += b"\x01\x01"                 # IPP/1.1; mirrors MintPRINT and older AirPrint devices.
+    body += bytes([ipp_version[0], ipp_version[1]])
     body += be16(operation_id)
     body += be32(request_id)
     body += b"\x01"                     # operation-attributes-tag
@@ -320,8 +332,10 @@ def base_request(operation_id, request_id, printer_uri):
     return body
 
 
-def build_get_printer_attributes(printer_uri, request_id=1, request_all=False):
-    body = base_request(OP_GET_PRINTER_ATTRIBUTES, request_id, printer_uri)
+def build_get_printer_attributes(printer_uri, request_id=1, request_all=False,
+                                  ipp_version=(1, 1)):
+    body = base_request(OP_GET_PRINTER_ATTRIBUTES, request_id, printer_uri,
+                        ipp_version)
     if request_all:
         body += attr(TAG_KEYWORD, "requested-attributes", "all")
     else:
@@ -330,16 +344,17 @@ def build_get_printer_attributes(printer_uri, request_id=1, request_all=False):
     return bytes(body)
 
 
-def build_validate_job(printer_uri, mime, request_id):
-    body = base_request(OP_VALIDATE_JOB, request_id, printer_uri)
+def build_validate_job(printer_uri, mime, request_id, ipp_version=(1, 1)):
+    body = base_request(OP_VALIDATE_JOB, request_id, printer_uri, ipp_version)
     body += attr(TAG_NAME, "requesting-user-name", safe_username())
     body += attr(TAG_MIME_MEDIA_TYPE, "document-format", mime)
     body += bytes([TAG_END_OF_ATTRIBUTES])
     return bytes(body)
 
 
-def build_print_job(printer_uri, mime, job_name, request_id, sides=None):
-    body = base_request(OP_PRINT_JOB, request_id, printer_uri)
+def build_print_job(printer_uri, mime, job_name, request_id, sides=None,
+                    ipp_version=(1, 1)):
+    body = base_request(OP_PRINT_JOB, request_id, printer_uri, ipp_version)
     body += attr(TAG_NAME, "requesting-user-name", safe_username())
     body += attr(TAG_NAME, "job-name", job_name)
     body += attr(TAG_MIME_MEDIA_TYPE, "document-format", mime)
@@ -383,8 +398,11 @@ def send_ipp(target, body, payload=b"", timeout=15.0, insecure=False):
     try:
         conn.request("POST", target["path"], body=data, headers=headers)
         response = conn.getresponse()
+        response_headers = {
+            key.lower(): value for key, value in response.getheaders()
+        }
         response_body = response.read()
-        return response.status, response.reason, response_body
+        return response.status, response.reason, response_headers, response_body
     finally:
         conn.close()
 
@@ -864,6 +882,100 @@ def report(parsed, target, http_status, http_reason, response_bytes, dump_all=Fa
     return "\n".join(lines).rstrip() + "\n"
 
 
+def target_with_path(target, path):
+    """Return a copy of target using an explicitly tested HTTP/IPP path."""
+    result = dict(target)
+    authority_host = target["host"]
+    if ":" in authority_host and not authority_host.startswith("["):
+        authority_host = "[%s]" % authority_host
+    netloc = authority_host
+    if not (
+        (target["transport_scheme"] == "http" and target["port"] == 80)
+        or (target["transport_scheme"] == "https" and target["port"] == 443)
+    ):
+        netloc = "%s:%d" % (authority_host, target["port"])
+    result["path"] = path
+    result["transport_url"] = "%s://%s%s" % (
+        target["transport_scheme"], netloc, path
+    )
+    result["printer_uri"] = "%s://%s%s" % (
+        target["printer_uri"].split("://", 1)[0], netloc, path
+    )
+    return result
+
+
+def response_preview(response):
+    sample = response[:64]
+    printable = "".join(
+        chr(value) if 32 <= value < 127 else "." for value in sample
+    )
+    return "hex=%s ascii=%s" % (sample.hex(" "), printable)
+
+
+def describe_http_response(target, path, version, http_status, http_reason,
+                           headers, response):
+    content_type = headers.get("content-type", "<missing>")
+    content_length = headers.get("content-length", "<missing>")
+    server = headers.get("server", "<missing>")
+    location = headers.get("location", "<none>")
+    return (
+        "  %s IPP/%d.%d -> HTTP %d %s; bytes=%d; "
+        "Content-Type=%s; Content-Length=%s; Server=%s; Location=%s\n"
+        "      %s"
+        % (
+            path, version[0], version[1], http_status, http_reason,
+            len(response), content_type, content_length, server, location,
+            response_preview(response),
+        )
+    )
+
+
+def diagnostic_paths(target):
+    requested_path = target["path"].split("?", 1)[0] or "/ipp/print"
+    paths = [requested_path]
+    for path in DIAGNOSTIC_PATHS:
+        if path not in paths:
+            paths.append(path)
+    return paths
+
+
+def run_endpoint_diagnostics(target, timeout, insecure):
+    lines = [
+        "Endpoint/version diagnostics (read-only Get-Printer-Attributes requests)",
+        "-" * 66,
+    ]
+    for path in diagnostic_paths(target):
+        candidate = target_with_path(target, path)
+        for version in IPP_VERSIONS:
+            try:
+                request = build_get_printer_attributes(
+                    candidate["printer_uri"],
+                    request_id=900 + version[0] * 10 + version[1],
+                    ipp_version=version
+                )
+                hs, hr, headers, response = send_ipp(
+                    candidate, request, timeout=timeout, insecure=insecure
+                )
+                try:
+                    parsed = parse_ipp_response(response)
+                    result = "IPP=%s (0x%04x)" % (
+                        parsed["status_name"], parsed["status"]
+                    )
+                except IPPError as exc:
+                    result = "parse-error=%s" % exc
+                first_line = describe_http_response(
+                    candidate, path, version, hs, hr, headers, response
+                ).split("\n", 1)[0]
+                lines.append(first_line + "; " + result)
+                lines.append("      " + response_preview(response))
+            except Exception as exc:
+                lines.append(
+                    "  %s IPP/%d.%d -> ERROR: %s"
+                    % (path, version[0], version[1], exc)
+                )
+    return "\n".join(lines) + "\n"
+
+
 def result_line(prefix, http_status, http_reason, parsed):
     return "%s: HTTP=%d %s, IPP=%s (0x%04x)" % (
         prefix, http_status, http_reason,
@@ -890,6 +1002,11 @@ def main():
     parser.add_argument(
         "--timeout", type=float, default=15.0,
         help="network timeout in seconds (default: 15)"
+    )
+    parser.add_argument(
+        "--diagnose", action="store_true",
+        help="after the normal query, test common paths and IPP 1.1/1.0/2.0 "
+             "and show HTTP headers/body previews"
     )
     parser.add_argument(
         "--insecure", action="store_true",
@@ -921,11 +1038,16 @@ def main():
         print("ERROR: invalid printer URL: %s" % exc, file=sys.stderr)
         return 2
 
+    http_status = None
+    http_reason = ""
+    response_headers = {}
+    response = b""
+
     try:
         request = build_get_printer_attributes(
             target["printer_uri"], request_id=1, request_all=args.all
         )
-        http_status, http_reason, response = send_ipp(
+        http_status, http_reason, response_headers, response = send_ipp(
             target, request, timeout=args.timeout, insecure=args.insecure
         )
         parsed = parse_ipp_response(response)
@@ -935,6 +1057,18 @@ def main():
         return 3
     except (OSError, http.client.HTTPException, IPPError) as exc:
         print("ERROR: IPP query failed: %s" % exc, file=sys.stderr)
+        if http_status is not None:
+            print(
+                describe_http_response(
+                    target, target["path"], (1, 1), http_status,
+                    http_reason, response_headers, response
+                ),
+                file=sys.stderr, end=""
+            )
+        if args.diagnose:
+            print(run_endpoint_diagnostics(
+                target, args.timeout, args.insecure
+            ), file=sys.stderr, end="")
         return 3
 
     text = report(
@@ -944,6 +1078,13 @@ def main():
     print(text, end="")
 
     extra = []
+
+    if args.diagnose:
+        diagnostic_text = "\n" + run_endpoint_diagnostics(
+            target, args.timeout, args.insecure
+        )
+        print(diagnostic_text, end="")
+        text += diagnostic_text
 
     if args.validate_mintprint:
         extra.append("")
@@ -955,7 +1096,7 @@ def main():
         ):
             try:
                 req = build_validate_job(target["printer_uri"], mime, idx)
-                hs, hr, resp = send_ipp(
+                hs, hr, val_headers, resp = send_ipp(
                     target, req, timeout=args.timeout, insecure=args.insecure
                 )
                 val = parse_ipp_response(resp)
@@ -978,7 +1119,7 @@ def main():
                 os.path.basename(args.print_file), 100,
                 sides=args.sides
             )
-            hs, hr, resp = send_ipp(
+            hs, hr, job_headers, resp = send_ipp(
                 target, req, payload=payload,
                 timeout=args.timeout, insecure=args.insecure
             )
