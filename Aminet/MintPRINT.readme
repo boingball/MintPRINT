@@ -219,6 +219,11 @@ Driver, GUI, IPP client, and the JPEG/PostScript/PWG Raster/PDF/Apple Raster
 document encoders by Darren Banfi (boingball), developed with assistance
 from Anthropic Claude.
 
+Special thanks to Andreas Stuermer, author of AmiAirPrint, for friendly
+cross-project collaboration: sharing compatibility findings and recent fixes,
+allowing MintPRINT's implementation to be compared against AmiAirPrint, and
+helping identify gaps in classic application and printer compatibility.
+
 What's new in 1.3.0
 -------------------
 
