@@ -12,20 +12,26 @@ Keep the full version-by-version history here. The front page and Aminet
 readme should carry only a short summary of the latest version, with a link
 to this page; replace that summary when preparing the next release.
 
-[Unreleased](#unreleased) | [1.3.0](#130) | [1.2.7](#127) | [1.2.6](#126) | [1.2.5](#125) | [1.2.4](#124) | [1.2.3](#123) | [1.2.2](#122) | [1.2.1](#121) | [1.2.0](#120) | [1.1.0](#110) | [1.0.3b](#103b) | [1.0.3](#103) | [1.0.2](#102) | [1.0.0](#100)
+[Unreleased](#unreleased) | [1.3.1](#131) | [1.3.0](#130) | [1.2.7](#127) | [1.2.6](#126) | [1.2.5](#125) | [1.2.4](#124) | [1.2.3](#123) | [1.2.2](#122) | [1.2.1](#121) | [1.2.0](#120) | [1.1.0](#110) | [1.0.3b](#103b) | [1.0.3](#103) | [1.0.2](#102) | [1.0.0](#100)
 
 ## Unreleased
+
+_No unreleased changes._
+
+## 1.3.1
+
+MintPRINT 1.3.1 is a corrective release for Settings persistence and
+RAM-spooled job recovery. The final driver revision is **41.17**.
 
 - **Query defaults now save correctly.** The AmigaOS 2.x-compatible V37
   event path now synchronises programmatically selected media/tray, colour,
   quality and scaling values with the Unit config. Query Printer followed by
   Save no longer writes blank `MEDIA=`, `SOURCE=`, `COLOR=` or
   `SCALING=` fields unless the printer genuinely supplied no choice.
-- **Failed RAM jobs are recoverable (driver 41.17).** RAM/T: spooling now
-  writes a live status sidecar. View Spooler can show a rendering/submitting
-  job and retains a failed rendered document for Retry, Copies or Delete.
-  Successful RAM jobs are still removed automatically, avoiding unbounded
-  RAM use.
+- **Failed RAM jobs are recoverable.** RAM/T: spooling now writes a live
+  status sidecar. View Spooler can show a rendering/submitting job and retains
+  a failed rendered document for Retry, Copies or Delete. Successful RAM jobs
+  are still removed automatically, avoiding unbounded RAM use.
 
 ## 1.3.0
 
