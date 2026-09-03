@@ -311,7 +311,11 @@ LONG mp_config_load(struct MPConfig *cfg)
         if (mp_cfg_starts(g_config_line, "RESOLUTION=")) {
             value = g_config_line + 11;
             n = mp_cfg_parse_ulong(value, &ok);
-            cfg->resolution = (ok && n == 600UL) ? 600 : 300;
+            if (ok && (n == 300UL || n == 360UL ||
+                       n == 600UL || n == 720UL))
+                cfg->resolution = (UWORD)n;
+            else
+                cfg->resolution = 300;
             continue;
         }
 

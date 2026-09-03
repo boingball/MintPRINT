@@ -10,7 +10,7 @@ int mp_dpi_engine_allows_compat(const char *engine)
 
 static int mp_dpi_valid(int dpi)
 {
-    return dpi == 300 || dpi == 600;
+    return dpi == 300 || dpi == 360 || dpi == 600 || dpi == 720;
 }
 
 static int mp_dpi_find(const struct MPDpiOptions *options, int dpi)

@@ -55,7 +55,7 @@
  * MP_DRIVER_REV (the version half) only bumps for something that
  * warrants a new version number outright, not on every rebuild. */
 #define MP_DRIVER_REV 41
-#define MP_DRIVER_SUBREV 18
+#define MP_DRIVER_SUBREV 19
 
 struct ExecBase *SysBase = NULL;
 struct DosLibrary *DOSBase = NULL;
@@ -2374,11 +2374,12 @@ LONG PRT_STDARGS Render(LONG ct, LONG x, LONG y, LONG status, ...)
                  * here. 4096x6144 @ 300dpi are the historical bounds; at
                  * 600dpi they are doubled so common paper sizes (e.g. A4
                  * at 600dpi is ~4960x7014 dots) aren't clipped. */
-                BOOL hires = (g_config.resolution == 600);
-                PED->ped_MaxXDots = hires ? 8192 : 4096;
-                PED->ped_MaxYDots = hires ? 12288 : 6144;
-                PED->ped_XDotsInch = hires ? 600 : 300;
-                PED->ped_YDotsInch = hires ? 600 : 300;
+                ULONG dpi = g_config.resolution ?
+                            (ULONG)g_config.resolution : 300UL;
+                PED->ped_MaxXDots = (4096UL * dpi + 150UL) / 300UL;
+                PED->ped_MaxYDots = (6144UL * dpi + 150UL) / 300UL;
+                PED->ped_XDotsInch = (UWORD)dpi;
+                PED->ped_YDotsInch = (UWORD)dpi;
                 PED->ped_NumRows = 1;
             }
             mp_log_3("Render pre-master special/maxX/maxY", x,
