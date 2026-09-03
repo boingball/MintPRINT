@@ -16,7 +16,13 @@ to this page; replace that summary when preparing the next release.
 
 ## Unreleased
 
-_No unreleased changes._
+- **Large jobs tolerate slow printer back-pressure (driver 41.18).** The
+  document-body upload now allows up to three minutes without TCP progress,
+  while connection, control-message and final-response timeouts remain short.
+  This targets small-buffer printers such as the Canon TS8360 from issue #91,
+  which can pause network reads while processing a long PWG Raster job.
+  Failures now distinguish an upload stall as error `-19` and record the
+  document bytes sent/total in the debug log and retained status sidecar.
 
 ## 1.3.1
 
