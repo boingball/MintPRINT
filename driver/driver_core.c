@@ -55,7 +55,7 @@
  * MP_DRIVER_REV (the version half) only bumps for something that
  * warrants a new version number outright, not on every rebuild. */
 #define MP_DRIVER_REV 41
-#define MP_DRIVER_SUBREV 17
+#define MP_DRIVER_SUBREV 18
 
 struct ExecBase *SysBase = NULL;
 struct DosLibrary *DOSBase = NULL;
@@ -564,6 +564,11 @@ static void mp_write_job_status(const char *state,
         mp_log_append(" ");
         mp_log_append_long((LONG)result->ipp_status);
         mp_log_append("\n");
+        mp_log_append("BYTES=");
+        mp_log_append_long((LONG)result->document_bytes_sent);
+        mp_log_append(" ");
+        mp_log_append_long((LONG)result->document_bytes);
+        mp_log_append("\n");
     }
     mp_spool_status_write((CONST_STRPTR)g_job_status_path, g_log_line,
                           g_log_pos);
@@ -594,21 +599,29 @@ static void mp_log_3(const char *event, LONG a, LONG b, LONG c)
 }
 
 /* Same "error/http/status" triple every IPP submission already logs via
- * mp_log_3(), plus a plain-English line for the two timeout-specific error
- * codes (see ipp_client.c's mp_connect_with_timeout()/
- * mp_recv_with_timeout()) that would otherwise look like any other -10/-14
- * failure in the log - e.g. issue #66, a printer that accepts a job and
- * then silently hangs instead of ever responding. */
+ * mp_log_3(), plus byte progress and a plain-English line for timeout-specific
+ * errors. The upload progress makes a small-buffer printer distinguishable
+ * from a connection that failed before any document data moved. */
 static void mp_log_ipp_result(const char *event, const struct MPIPPResult *result)
 {
     mp_log_3(event, result->error, result->http_status,
              (LONG)result->ipp_status);
+    if (result->document_bytes_sent > 0 || result->error == -13 ||
+        result->error == -19) {
+        mp_log_3("IPP document bytes sent/total/stall-seconds",
+                 (LONG)result->document_bytes_sent,
+                 (LONG)result->document_bytes, 180);
+    }
     if (result->error == -17) {
         mp_log_text("No response from printer (timed out waiting to read "
                     "the IPP reply - printer accepted the job, then hung)");
     } else if (result->error == -18) {
         mp_log_text("No response from printer (timed out waiting to "
                     "connect - printer unreachable/offline)");
+    } else if (result->error == -19) {
+        mp_log_text("Document upload stalled for 180 seconds "
+                    "(printer stopped accepting data; receive buffer may "
+                    "be full)");
     }
 }
 
@@ -1593,6 +1606,7 @@ static LONG mp_page_submit_and_track(ULONG rows_for_streak)
         result.http_status = 0;
         result.ipp_status = 0;
         result.document_bytes = g_job_file_bytes;
+        result.document_bytes_sent = 0;
         mp_log_3("Duplex page queued pages/rows/bytes",
                  (LONG)g_duplex_page_count, (LONG)rows_for_streak,
                  (LONG)g_job_file_bytes);
@@ -1606,6 +1620,7 @@ static LONG mp_page_submit_and_track(ULONG rows_for_streak)
         result.http_status = 0;
         result.ipp_status = 0;
         result.document_bytes = g_job_file_bytes;
+        result.document_bytes_sent = 0;
         mp_log_text("Capture-only regression job retained; network submission skipped");
     } else {
         mp_write_job_status("SUBMITTING", NULL);
@@ -2204,6 +2219,7 @@ VOID PRT_STDARGS DriverClose(struct IORequest *ior)
                 result.http_status = 0;
                 result.ipp_status = 0;
                 result.document_bytes = g_job_file_bytes;
+        result.document_bytes_sent = 0;
                 mp_log_text("Capture-only duplex job retained; network submission skipped");
                 mp_log_ipp_result("Capture duplex result error/http/status",
                                   &result);
