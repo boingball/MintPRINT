@@ -67,6 +67,13 @@ time if it doesn't already exist - the driver itself never creates it,
 only writes into it, so a Unit0 pointing at a since-deleted `MPSPOOL`
 will fail to open its job file rather than silently recreating it.
 
+RAM jobs retain their historical fixed `T:MintPRINT-job.<ext>` names. Driver
+41.17 also writes a matching `.status` sidecar so View Spooler can show the
+current RAM job. On success the document and sidecar are deleted normally; on
+failure they remain available for Retry, Copies or Delete until another job
+using the same engine replaces them. This is deliberately not an unlimited RAM
+history. HDD jobs only receive status sidecars when Keep Jobs is enabled.
+
 `PWG_SHEET_BACK=` records the printer's
 `pwg-raster-document-sheet-back` capability (`normal`, `rotated`, `flipped`,
 or `manual-tumble`). Query Printer writes it automatically. It controls the

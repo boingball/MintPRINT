@@ -2908,6 +2908,7 @@ static void apply_driver_config_to_gadgets(struct Window *win) {
 void update_media_dropdown(struct Window *win) {
     int i;
     int count = num_media_tray_mappings;
+    int active = 0;
 
     printf("Updating media dropdown, num_mappings=%d\n", num_media_tray_mappings);
 
@@ -2935,6 +2936,29 @@ void update_media_dropdown(struct Window *win) {
             printf("Dropdown item %d: %s\n",
                    i, mp_media_label_storage[i]);
         }
+
+        /* GT_SetGadgetAttrs() changes what a V37 Cycle displays but does not
+         * emit IDCMP_GADGETUP. Keep the persisted value in step with the
+         * programmatic selection, otherwise Query -> Save writes blank or
+         * stale MEDIA=/SOURCE= fields unless the user manually cycles it. */
+        if (driver_media_buffer[0]) {
+            for (i = 0; i < count; ++i) {
+                if (strcmp(media_tray_map[i].media,
+                           driver_media_buffer) == 0 &&
+                    (!driver_source_buffer[0] ||
+                     strcmp(media_tray_map[i].source,
+                            driver_source_buffer) == 0)) {
+                    active = i;
+                    break;
+                }
+            }
+        }
+        strncpy(driver_media_buffer, media_tray_map[active].media,
+                sizeof(driver_media_buffer) - 1);
+        driver_media_buffer[sizeof(driver_media_buffer) - 1] = '\0';
+        strncpy(driver_source_buffer, media_tray_map[active].source,
+                sizeof(driver_source_buffer) - 1);
+        driver_source_buffer[sizeof(driver_source_buffer) - 1] = '\0';
     }
 
     mp_media_label_ptrs[count] = NULL;
@@ -2943,7 +2967,7 @@ void update_media_dropdown(struct Window *win) {
     if (media_dropdown && win) {
         GT_SetGadgetAttrs(media_dropdown, win, NULL,
                           GTCY_Labels, (ULONG)media_dropdown_items,
-                          GTCY_Active, 0,
+                          GTCY_Active, (ULONG)active,
                           GA_Disabled, num_media_tray_mappings > 0 ? FALSE : TRUE,
                           TAG_DONE);
         RefreshGList(media_dropdown, win, NULL, 1);
@@ -2955,6 +2979,8 @@ void update_scaling_dropdown(struct Window *win) {
     struct Gadget *g;
     int i;
     int count = num_supported_scaling;
+    int active = 0;
+    BOOL saved_found = FALSE;
 
     if (count <= 0) {
         count = 1;
@@ -2969,37 +2995,44 @@ void update_scaling_dropdown(struct Window *win) {
             strncpy(mp_scaling_label_storage[i], supported_scaling[i],
                     sizeof(mp_scaling_label_storage[i]) - 1);
             mp_scaling_label_storage[i][sizeof(mp_scaling_label_storage[i]) - 1] = '\0';
+            if (driver_scaling_buffer[0] &&
+                strcmp(driver_scaling_buffer, supported_scaling[i]) == 0) {
+                active = i;
+                saved_found = TRUE;
+            }
         }
+
+        /* Prefer "auto" for a new/unsupported saved choice, but persist the
+         * same value we put on screen. Programmatic Cycle updates do not
+         * generate GADGETUP on the V37 path used for OS2 compatibility. */
+        if (!saved_found) {
+            active = 0;
+            for (i = 0; i < count; i++) {
+                if (strcmp(supported_scaling[i], "auto") == 0) {
+                    active = i;
+                    break;
+                }
+            }
+        }
+        strncpy(driver_scaling_buffer, supported_scaling[active],
+                sizeof(driver_scaling_buffer) - 1);
+        driver_scaling_buffer[sizeof(driver_scaling_buffer) - 1] = '\0';
+        strncpy(selected_scaling, supported_scaling[active],
+                sizeof(selected_scaling) - 1);
+        selected_scaling[sizeof(selected_scaling) - 1] = '\0';
     }
     mp_scaling_label_ptrs[count] = NULL;
     scaling_mode_labels = mp_scaling_label_ptrs;
 
-    /* Prefer "auto" when the printer offers it, rather than whichever
-     * value the printer happened to list first. Confirmed on real
-     * hardware: "auto-fit" got a job rejected outright as malformed on
-     * one printer and mis-paginated a single page across multiple
-     * physical sheets on another, while "auto" printed correctly both
-     * times - "auto" is the safer default across printers generally,
-     * not just a preference for this one. */
-    {
-        int preferred = 0;
-        for (i = 0; i < count; i++) {
-            if (strcmp(mp_scaling_label_storage[i], "auto") == 0) {
-                preferred = i;
-                break;
-            }
-        }
-
-        g = find_gadget_by_id(GAD_SCALING_MODE);
-        if (g && win) {
-            GT_SetGadgetAttrs(g, win, NULL,
-                              GTCY_Labels, (ULONG)scaling_mode_labels,
-                              GTCY_Active, (ULONG)preferred,
-                              GA_Disabled, num_supported_scaling > 0 ? FALSE : TRUE,
-                              TAG_DONE);
-            RefreshGList(g, win, NULL, 1);
-            GT_RefreshWindow(win, NULL);
-        }
+    g = find_gadget_by_id(GAD_SCALING_MODE);
+    if (g && win) {
+        GT_SetGadgetAttrs(g, win, NULL,
+                          GTCY_Labels, (ULONG)scaling_mode_labels,
+                          GTCY_Active, (ULONG)active,
+                          GA_Disabled, num_supported_scaling > 0 ? FALSE : TRUE,
+                          TAG_DONE);
+        RefreshGList(g, win, NULL, 1);
+        GT_RefreshWindow(win, NULL);
     }
 }
 
@@ -3007,6 +3040,7 @@ void update_print_mode_dropdown(struct Window *win) {
     struct Gadget *g;
     int i;
     int count = num_supported_print_modes;
+    int active = 0;
 
     if (count <= 0) {
         count = 1;
@@ -3021,7 +3055,18 @@ void update_print_mode_dropdown(struct Window *win) {
             strncpy(mp_print_mode_label_storage[i], supported_print_modes[i],
                     sizeof(mp_print_mode_label_storage[i]) - 1);
             mp_print_mode_label_storage[i][sizeof(mp_print_mode_label_storage[i]) - 1] = '\0';
+            if (driver_color_buffer[0] &&
+                strcmp(driver_color_buffer, supported_print_modes[i]) == 0)
+                active = i;
         }
+
+        strncpy(driver_color_buffer, supported_print_modes[active],
+                sizeof(driver_color_buffer) - 1);
+        driver_color_buffer[sizeof(driver_color_buffer) - 1] = '\0';
+        strncpy(selected_print_mode, supported_print_modes[active],
+                sizeof(selected_print_mode) - 1);
+        selected_print_mode[sizeof(selected_print_mode) - 1] = '\0';
+        print_mode = active;
     }
     mp_print_mode_label_ptrs[count] = NULL;
     print_mode_labels = mp_print_mode_label_ptrs;
@@ -3030,7 +3075,7 @@ void update_print_mode_dropdown(struct Window *win) {
     if (g && win) {
         GT_SetGadgetAttrs(g, win, NULL,
                           GTCY_Labels, (ULONG)print_mode_labels,
-                          GTCY_Active, 0,
+                          GTCY_Active, (ULONG)active,
                           GA_Disabled, num_supported_print_modes > 0 ? FALSE : TRUE,
                           TAG_DONE);
         RefreshGList(g, win, NULL, 1);
@@ -3088,6 +3133,7 @@ void update_quality_dropdown(struct Window *win) {
     struct Gadget *g;
     int i;
     int count = num_supported_quality;
+    int active = 0;
 
     if (count <= 0) {
         count = 1;
@@ -3102,7 +3148,17 @@ void update_quality_dropdown(struct Window *win) {
             strncpy(mp_quality_label_storage[i], supported_quality[i],
                     sizeof(mp_quality_label_storage[i]) - 1);
             mp_quality_label_storage[i][sizeof(mp_quality_label_storage[i]) - 1] = '\0';
+            if (driver_quality_buffer[0] &&
+                strcmp(driver_quality_buffer, supported_quality[i]) == 0)
+                active = i;
         }
+
+        strncpy(driver_quality_buffer, supported_quality[active],
+                sizeof(driver_quality_buffer) - 1);
+        driver_quality_buffer[sizeof(driver_quality_buffer) - 1] = '\0';
+        strncpy(selected_quality, supported_quality[active],
+                sizeof(selected_quality) - 1);
+        selected_quality[sizeof(selected_quality) - 1] = '\0';
     }
     mp_quality_label_ptrs[count] = NULL;
     quality_mode_labels = mp_quality_label_ptrs;
@@ -3111,7 +3167,7 @@ void update_quality_dropdown(struct Window *win) {
     if (g && win) {
         GT_SetGadgetAttrs(g, win, NULL,
                           GTCY_Labels, (ULONG)quality_mode_labels,
-                          GTCY_Active, 0,
+                          GTCY_Active, (ULONG)active,
                           GA_Disabled, num_supported_quality > 0 ? FALSE : TRUE,
                           TAG_DONE);
         RefreshGList(g, win, NULL, 1);
@@ -6239,11 +6295,21 @@ static int mp_scan_spool_jobs(struct MPSpoolJobEntry *jobs, int max_jobs,
     struct FileInfoBlock fib;
     int count = 0;
     int i;
+    const char *path_sep;
 
     NewList(list);
-    if (!mp_spool_keep_available()) return 0;
 
-    snprintf(dir_path, sizeof(dir_path), "%sMPSPOOL", driver_spool_buffer);
+    /* HDD jobs live in their MPSPOOL drawer. RAM jobs use the historical
+     * fixed T:MintPRINT-job.<ext> name; driver 41.17 adds a matching status
+     * sidecar so the current job and the last failed job are visible here. */
+    if (!driver_spool_buffer[0] ||
+        strcmp(driver_spool_buffer, "RAM") == 0) {
+        strcpy(dir_path, "T:");
+    } else {
+        snprintf(dir_path, sizeof(dir_path), "%sMPSPOOL",
+                 driver_spool_buffer);
+    }
+    path_sep = dir_path[strlen(dir_path) - 1] == ':' ? "" : "/";
     lock = Lock((CONST_STRPTR)dir_path, ACCESS_READ);
     if (!lock) return 0;
 
@@ -6254,7 +6320,10 @@ static int mp_scan_spool_jobs(struct MPSpoolJobEntry *jobs, int max_jobs,
 
             /* fib_DirEntryType < 0 -> plain file, not a drawer. */
             if (fib.fib_DirEntryType < 0 && len > 7 &&
-                strcmp(name + len - 7, ".status") == 0) {
+                strcmp(name + len - 7, ".status") == 0 &&
+                ((driver_spool_buffer[0] &&
+                  strcmp(driver_spool_buffer, "RAM") != 0) ||
+                 strncmp(name, "MintPRINT-job.", 14) == 0)) {
                 BPTR sfh;
                 size_t blen = (len - 7 < sizeof(jobs[count].basename) - 1)
                     ? len - 7 : sizeof(jobs[count].basename) - 1;
@@ -6265,9 +6334,10 @@ static int mp_scan_spool_jobs(struct MPSpoolJobEntry *jobs, int max_jobs,
 
                 snprintf(jobs[count].status_path,
                          sizeof(jobs[count].status_path),
-                         "%s/%s", dir_path, name);
+                         "%s%s%s", dir_path, path_sep, name);
                 snprintf(jobs[count].job_path, sizeof(jobs[count].job_path),
-                         "%s/%s", dir_path, jobs[count].basename);
+                         "%s%s%s", dir_path, path_sep,
+                         jobs[count].basename);
 
                 strcpy(jobs[count].state, "UNKNOWN");
                 jobs[count].reason[0] = '\0';

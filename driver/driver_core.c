@@ -55,7 +55,7 @@
  * MP_DRIVER_REV (the version half) only bumps for something that
  * warrants a new version number outright, not on every rebuild. */
 #define MP_DRIVER_REV 41
-#define MP_DRIVER_SUBREV 16
+#define MP_DRIVER_SUBREV 17
 
 struct ExecBase *SysBase = NULL;
 struct DosLibrary *DOSBase = NULL;
@@ -123,13 +123,12 @@ static char g_job_file_urf[MP_SPOOL_PATH_MAX];
 static char g_job_file_back[MP_SPOOL_PATH_MAX];
 static char g_job_file_accum[MP_SPOOL_PATH_MAX];
 
-/* Non-empty only while the current job is a tracked (Spooler HDD +
- * "Keep spooled jobs") one - the status sidecar mp_write_job_status()
- * writes to as the job progresses. Empty means "not tracked": no sidecar,
- * and the job file's original Debug-only retention behaviour applies
- * unchanged. Reset at the top of every mp_job_begin() (see there) so a
- * job that turns out untracked never inherits a stale path from the
- * previous one. */
+/* Non-empty while the current job has a status sidecar. HDD jobs get one
+ * when "Keep spooled jobs" is enabled; RAM jobs always get one so View
+ * Spooler can show a live job and retain a failed job for Retry/Delete.
+ * Successful RAM jobs still remove both document and sidecar unless Debug
+ * is enabled. Empty means an untracked HDD job whose original Debug-only
+ * retention behaviour applies. Reset before every real job-file open. */
 static char g_job_status_path[MP_SPOOL_PATH_MAX + 8]; /* + ".status" */
 
 /* Multiple Render(status=0 begin -> rows -> status=4 end) cycles inside one
@@ -394,6 +393,11 @@ static BOOL mp_streq(const char *a, const char *b)
     if (!a || !b) return FALSE;
     while (a[i] && b[i] && a[i] == b[i]) ++i;
     return a[i] == 0 && b[i] == 0;
+}
+
+static BOOL mp_ram_spool_selected(void)
+{
+    return !g_config.spool[0] || mp_streq(g_config.spool, "RAM");
 }
 
 /* Builds "<prefix><base_name>" into dst (bounded by cap). prefix is "T:"
@@ -747,10 +751,10 @@ static void mp_job_cleanup(void)
 static BOOL mp_open_real_job_file(void)
 {
     /* Only a hard drive Spooler location with "Keep spooled jobs" on
-     * gets a unique per-job name and a tracked status sidecar - RAM
-     * (or Keep off) reuses the fixed per-engine name exactly as
-     * before, unconditionally overwritten by mp_job_open()'s
-     * MODE_NEWFILE every time, same as MintPRINT has always done. */
+     * gets a unique per-job name. RAM reuses the fixed per-engine name,
+     * overwritten by mp_job_open()'s MODE_NEWFILE each time, but now gets
+     * a status sidecar so View Spooler can expose the live/failed job.
+     * An HDD job with Keep off remains completely untracked. */
     BOOL track = g_config.spool_keep && g_config.spool[0] &&
                 !mp_streq(g_config.spool, "RAM");
 
@@ -773,6 +777,16 @@ static BOOL mp_open_real_job_file(void)
         }
     } else {
         g_job_open = mp_spool_job_open(mp_job_filename());
+        if (g_job_open && mp_ram_spool_selected()) {
+            /* RAM keeps one fixed file per engine rather than unbounded
+             * timestamped history. Its status sidecar makes the current
+             * transfer and a failed result visible to View Spooler. */
+            mp_copy_bounded(g_job_status_path,
+                            sizeof(g_job_status_path),
+                            mp_job_filename());
+            mp_append_bounded(g_job_status_path,
+                              sizeof(g_job_status_path), ".status");
+        }
     }
 
     if (!g_job_open) {
@@ -1383,6 +1397,9 @@ static BOOL mp_job_finish(ULONG expected_rows)
                  (LONG)g_postscript.write_calls,
                  (LONG)MP_POSTSCRIPT_OUTPUT_BUFFER);
     }
+    if (!ok)
+        mp_write_job_status("FAILED", NULL);
+
     if (ok && mp_duplex_requested())
         mp_job_release_buffers();
     else
@@ -1613,13 +1630,21 @@ static LONG mp_page_submit_and_track(ULONG rows_for_streak)
             g_tiny_page_streak = 0;
         }
     }
-    /* A tracked (spool_keep) job's file is never auto-deleted, success or
-     * failure alike - that retention is the entire point of the Spooler
-     * management window. Untracked jobs keep the original Debug-only
-     * retention behaviour. */
+    /* Retained HDD jobs remain history. RAM keeps a failed job so it can be
+     * inspected/retried, but removes a successful document and sidecar just
+     * as the historical RAM path removed its fixed output file. */
     if (!g_config.capture_only && !g_config.debug &&
-        !mp_duplex_requested() && !g_job_status_path[0])
-        mp_spool_job_delete(fname);
+        !mp_duplex_requested()) {
+        if (mp_ram_spool_selected()) {
+            if (ipp_rc == 0) {
+                mp_spool_job_delete(fname);
+                if (g_job_status_path[0])
+                    mp_spool_job_delete((CONST_STRPTR)g_job_status_path);
+            }
+        } else if (!g_job_status_path[0]) {
+            mp_spool_job_delete(fname);
+        }
+    }
     return ipp_rc;
 }
 
@@ -2196,8 +2221,17 @@ VOID PRT_STDARGS DriverClose(struct IORequest *ior)
             mp_log_text("Duplex job discarded after page failure");
             mp_write_job_status("FAILED", NULL);
         }
-        if (!g_config.capture_only && !g_config.debug && !g_job_status_path[0])
-            mp_spool_job_delete(mp_job_filename());
+        if (!g_config.capture_only && !g_config.debug) {
+            if (mp_ram_spool_selected()) {
+                if (!g_duplex_job_failed) {
+                    mp_spool_job_delete(mp_job_filename());
+                    if (g_job_status_path[0])
+                        mp_spool_job_delete((CONST_STRPTR)g_job_status_path);
+                }
+            } else if (!g_job_status_path[0]) {
+                mp_spool_job_delete(mp_job_filename());
+            }
+        }
     }
     mp_job_cleanup();
     mp_log_text("Close");
