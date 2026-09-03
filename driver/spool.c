@@ -688,6 +688,7 @@ LONG mp_spool_ipp_submit(const struct MPConfig *cfg, CONST_STRPTR filename,
     m.ipp_result.http_status = 0;
     m.ipp_result.ipp_status = 0xffff;
     m.ipp_result.document_bytes = 0;
+    m.ipp_result.document_bytes_sent = 0;
     m.result = -1;
 
     mp_spool_send(&m); /* m.result carries mp_ipp_print_document()'s return */
