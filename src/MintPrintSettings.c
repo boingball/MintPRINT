@@ -6233,6 +6233,7 @@ static void mp_spool_error_reason(LONG error, LONG http_status,
         case -18: reason = "Connection timed out"; break;
         case -11:
         case -13: reason = "Sending job failed (connection dropped)"; break;
+        case -19: reason = "Sending job stalled (printer buffer full?)"; break;
         case -12: reason = "Error reading job file"; break;
         case -14: reason = "Printer sent an invalid response"; break;
         case -17: reason = "Printer accepted job but never responded"; break;
@@ -6603,6 +6604,7 @@ static BOOL mp_spool_retry_job(struct MPSpoolJobEntry *job, int unit_index)
     result.http_status = 0;
     result.ipp_status = 0xffff;
     result.document_bytes = 0;
+    result.document_bytes_sent = 0;
     rc = mp_ipp_print_document(&cfg, (CONST_STRPTR)job->job_path,
                                document_format, &result);
 
@@ -6618,8 +6620,12 @@ static BOOL mp_spool_retry_job(struct MPSpoolJobEntry *job, int unit_index)
         Write(sfh, buf, n);
         if (rc != 0) {
             n = snprintf(buf, sizeof(buf), "ERROR=%ld %ld %d\n",
-                        (long)result.error, (long)result.http_status,
-                        (int)result.ipp_status);
+                         (long)result.error, (long)result.http_status,
+                         (int)result.ipp_status);
+            Write(sfh, buf, n);
+            n = snprintf(buf, sizeof(buf), "BYTES=%lu %lu\n",
+                         (unsigned long)result.document_bytes_sent,
+                         (unsigned long)result.document_bytes);
             Write(sfh, buf, n);
         }
         Close(sfh);
