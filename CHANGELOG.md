@@ -16,7 +16,16 @@ to this page; replace that summary when preparing the next release.
 
 ## Unreleased
 
-_No unreleased changes._
+- **Query defaults now save correctly.** The AmigaOS 2.x-compatible V37
+  event path now synchronises programmatically selected media/tray, colour,
+  quality and scaling values with the Unit config. Query Printer followed by
+  Save no longer writes blank `MEDIA=`, `SOURCE=`, `COLOR=` or
+  `SCALING=` fields unless the printer genuinely supplied no choice.
+- **Failed RAM jobs are recoverable (driver 41.17).** RAM/T: spooling now
+  writes a live status sidecar. View Spooler can show a rendering/submitting
+  job and retains a failed rendered document for Retry, Copies or Delete.
+  Successful RAM jobs are still removed automatically, avoiding unbounded
+  RAM use.
 
 ## 1.3.0
 
