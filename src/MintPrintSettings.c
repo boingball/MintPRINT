@@ -6321,7 +6321,8 @@ static int mp_scan_spool_jobs(struct MPSpoolJobEntry *jobs, int max_jobs,
             /* fib_DirEntryType < 0 -> plain file, not a drawer. */
             if (fib.fib_DirEntryType < 0 && len > 7 &&
                 strcmp(name + len - 7, ".status") == 0 &&
-                (strcmp(driver_spool_buffer, "RAM") != 0 ||
+                ((driver_spool_buffer[0] &&
+                  strcmp(driver_spool_buffer, "RAM") != 0) ||
                  strncmp(name, "MintPRINT-job.", 14) == 0)) {
                 BPTR sfh;
                 size_t blen = (len - 7 < sizeof(jobs[count].basename) - 1)
