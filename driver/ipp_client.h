@@ -9,6 +9,7 @@ struct MPIPPResult {
     LONG http_status;
     UWORD ipp_status;
     ULONG document_bytes;
+    ULONG document_bytes_sent;
 };
 
 /* Opens bsdsocket.library V4 and creates a harmless unconnected socket.
