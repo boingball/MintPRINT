@@ -2219,7 +2219,7 @@ VOID PRT_STDARGS DriverClose(struct IORequest *ior)
                 result.http_status = 0;
                 result.ipp_status = 0;
                 result.document_bytes = g_job_file_bytes;
-        result.document_bytes_sent = 0;
+                result.document_bytes_sent = 0;
                 mp_log_text("Capture-only duplex job retained; network submission skipped");
                 mp_log_ipp_result("Capture duplex result error/http/status",
                                   &result);
