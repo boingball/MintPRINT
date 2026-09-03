@@ -104,5 +104,5 @@ printerName:
  * something that warrants a new version number outright.
  */
 mp_driver_version_marker:
-        .asciz  "$VER: MintPRINT 41.16 (01.09.2026)"
+        .asciz  "$VER: MintPRINT 41.17 (03.09.2026)"
         .even
