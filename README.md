@@ -31,27 +31,15 @@ MintPrint Settings for setup, discovery and test printing.
 <img width="525" height="327" alt="image" src="https://github.com/user-attachments/assets/ba4cfd1f-8b0f-4aee-91b9-a6b221712ca5" />
 
 
-## What's new in 1.3.0
+## What's new in 1.3.1
 
-- **Final driver revision 41.16.**
-- **HDD spooler and job management:** retain jobs, check status, retry,
-  reprint, change copies or printer, and delete jobs from **View Spooler**.
-- **AmigaOS 2.04/2.1 support:** the same settings GUI and automatic classic
-  driver selection now support older systems alongside AmigaOS 3.x; the
-  classic path completed the full 33-case output capture matrix on OS 2.1
-  emulation across all five engines, 300/600 DPI, mono/colour and duplex.
-- **Duplex printing:** PWG Raster and Apple Raster (URF) support real
-  multi-page duplex documents; PWG also supports duplex `PRT:`/`CMD_WRITE`
-  text output.
-- **Application compatibility:** improved strip/page-boundary handling for
-  WordWorth 7 and Final Writer 97 across all five engines.
-- **Discovery and printer compatibility:** mDNS now uses advertised DNS-SD
-  port/path metadata; Apple Raster headers use canonical duplex/quality values;
-  PWG/URF can expose an explicit `300* dpi` compatibility option.
-- **Output correctness:** JPEG metadata, including JPEGs embedded in PDF and
-  PostScript, now records the actual selected 300/600 DPI.
-- **Workbench artwork and help fixes:** readable artwork on low-colour
-  screens, smoother RTG rendering, and an AmigaGuide viewer fallback on OS 2.x.
+- **Final driver revision 41.17.**
+- **Query results now save correctly:** media/tray, colour, quality and scaling
+  choices selected by **Query Printer** are synchronised with the Unit config,
+  including on the AmigaOS 2.x-compatible event path.
+- **Failed RAM-spooled jobs are recoverable:** **View Spooler** shows the
+  current RAM/T: job and keeps a failed rendered document available for Retry,
+  Copies or Delete. Successful RAM jobs are still removed automatically.
 
 [Full release history and technical details](CHANGELOG.md)
 
