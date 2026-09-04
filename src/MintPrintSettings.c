@@ -10378,21 +10378,32 @@ void process_window_events(struct Window *win) {
                                               current_unit_index);
                             } else {
                                 int selected_unit = current_unit_index;
+                                char unit_env[64], unit_envarc[64];
                                 char active_env[64], active_envarc[64];
                                 BOOL ok;
 
+                                unit_config_path(selected_unit, FALSE, unit_env,
+                                                 sizeof(unit_env));
+                                unit_config_path(selected_unit, TRUE, unit_envarc,
+                                                 sizeof(unit_envarc));
                                 active_config_path(FALSE, active_env,
                                                    sizeof(active_env));
                                 active_config_path(TRUE, active_envarc,
                                                    sizeof(active_envarc));
 
-                                /* Activate into the separate live profile.
+                                /* Activate saves the current GUI state in the
+                                 * selected Unit first, then mirrors that
+                                 * same state into the separate live profile.
                                  * Unit0-Unit7 are never overwritten. */
                                 capture_driver_settings(win);
                                 ok = ensure_config_dir((CONST_STRPTR)"ENV:MintPRINT") &&
                                      ensure_config_dir((CONST_STRPTR)"ENVARC:MintPRINT") &&
-                                     write_driver_config_file((CONST_STRPTR)active_env) &&
-                                     write_driver_config_file((CONST_STRPTR)active_envarc);
+                                     write_driver_config_file((CONST_STRPTR)unit_env) &&
+                                     write_driver_config_file((CONST_STRPTR)unit_envarc);
+
+                                if (ok)
+                                    ok = write_driver_config_file((CONST_STRPTR)active_env) &&
+                                         write_driver_config_file((CONST_STRPTR)active_envarc);
 
                                 if (ok)
                                     ok = write_active_unit_marker(selected_unit);
