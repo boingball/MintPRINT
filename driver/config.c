@@ -1,9 +1,10 @@
 /*
  * MintPRINT runtime configuration.
  *
- * Live settings are read from ENV:MintPRINT/Unit0.  If that file does not
- * exist, ENVARC:MintPRINT/Unit0 is used.  Missing or invalid values fall back
- * to the known-good development defaults.
+ * Live settings are read from ENV:MintPRINT/Active first. If that file
+ * does not exist, ENVARC:MintPRINT/Active is used. Older installations that
+ * have no Active file fall back to ENV:/ENVARC:MintPRINT/Unit0. Missing or
+ * invalid values fall back to the known-good development defaults.
  */
 
 #include <exec/types.h>
@@ -247,20 +248,34 @@ LONG mp_config_load(struct MPConfig *cfg)
     if (!DOSBase) return MP_CONFIG_SOURCE_DEFAULTS;
 
     /* MintPrint Settings' regression suite writes a complete, one-job
-     * override here. It deliberately wins over Unit0 so the suite never
-     * mutates the user's saved printer profile. DriverOpen removes it
-     * after loading; Init may read it first when the driver is cold, so
-     * config.c itself must not consume/delete it. */
+     * override here. It deliberately wins over the live Active profile so
+     * the suite never mutates any user's saved printer profile. DriverOpen
+     * removes it after loading; Init may read it first when the driver is
+     * cold, so config.c itself must not consume/delete it. */
     fh = Open((CONST_STRPTR)"T:MintPRINT-testsuite.cfg", MODE_OLDFILE);
     if (fh) {
         source = MP_CONFIG_SOURCE_TEST;
     } else {
-        fh = Open((CONST_STRPTR)"ENV:MintPRINT/Unit0", MODE_OLDFILE);
+        /* Active is the live printer configuration. Unit0 remains a normal
+         * saved profile; the Unit0 paths below are the legacy fallback for
+         * installations created before the separate Active profile existed. */
+        fh = Open((CONST_STRPTR)"ENV:MintPRINT/Active", MODE_OLDFILE);
         if (fh) {
             source = MP_CONFIG_SOURCE_ENV;
         } else {
-            fh = Open((CONST_STRPTR)"ENVARC:MintPRINT/Unit0", MODE_OLDFILE);
-            if (fh) source = MP_CONFIG_SOURCE_ENVARC;
+            fh = Open((CONST_STRPTR)"ENVARC:MintPRINT/Active", MODE_OLDFILE);
+            if (fh) {
+                source = MP_CONFIG_SOURCE_ENVARC;
+            } else {
+                fh = Open((CONST_STRPTR)"ENV:MintPRINT/Unit0", MODE_OLDFILE);
+                if (fh) {
+                    source = MP_CONFIG_SOURCE_ENV;
+                } else {
+                    fh = Open((CONST_STRPTR)"ENVARC:MintPRINT/Unit0",
+                              MODE_OLDFILE);
+                    if (fh) source = MP_CONFIG_SOURCE_ENVARC;
+                }
+            }
         }
     }
 
