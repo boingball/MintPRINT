@@ -31,9 +31,13 @@ MintPrint Settings for setup, discovery and test printing.
 <img width="525" height="327" alt="image" src="https://github.com/user-attachments/assets/ba4cfd1f-8b0f-4aee-91b9-a6b221712ca5" />
 
 
-## What's new in 1.3.1
+## What's new in 1.3.2
 
-- **Final driver revision 41.17.**
+- **Final driver revision 41.19.**
+- **Selected-unit Test Print:** testing Unit1-Unit7 uses that profile for the
+  one job without replacing the active Unit0 printer.
+- **Reliable unit activation:** profiles stored in either ENV: or ENVARC: can
+  now be activated successfully.
 - **Query results now save correctly:** media/tray, colour, quality and scaling
   choices selected by **Query Printer** are synchronised with the Unit config,
   including on the AmigaOS 2.x-compatible event path.

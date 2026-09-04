@@ -12,10 +12,19 @@ Keep the full version-by-version history here. The front page and Aminet
 readme should carry only a short summary of the latest version, with a link
 to this page; replace that summary when preparing the next release.
 
-[Unreleased](#unreleased) | [1.3.1](#131) | [1.3.0](#130) | [1.2.7](#127) | [1.2.6](#126) | [1.2.5](#125) | [1.2.4](#124) | [1.2.3](#123) | [1.2.2](#122) | [1.2.1](#121) | [1.2.0](#120) | [1.1.0](#110) | [1.0.3b](#103b) | [1.0.3](#103) | [1.0.2](#102) | [1.0.0](#100)
+[1.3.2](#132) | [1.3.1](#131) | [1.3.0](#130) | [1.2.7](#127) | [1.2.6](#126) | [1.2.5](#125) | [1.2.4](#124) | [1.2.3](#123) | [1.2.2](#122) | [1.2.1](#121) | [1.2.0](#120) | [1.1.0](#110) | [1.0.3b](#103b) | [1.0.3](#103) | [1.0.2](#102) | [1.0.0](#100)
 
-## Unreleased
+## 1.3.2
 
+MintPRINT 1.3.2 is a corrective release for selected-unit testing and
+saved-printer activation, with the latest printer compatibility fixes.
+
+- **Test Print now honours the selected printer profile (issue #75).**
+  Testing Unit1 through Unit7 uses that profile for the one test job while
+  leaving the active Unit0 printer unchanged.
+- **Activation handles legacy saved profiles.** Unit activation now accepts a
+  profile present in either ENV: or ENVARC:, copying the readable source into
+  both Unit0 locations instead of failing with "could not copy Unit1 to Unit0".
 - **Engine-aware 360/720 DPI support (driver 41.19, issue #95).** Settings now accepts reported 360 and 720 DPI square modes and keeps generic printer resolutions separate from PWG Raster and Apple Raster capabilities. This prevents a generic high-resolution mode from being offered to a raster decoder that did not advertise it, while preserving the existing marked 300* compatibility override for confirmed printers. Asymmetric modes such as 1440x720 remain intentionally hidden until MintPRINT can represent independent X/Y DPI.
 
 - **Large jobs tolerate slow printer back-pressure (driver 41.18).** The

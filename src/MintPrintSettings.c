@@ -177,10 +177,18 @@ static int mp_test_print_extra_pages_requested = 0;
 static BOOL mp_test_print_skip_config_save = FALSE;
 static BOOL mp_test_suite_capture_mode = FALSE;
 
+/* printer.device always loads MintPRINT's live Unit0 profile. A normal Test
+ * Print made while another GUI profile is selected therefore needs the same
+ * one-job override used by the regression suite; otherwise its page says
+ * "Unit1" while the job is actually sent to Unit0. */
+#define MP_TEST_PRINT_CONFIG ((CONST_STRPTR)"T:MintPRINT-testsuite.cfg")
+
 // Saved printer profiles: ENV:MintPRINT/Unit0 .. Unit(MAX_UNITS-1). Only
 // Unit0 is what the driver actually reads at print time; the others are
 // switchable GUI-side profiles (e.g. for a second/third network printer).
 #define MAX_UNITS 8
+
+static BOOL mp_copy_file(CONST_STRPTR src, CONST_STRPTR dst);
 
 /* A few pixels below the Test Print/Debug/Save/Exit row (216+12 tall,
  * itself 4px below Keep Spooled Jobs/View Spooler at 198) for even spacing - see
@@ -195,7 +203,7 @@ static BOOL mp_test_suite_capture_mode = FALSE;
 
 // Define the USED macro for GCC
 #define USED __attribute__((used))
-#define MINTPRINT_SETTINGS_VERSION "1.3.1"
+#define MINTPRINT_SETTINGS_VERSION "1.3.2"
 #define MINTPRINT_DRIVER_DEST ((CONST_STRPTR)"DEVS:Printers/MintPRINT")
 
 /* MintPrint Settings now ships as a single drawer containing both bundled
@@ -221,7 +229,7 @@ static BOOL mp_read_driver_version(CONST_STRPTR path, struct MPDriverVersion *ou
 
 /* Visible both to AmigaOS's Version command and in the About requester. */
 static const char USED mintprint_version[] =
-    "$VER: MintPrintSettings " MINTPRINT_SETTINGS_VERSION " (03.09.2026)";
+    "$VER: MintPrintSettings " MINTPRINT_SETTINGS_VERSION " (04.09.2026)";
 
 // Simple extension check
 BOOL has_extension(const char *filename, const char *ext) {
@@ -1013,6 +1021,37 @@ static BOOL unit_file_exists(int idx) {
         UnLock(lock);
         return TRUE;
     }
+    return FALSE;
+}
+
+/* Return a readable saved profile path, preferring the live ENV copy and
+ * falling back to ENVARC for profiles created by older builds or systems
+ * where the volatile ENV copy has been flushed. */
+static BOOL unit_config_source_path(int idx, char *out, int out_size) {
+    BPTR lock;
+    char path[64];
+
+    if (!out || out_size <= 0) return FALSE;
+    out[0] = '\0';
+
+    unit_config_path(idx, FALSE, path, sizeof(path));
+    lock = Lock((CONST_STRPTR)path, ACCESS_READ);
+    if (lock) {
+        UnLock(lock);
+        strncpy(out, path, out_size - 1);
+        out[out_size - 1] = '\0';
+        return TRUE;
+    }
+
+    unit_config_path(idx, TRUE, path, sizeof(path));
+    lock = Lock((CONST_STRPTR)path, ACCESS_READ);
+    if (lock) {
+        UnLock(lock);
+        strncpy(out, path, out_size - 1);
+        out[out_size - 1] = '\0';
+        return TRUE;
+    }
+
     return FALSE;
 }
 
@@ -2060,13 +2099,29 @@ static BOOL mintprint_test_page(struct Window *win) {
         return FALSE;
     }
 
-    /* Ordinary Test Print tests what the user is looking at and makes it
-     * live Unit0. The regression suite supplies its one-shot T: config
-     * directly and MUST NOT overwrite the user's persistent Unit0 while it
-     * cycles synthetic matrix values through these same in-memory fields. */
+    /* Save the profile being viewed. The driver itself always reads Unit0,
+     * so for Unit1..7 copy that saved profile to its existing one-job T:
+     * override. DriverOpen consumes and deletes the override after loading
+     * it, leaving the user's active Unit0 completely unchanged. The
+     * regression suite supplies its own override and skips this block. */
     if (!mp_test_print_skip_config_save && !save_driver_config(win)) {
-        printf("Test Print: could not save Unit0 settings\n");
+        printf("Test Print: could not save Unit%d settings\n", current_unit_index);
         return FALSE;
+    }
+    if (!mp_test_print_skip_config_save && current_unit_index != 0) {
+        char selected_config[64];
+
+        if (!unit_config_source_path(current_unit_index, selected_config,
+                                      sizeof(selected_config)) ||
+            !mp_copy_file((CONST_STRPTR)selected_config,
+                          MP_TEST_PRINT_CONFIG)) {
+            printf("Test Print: could not prepare Unit%d for this test\n",
+                   current_unit_index);
+            DeleteFile(MP_TEST_PRINT_CONFIG);
+            return FALSE;
+        }
+        printf("Test Print: using Unit%d for this job; Unit0 remains active\n",
+               current_unit_index);
     }
 
     have_installed_ver = mp_read_driver_version(MINTPRINT_DRIVER_DEST, &installed_ver);
@@ -2235,6 +2290,8 @@ static BOOL mintprint_test_page(struct Window *win) {
     if (OpenDevice((CONST_STRPTR)"printer.device", 0,
                    (struct IORequest *)test_print_job.request, 0) != 0) {
         printf("Test Print: could not open printer.device\n");
+        if (!mp_test_print_skip_config_save && current_unit_index != 0)
+            DeleteFile(MP_TEST_PRINT_CONFIG);
         mp_test_print_release(win);
         return FALSE;
     }
@@ -10243,19 +10300,22 @@ void process_window_events(struct Window *win) {
                                 custom_printf("Unit%d has no saved settings yet - nothing to activate.\n",
                                               current_unit_index);
                             } else {
-                                char src_env[64], src_envarc[64];
+                                char src_config[64];
                                 char dst_env[64], dst_envarc[64];
                                 BOOL ok;
 
-                                unit_config_path(current_unit_index, FALSE, src_env, sizeof(src_env));
-                                unit_config_path(current_unit_index, TRUE, src_envarc, sizeof(src_envarc));
                                 unit_config_path(0, FALSE, dst_env, sizeof(dst_env));
                                 unit_config_path(0, TRUE, dst_envarc, sizeof(dst_envarc));
 
                                 ok = ensure_config_dir((CONST_STRPTR)"ENV:MintPRINT") &&
                                      ensure_config_dir((CONST_STRPTR)"ENVARC:MintPRINT") &&
-                                     mp_copy_file((CONST_STRPTR)src_env, (CONST_STRPTR)dst_env) &&
-                                     mp_copy_file((CONST_STRPTR)src_envarc, (CONST_STRPTR)dst_envarc);
+                                     unit_config_source_path(current_unit_index,
+                                                             src_config,
+                                                             sizeof(src_config)) &&
+                                     mp_copy_file((CONST_STRPTR)src_config,
+                                                  (CONST_STRPTR)dst_env) &&
+                                     mp_copy_file((CONST_STRPTR)src_config,
+                                                  (CONST_STRPTR)dst_envarc);
 
                                 if (ok) {
                                     char src_cache_env[64], src_cache_envarc[64];

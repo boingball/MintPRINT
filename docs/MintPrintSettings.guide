@@ -519,6 +519,11 @@ a printer actually produces physical output before trying a real
 application - MultiView and Test Print both provide a much simpler
 baseline than a strip-printing application like Wordworth.
 
+When Unit1 through Unit7 is selected, Test Print uses that profile for
+this one job without replacing the active Unit0 profile. Normal
+application printing continues to use Unit0 until you explicitly click
+Activate.
+
 An IPP job reporting success, or even a completed job state, is not
 by itself proof of a physical page - some printer firmware accepts a
 job and silently discards it. Treat an actual sheet of paper as the
