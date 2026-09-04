@@ -1024,6 +1024,37 @@ static BOOL unit_file_exists(int idx) {
     return FALSE;
 }
 
+/* Return a readable saved profile path, preferring the live ENV copy and
+ * falling back to ENVARC for profiles created by older builds or systems
+ * where the volatile ENV copy has been flushed. */
+static BOOL unit_config_source_path(int idx, char *out, int out_size) {
+    BPTR lock;
+    char path[64];
+
+    if (!out || out_size <= 0) return FALSE;
+    out[0] = '\0';
+
+    unit_config_path(idx, FALSE, path, sizeof(path));
+    lock = Lock((CONST_STRPTR)path, ACCESS_READ);
+    if (lock) {
+        UnLock(lock);
+        strncpy(out, path, out_size - 1);
+        out[out_size - 1] = '\0';
+        return TRUE;
+    }
+
+    unit_config_path(idx, TRUE, path, sizeof(path));
+    lock = Lock((CONST_STRPTR)path, ACCESS_READ);
+    if (lock) {
+        UnLock(lock);
+        strncpy(out, path, out_size - 1);
+        out[out_size - 1] = '\0';
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
 /* Peeks just the MODEL= line out of a saved unit file, without disturbing
  * any of the live GUI/driver-config state. Used to label the Unit dropdown. */
 static void peek_unit_model(int idx, char *out, int out_size) {
@@ -2080,9 +2111,9 @@ static BOOL mintprint_test_page(struct Window *win) {
     if (!mp_test_print_skip_config_save && current_unit_index != 0) {
         char selected_config[64];
 
-        unit_config_path(current_unit_index, FALSE, selected_config,
-                         sizeof(selected_config));
-        if (!mp_copy_file((CONST_STRPTR)selected_config,
+        if (!unit_config_source_path(current_unit_index, selected_config,
+                                      sizeof(selected_config)) ||
+            !mp_copy_file((CONST_STRPTR)selected_config,
                           MP_TEST_PRINT_CONFIG)) {
             printf("Test Print: could not prepare Unit%d for this test\n",
                    current_unit_index);
@@ -10269,19 +10300,22 @@ void process_window_events(struct Window *win) {
                                 custom_printf("Unit%d has no saved settings yet - nothing to activate.\n",
                                               current_unit_index);
                             } else {
-                                char src_env[64], src_envarc[64];
+                                char src_config[64];
                                 char dst_env[64], dst_envarc[64];
                                 BOOL ok;
 
-                                unit_config_path(current_unit_index, FALSE, src_env, sizeof(src_env));
-                                unit_config_path(current_unit_index, TRUE, src_envarc, sizeof(src_envarc));
                                 unit_config_path(0, FALSE, dst_env, sizeof(dst_env));
                                 unit_config_path(0, TRUE, dst_envarc, sizeof(dst_envarc));
 
                                 ok = ensure_config_dir((CONST_STRPTR)"ENV:MintPRINT") &&
                                      ensure_config_dir((CONST_STRPTR)"ENVARC:MintPRINT") &&
-                                     mp_copy_file((CONST_STRPTR)src_env, (CONST_STRPTR)dst_env) &&
-                                     mp_copy_file((CONST_STRPTR)src_envarc, (CONST_STRPTR)dst_envarc);
+                                     unit_config_source_path(current_unit_index,
+                                                             src_config,
+                                                             sizeof(src_config)) &&
+                                     mp_copy_file((CONST_STRPTR)src_config,
+                                                  (CONST_STRPTR)dst_env) &&
+                                     mp_copy_file((CONST_STRPTR)src_config,
+                                                  (CONST_STRPTR)dst_envarc);
 
                                 if (ok) {
                                     char src_cache_env[64], src_cache_envarc[64];
