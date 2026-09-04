@@ -3,28 +3,28 @@
 MintPRINT reads its printer endpoint at the start of every graphics print job.
 The live profile is:
 
-    ENV:MintPRINT/Unit0
+    ENV:MintPRINT/Active
 
 If that file is absent, the driver falls back to:
 
+    ENVARC:MintPRINT/Active
+
+For older installations that have no separate Active profile, it then
+falls back to the legacy live paths:
+
+    ENV:MintPRINT/Unit0
     ENVARC:MintPRINT/Unit0
 
-If neither exists, the driver defaults to an empty host and simply does
+If none exists, the driver defaults to an empty host and simply does
 nothing (query or print) rather than falling back to any hardcoded
-address - an early build defaulted to a specific test printer's address,
-which meant an unconfigured Unit0 could silently send traffic to
-whatever device happened to be at that address on someone else's
-network.
+address. Unit0 through Unit7 are saved printer profiles; the separate
+Active file is the profile currently used by the driver. MintPrint
+Settings' **Activate** button writes the selected profile to Active
+without changing any Unit profile.
 
-The driver itself has no concept of multiple units - it only ever reads
-`Unit0`. MintPrint Settings' Unit dropdown (see `docs/MINTPRINT_PREFS.md`)
-manages `Unit1`, `Unit2`, ... as switchable saved profiles for people with
-more than one printer, and its **Activate** button is how one of those
-becomes the live `Unit0` this driver reads.
+## Active and Unit profile format
 
-## Unit0 format
-
-The file is plain text (`HOST=` below is a placeholder - MintPrint
+Active and Unit profile files are plain text (`HOST=` below is a placeholder - MintPrint
 Settings always fills in a real printer address before saving):
 
     HOST=192.168.1.100
