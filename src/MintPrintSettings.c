@@ -177,15 +177,15 @@ static int mp_test_print_extra_pages_requested = 0;
 static BOOL mp_test_print_skip_config_save = FALSE;
 static BOOL mp_test_suite_capture_mode = FALSE;
 
-/* printer.device always loads MintPRINT's live Unit0 profile. A normal Test
- * Print made while another GUI profile is selected therefore needs the same
- * one-job override used by the regression suite; otherwise its page says
- * "Unit1" while the job is actually sent to Unit0. */
+/* printer.device always loads MintPRINT's separate live Active profile. A
+ * normal Test Print made while another GUI profile is selected therefore
+ * needs the same one-job override used by the regression suite; otherwise its
+ * page says "Unit1" while the job is sent to the active printer. */
 #define MP_TEST_PRINT_CONFIG ((CONST_STRPTR)"T:MintPRINT-testsuite.cfg")
 
-// Saved printer profiles: ENV:MintPRINT/Unit0 .. Unit(MAX_UNITS-1). Only
-// Unit0 is what the driver actually reads at print time; the others are
-// switchable GUI-side profiles (e.g. for a second/third network printer).
+// Saved printer profiles: ENV:MintPRINT/Unit0 .. Unit(MAX_UNITS-1). The
+// separate Active profile is what the driver reads at print time; Unit0-7
+// remain independent GUI-side profiles.
 #define MAX_UNITS 8
 
 static BOOL mp_copy_file(CONST_STRPTR src, CONST_STRPTR dst);
@@ -10405,7 +10405,8 @@ void process_window_events(struct Window *win) {
                                     custom_printf("Could not activate Unit%d; saved Unit profiles were not changed.\n",
                                                   selected_unit);
                                 }
-                            }                        }
+                            }
+                        }
                         break;
 
                         case GAD_MEDIA_DROPDOWN:
