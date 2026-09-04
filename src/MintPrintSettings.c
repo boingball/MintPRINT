@@ -177,10 +177,18 @@ static int mp_test_print_extra_pages_requested = 0;
 static BOOL mp_test_print_skip_config_save = FALSE;
 static BOOL mp_test_suite_capture_mode = FALSE;
 
+/* printer.device always loads MintPRINT's live Unit0 profile. A normal Test
+ * Print made while another GUI profile is selected therefore needs the same
+ * one-job override used by the regression suite; otherwise its page says
+ * "Unit1" while the job is actually sent to Unit0. */
+#define MP_TEST_PRINT_CONFIG ((CONST_STRPTR)"T:MintPRINT-testsuite.cfg")
+
 // Saved printer profiles: ENV:MintPRINT/Unit0 .. Unit(MAX_UNITS-1). Only
 // Unit0 is what the driver actually reads at print time; the others are
 // switchable GUI-side profiles (e.g. for a second/third network printer).
 #define MAX_UNITS 8
+
+static BOOL mp_copy_file(CONST_STRPTR src, CONST_STRPTR dst);
 
 /* A few pixels below the Test Print/Debug/Save/Exit row (216+12 tall,
  * itself 4px below Keep Spooled Jobs/View Spooler at 198) for even spacing - see
@@ -2060,13 +2068,29 @@ static BOOL mintprint_test_page(struct Window *win) {
         return FALSE;
     }
 
-    /* Ordinary Test Print tests what the user is looking at and makes it
-     * live Unit0. The regression suite supplies its one-shot T: config
-     * directly and MUST NOT overwrite the user's persistent Unit0 while it
-     * cycles synthetic matrix values through these same in-memory fields. */
+    /* Save the profile being viewed. The driver itself always reads Unit0,
+     * so for Unit1..7 copy that saved profile to its existing one-job T:
+     * override. DriverOpen consumes and deletes the override after loading
+     * it, leaving the user's active Unit0 completely unchanged. The
+     * regression suite supplies its own override and skips this block. */
     if (!mp_test_print_skip_config_save && !save_driver_config(win)) {
-        printf("Test Print: could not save Unit0 settings\n");
+        printf("Test Print: could not save Unit%d settings\n", current_unit_index);
         return FALSE;
+    }
+    if (!mp_test_print_skip_config_save && current_unit_index != 0) {
+        char selected_config[64];
+
+        unit_config_path(current_unit_index, FALSE, selected_config,
+                         sizeof(selected_config));
+        if (!mp_copy_file((CONST_STRPTR)selected_config,
+                          MP_TEST_PRINT_CONFIG)) {
+            printf("Test Print: could not prepare Unit%d for this test\n",
+                   current_unit_index);
+            DeleteFile(MP_TEST_PRINT_CONFIG);
+            return FALSE;
+        }
+        printf("Test Print: using Unit%d for this job; Unit0 remains active\n",
+               current_unit_index);
     }
 
     have_installed_ver = mp_read_driver_version(MINTPRINT_DRIVER_DEST, &installed_ver);
@@ -2235,6 +2259,8 @@ static BOOL mintprint_test_page(struct Window *win) {
     if (OpenDevice((CONST_STRPTR)"printer.device", 0,
                    (struct IORequest *)test_print_job.request, 0) != 0) {
         printf("Test Print: could not open printer.device\n");
+        if (!mp_test_print_skip_config_save && current_unit_index != 0)
+            DeleteFile(MP_TEST_PRINT_CONFIG);
         mp_test_print_release(win);
         return FALSE;
     }
