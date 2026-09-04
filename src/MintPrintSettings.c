@@ -177,15 +177,15 @@ static int mp_test_print_extra_pages_requested = 0;
 static BOOL mp_test_print_skip_config_save = FALSE;
 static BOOL mp_test_suite_capture_mode = FALSE;
 
-/* printer.device always loads MintPRINT's live Unit0 profile. A normal Test
- * Print made while another GUI profile is selected therefore needs the same
- * one-job override used by the regression suite; otherwise its page says
- * "Unit1" while the job is actually sent to Unit0. */
+/* printer.device always loads MintPRINT's separate live Active profile. A
+ * normal Test Print made while another GUI profile is selected therefore
+ * needs the same one-job override used by the regression suite; otherwise its
+ * page says "Unit1" while the job is sent to the active printer. */
 #define MP_TEST_PRINT_CONFIG ((CONST_STRPTR)"T:MintPRINT-testsuite.cfg")
 
-// Saved printer profiles: ENV:MintPRINT/Unit0 .. Unit(MAX_UNITS-1). Only
-// Unit0 is what the driver actually reads at print time; the others are
-// switchable GUI-side profiles (e.g. for a second/third network printer).
+// Saved printer profiles: ENV:MintPRINT/Unit0 .. Unit(MAX_UNITS-1). The
+// separate Active profile is what the driver reads at print time; Unit0-7
+// remain independent GUI-side profiles.
 #define MAX_UNITS 8
 
 static BOOL mp_copy_file(CONST_STRPTR src, CONST_STRPTR dst);
@@ -203,7 +203,7 @@ static BOOL mp_copy_file(CONST_STRPTR src, CONST_STRPTR dst);
 
 // Define the USED macro for GCC
 #define USED __attribute__((used))
-#define MINTPRINT_SETTINGS_VERSION "1.3.2"
+#define MINTPRINT_SETTINGS_VERSION "1.3.3"
 #define MINTPRINT_DRIVER_DEST ((CONST_STRPTR)"DEVS:Printers/MintPRINT")
 
 /* MintPrint Settings now ships as a single drawer containing both bundled
@@ -788,6 +788,7 @@ char driver_spool_buffer[MAX_ATTR_LEN] = "RAM";
  * and its GAD_SPOOL_KEEP gating below. */
 BOOL driver_spool_keep = FALSE;
 int current_unit_index = 0;
+int active_unit_index = 0;
 char printer_make_model[128] = "";
 char printer_icon_uri[256] = "";
 
@@ -998,6 +999,16 @@ static void unit_config_path(int idx, BOOL envarc, char *out, int out_size) {
     snprintf(out, out_size, "%s:MintPRINT/Unit%d", envarc ? "ENVARC" : "ENV", idx);
 }
 
+static void active_config_path(BOOL envarc, char *out, int out_size) {
+    snprintf(out, out_size, "%s:MintPRINT/Active",
+             envarc ? "ENVARC" : "ENV");
+}
+
+static void active_unit_marker_path(BOOL envarc, char *out, int out_size) {
+    snprintf(out, out_size, "%s:MintPRINT/ActiveUnit",
+             envarc ? "ENVARC" : "ENV");
+}
+
 static void unit_cache_path(int idx, BOOL envarc, char *out, int out_size) {
     snprintf(out, out_size, "%s:MintPRINT/Unit%d.cache", envarc ? "ENVARC" : "ENV", idx);
 }
@@ -1053,6 +1064,58 @@ static BOOL unit_config_source_path(int idx, char *out, int out_size) {
     }
 
     return FALSE;
+}
+
+static void load_active_unit_index(void) {
+    BPTR file;
+    char path[64];
+    char line[32];
+    int idx;
+
+    active_unit_index = 0;
+    active_unit_marker_path(FALSE, path, sizeof(path));
+    file = Open((CONST_STRPTR)path, MODE_OLDFILE);
+    if (!file) {
+        active_unit_marker_path(TRUE, path, sizeof(path));
+        file = Open((CONST_STRPTR)path, MODE_OLDFILE);
+    }
+    if (!file) return;
+
+    if (FGets(file, line, sizeof(line))) {
+        idx = atoi(line);
+        if (idx >= 0 && idx < MAX_UNITS)
+            active_unit_index = idx;
+    }
+    Close(file);
+}
+
+static BOOL write_active_unit_marker(int idx) {
+    BPTR file;
+    char path[64];
+    char line[16];
+    BOOL env_ok = FALSE;
+    BOOL envarc_ok = FALSE;
+
+    if (idx < 0 || idx >= MAX_UNITS) return FALSE;
+    snprintf(line, sizeof(line), "%d\n", idx);
+
+    active_unit_marker_path(FALSE, path, sizeof(path));
+    file = Open((CONST_STRPTR)path, MODE_NEWFILE);
+    if (file) {
+        FPuts(file, line);
+        Close(file);
+        env_ok = TRUE;
+    }
+
+    active_unit_marker_path(TRUE, path, sizeof(path));
+    file = Open((CONST_STRPTR)path, MODE_NEWFILE);
+    if (file) {
+        FPuts(file, line);
+        Close(file);
+        envarc_ok = TRUE;
+    }
+
+    return env_ok && envarc_ok;
 }
 
 /* Peeks just the MODEL= line out of a saved unit file, without disturbing
@@ -1333,8 +1396,13 @@ static BOOL write_driver_config_file(CONST_STRPTR filename) {
 static BOOL save_driver_config(struct Window *win) {
     BOOL env_ok;
     BOOL envarc_ok;
+    BOOL active_env_ok = TRUE;
+    BOOL active_envarc_ok = TRUE;
+    BOOL active_marker_ok = TRUE;
     char env_path[64];
     char envarc_path[64];
+    char active_env_path[64];
+    char active_envarc_path[64];
 
     capture_driver_settings(win);
     mp_ensure_hidden_spool_dir(driver_spool_buffer);
@@ -1354,6 +1422,16 @@ static BOOL save_driver_config(struct Window *win) {
     env_ok = write_driver_config_file((CONST_STRPTR)env_path);
     envarc_ok = write_driver_config_file((CONST_STRPTR)envarc_path);
 
+    /* Keep the separate live profile in step when the active unit itself is
+     * being edited. Unit0-Unit7 remain independent saved profiles. */
+    if (env_ok && envarc_ok && current_unit_index == active_unit_index) {
+        active_config_path(FALSE, active_env_path, sizeof(active_env_path));
+        active_config_path(TRUE, active_envarc_path, sizeof(active_envarc_path));
+        active_env_ok = write_driver_config_file((CONST_STRPTR)active_env_path);
+        active_envarc_ok = write_driver_config_file((CONST_STRPTR)active_envarc_path);
+        active_marker_ok = write_active_unit_marker(current_unit_index);
+    }
+
     /*
      * Do NOT replace the live Unit cycle gadget's GTCY_Labels here.
      *
@@ -1370,7 +1448,8 @@ static BOOL save_driver_config(struct Window *win) {
      */
     (void)win;
 
-    return env_ok && envarc_ok;
+    return env_ok && envarc_ok && active_env_ok &&
+           active_envarc_ok && active_marker_ok;
 }
 
 static BOOL load_driver_config(void) {
@@ -2120,7 +2199,7 @@ static BOOL mintprint_test_page(struct Window *win) {
             DeleteFile(MP_TEST_PRINT_CONFIG);
             return FALSE;
         }
-        printf("Test Print: using Unit%d for this job; Unit0 remains active\n",
+        printf("Test Print: using Unit%d for this job; active printer remains unchanged\n",
                current_unit_index);
     }
 
@@ -10294,67 +10373,37 @@ void process_window_events(struct Window *win) {
                         {
                             custom_printf("CLEAR");
 
-                            if (current_unit_index == 0) {
-                                custom_printf("Unit0 is already the active printer.\n");
-                            } else if (!unit_file_exists(current_unit_index)) {
+                            if (!unit_file_exists(current_unit_index)) {
                                 custom_printf("Unit%d has no saved settings yet - nothing to activate.\n",
                                               current_unit_index);
                             } else {
                                 int selected_unit = current_unit_index;
-                                char dst_env[64], dst_envarc[64];
+                                char active_env[64], active_envarc[64];
                                 BOOL ok;
 
-                                unit_config_path(0, FALSE, dst_env, sizeof(dst_env));
-                                unit_config_path(0, TRUE, dst_envarc, sizeof(dst_envarc));
+                                active_config_path(FALSE, active_env,
+                                                   sizeof(active_env));
+                                active_config_path(TRUE, active_envarc,
+                                                   sizeof(active_envarc));
 
-                                /* Activate the settings currently loaded in the
-                                 * GUI directly. The previous implementation copied
-                                 * UnitN through a .new/.bak Rename() sequence;
-                                 * that is not reliable on all ENV:/ENVARC:
-                                 * handlers and hid the failing operation behind
-                                 * the generic "Could not copy" message. */
+                                /* Activate into the separate live profile.
+                                 * Unit0-Unit7 are never overwritten. */
                                 capture_driver_settings(win);
-                                current_unit_index = 0;
                                 ok = ensure_config_dir((CONST_STRPTR)"ENV:MintPRINT") &&
                                      ensure_config_dir((CONST_STRPTR)"ENVARC:MintPRINT") &&
-                                     write_driver_config_file((CONST_STRPTR)dst_env) &&
-                                     write_driver_config_file((CONST_STRPTR)dst_envarc);
-                                current_unit_index = selected_unit;
+                                     write_driver_config_file((CONST_STRPTR)active_env) &&
+                                     write_driver_config_file((CONST_STRPTR)active_envarc);
+
+                                if (ok)
+                                    ok = write_active_unit_marker(selected_unit);
 
                                 if (ok) {
-                                    char src_cache_env[64], src_cache_envarc[64];
-                                    char dst_cache_env[64], dst_cache_envarc[64];
-
-                                    /* Best-effort: carry the cached capabilities over too, so
-                                     * Unit0 doesn't need a fresh Query. Fine if there is none. */
-                                    unit_cache_path(current_unit_index, FALSE, src_cache_env, sizeof(src_cache_env));
-                                    unit_cache_path(current_unit_index, TRUE, src_cache_envarc, sizeof(src_cache_envarc));
-                                    unit_cache_path(0, FALSE, dst_cache_env, sizeof(dst_cache_env));
-                                    unit_cache_path(0, TRUE, dst_cache_envarc, sizeof(dst_cache_envarc));
-                                    mp_copy_file((CONST_STRPTR)src_cache_env, (CONST_STRPTR)dst_cache_env);
-                                    mp_copy_file((CONST_STRPTR)src_cache_envarc, (CONST_STRPTR)dst_cache_envarc);
-
-                                    /* Carry the processed printer artwork too. */
-                                    {
-                                        char src_icon_env[96], src_icon_envarc[96];
-                                        char dst_icon_env[96], dst_icon_envarc[96];
-                                        ensure_config_dir((CONST_STRPTR)"ENV:MintPRINT/Art");
-                                        ensure_config_dir((CONST_STRPTR)"ENVARC:MintPRINT/Art");
-                                        unit_icon_cache_path(current_unit_index, FALSE, src_icon_env, sizeof(src_icon_env));
-                                        unit_icon_cache_path(current_unit_index, TRUE, src_icon_envarc, sizeof(src_icon_envarc));
-                                        unit_icon_cache_path(0, FALSE, dst_icon_env, sizeof(dst_icon_env));
-                                        unit_icon_cache_path(0, TRUE, dst_icon_envarc, sizeof(dst_icon_envarc));
-                                        mp_copy_file((CONST_STRPTR)src_icon_env, (CONST_STRPTR)dst_icon_env);
-                                        mp_copy_file((CONST_STRPTR)src_icon_envarc, (CONST_STRPTR)dst_icon_envarc);
-                                    }
-
-                                    custom_printf("Unit%d copied to Unit0 - it is now the active printer.\n",
-                                                  current_unit_index);
-                                    current_unit_index = 0;
-                                    reload_current_unit(win);
-                                    refresh_unit_dropdown(win);
+                                    active_unit_index = selected_unit;
+                                    custom_printf("Unit%d is now active; saved Unit profiles unchanged.\n",
+                                                  selected_unit);
                                 } else {
-                                    custom_printf("Could not copy Unit%d to Unit0.\n", current_unit_index);
+                                    custom_printf("Could not activate Unit%d; saved Unit profiles were not changed.\n",
+                                                  selected_unit);
                                 }
                             }
                         }
@@ -10874,7 +10923,9 @@ int main(void) {
     g_topborder = topborder;
     /* Cycle label pointers already target process-lifetime static storage.
      * seed_saved_option_labels() populated those arrays above. */
-    // Load the same Unit0 profile used by DEVS:Printers/MintPRINT.
+    // Load the active profile used by DEVS:Printers/MintPRINT.
+    load_active_unit_index();
+    current_unit_index = active_unit_index;
     load_driver_config();
     mp_build_spool_options();
     seed_saved_option_labels();
