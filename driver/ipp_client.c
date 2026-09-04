@@ -26,7 +26,16 @@ typedef long ssize_t;
  * never get control back. */
 #define MP_IPP_CONNECT_TIMEOUT_SECS 8
 #define MP_IPP_RECV_TIMEOUT_SECS 20
-#define MP_IPP_SEND_TIMEOUT_SECS 20
+#define MP_IPP_CONTROL_SEND_TIMEOUT_SECS 20
+/* A small-buffer printer may stop draining TCP while it processes or prints
+ * data already received. Keep the short control timeout above for headers,
+ * but allow a long document to make no upload progress for up to three
+ * minutes before treating the connection as stalled (issue #91). */
+#define MP_IPP_DOCUMENT_SEND_TIMEOUT_SECS 180
+
+#define MP_IPP_SEND_FAILED 0
+#define MP_IPP_SEND_OK 1
+#define MP_IPP_SEND_TIMEOUT -1
 
 /* Connect with a bound on how long a dead/unreachable printer can stall the
  * spool Process. Modeled on src/MintPrintSettings.c's mp_connect_with_timeout,
@@ -203,18 +212,19 @@ static int mp_append_ulong(char *dst, ULONG cap, ULONG *pos, ULONG value)
 
 /* send() bounded so a printer that accepts the connection and then simply
  * stops reading (TCP window stays full, never drains) cannot stall the
- * spool Process for the rest of a large print job's transfer - only
- * connect()/recv() were bounded before this. Each chunk still waits for
- * write-readiness up to MP_IPP_SEND_TIMEOUT_SECS; as long as the printer
- * keeps draining *some* data before each such wait expires, a job of any
- * size still sends to completion - only a stalled connection (no forward
- * progress within one timeout window) gives up. */
-static int mp_safe_send(int sock, const UBYTE *buf, ULONG len)
+ * spool Process forever. timeout_secs is deliberately caller-selected:
+ * control traffic remains tightly bounded, while document data gets enough
+ * time for a small-buffer printer to process a page and resume reading.
+ * sent_out records real forward progress even when a later wait/send fails. */
+static int mp_safe_send(int sock, const UBYTE *buf, ULONG len,
+                        int timeout_secs, ULONG *sent_out)
 {
     ULONG sent_total = 0;
     long nonblock = 1;
     long block = 0;
     BOOL nonblocking = (IoctlSocket(sock, FIONBIO, (char *)&nonblock) == 0);
+
+    if (sent_out) *sent_out = 0;
 
     while (sent_total < len) {
         ULONG left = len - sent_total;
@@ -228,26 +238,29 @@ static int mp_safe_send(int sock, const UBYTE *buf, ULONG len)
 
             FD_ZERO(&wfds);
             FD_SET(sock, &wfds);
-            tv.tv_sec = MP_IPP_SEND_TIMEOUT_SECS;
+            tv.tv_sec = timeout_secs;
             tv.tv_usec = 0;
 
             ready = WaitSelect(sock + 1, NULL, &wfds, NULL, &tv, NULL);
             if (ready <= 0 || !FD_ISSET(sock, &wfds)) {
                 IoctlSocket(sock, FIONBIO, (char *)&block);
-                return 0;
+                if (sent_out) *sent_out = sent_total;
+                return ready == 0 ? MP_IPP_SEND_TIMEOUT : MP_IPP_SEND_FAILED;
             }
         }
 
         sent = send(sock, (char *)(buf + sent_total), want, 0);
         if (sent <= 0) {
             if (nonblocking) IoctlSocket(sock, FIONBIO, (char *)&block);
-            return 0;
+            if (sent_out) *sent_out = sent_total;
+            return MP_IPP_SEND_FAILED;
         }
         sent_total += (ULONG)sent;
     }
 
     if (nonblocking) IoctlSocket(sock, FIONBIO, (char *)&block);
-    return 1;
+    if (sent_out) *sent_out = sent_total;
+    return MP_IPP_SEND_OK;
 }
 
 static int mp_put8(UBYTE *p, ULONG cap, ULONG *off, UBYTE v)
@@ -540,8 +553,10 @@ LONG mp_ipp_query_imageable_margins(const struct MPConfig *cfg,
         rc = -8; goto done;
     }
 
-    if (!mp_safe_send(sock, (const UBYTE *)g_margin_http, hp) ||
-        !mp_safe_send(sock, g_margin_ipp, io)) {
+    if (mp_safe_send(sock, (const UBYTE *)g_margin_http, hp,
+                     MP_IPP_CONTROL_SEND_TIMEOUT_SECS, NULL) != MP_IPP_SEND_OK ||
+        mp_safe_send(sock, g_margin_ipp, io,
+                     MP_IPP_CONTROL_SEND_TIMEOUT_SECS, NULL) != MP_IPP_SEND_OK) {
         rc = -9; goto done;
     }
 
@@ -779,6 +794,7 @@ LONG mp_ipp_print_document(const struct MPConfig *cfg, CONST_STRPTR filename,
         result->http_status = 0;
         result->ipp_status = 0xffff;
         result->document_bytes = 0;
+        result->document_bytes_sent = 0;
     }
     if (!DOSBase || !cfg || !cfg->host[0] || cfg->port == 0 ||
         cfg->path[0] != '/' || !filename || !document_format) return -1;
@@ -896,14 +912,30 @@ LONG mp_ipp_print_document(const struct MPConfig *cfg, CONST_STRPTR filename,
         if (connect_rc < 0) { rc = -10; goto done; }
     }
 
-    if (!mp_safe_send(sock, (const UBYTE *)http, hp) ||
-        !mp_safe_send(sock, ipp, io)) { rc = -11; goto done; }
+    if (mp_safe_send(sock, (const UBYTE *)http, hp,
+                     MP_IPP_CONTROL_SEND_TIMEOUT_SECS, NULL) != MP_IPP_SEND_OK ||
+        mp_safe_send(sock, ipp, io,
+                     MP_IPP_CONTROL_SEND_TIMEOUT_SECS, NULL) != MP_IPP_SEND_OK) {
+        rc = -11; goto done;
+    }
 
     for (;;) {
-        LONG got = Read(fh, filebuf, sizeof(filebuf));
+        LONG got;
+        ULONG chunk_sent = 0;
+        int send_rc;
+
+        got = Read(fh, filebuf, sizeof(filebuf));
         if (got < 0) { rc = -12; goto done; }
         if (got == 0) break;
-        if (!mp_safe_send(sock, filebuf, (ULONG)got)) { rc = -13; goto done; }
+
+        send_rc = mp_safe_send(sock, filebuf, (ULONG)got,
+                               MP_IPP_DOCUMENT_SEND_TIMEOUT_SECS,
+                               &chunk_sent);
+        if (result) result->document_bytes_sent += chunk_sent;
+        if (send_rc != MP_IPP_SEND_OK) {
+            rc = send_rc == MP_IPP_SEND_TIMEOUT ? -19 : -13;
+            goto done;
+        }
     }
 
     for (;;) {

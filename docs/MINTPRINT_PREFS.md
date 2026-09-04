@@ -79,6 +79,8 @@ remain safely one-sided. See `docs/DUPLEX_PRINTING.md`.
 
 ## DPI compatibility option
 
+DPI choices are engine-aware. Settings accepts reported square 300/360/600/720 DPI modes, uses `pwg-raster-document-resolution-supported` for PWG Raster when present, and `RS...` values from `urf-supported` for Apple Raster. Other engines use the generic `printer-resolution-supported` list. If a printer omits a format-specific list, MintPRINT falls back to the generic list for compatibility with older printers and cached profiles. Asymmetric resolutions are not shown yet because the current driver stores one capture DPI for both axes.
+
 Query normally fills the **DPI** cycle from the printer's reported
 `printer-resolution-supported` and PWG Raster resolution attributes. Some
 printers under-report this list: the Canon TS8300 series advertises only 600

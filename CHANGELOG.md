@@ -16,7 +16,15 @@ to this page; replace that summary when preparing the next release.
 
 ## Unreleased
 
-_No unreleased changes._
+- **Engine-aware 360/720 DPI support (driver 41.19, issue #95).** Settings now accepts reported 360 and 720 DPI square modes and keeps generic printer resolutions separate from PWG Raster and Apple Raster capabilities. This prevents a generic high-resolution mode from being offered to a raster decoder that did not advertise it, while preserving the existing marked 300* compatibility override for confirmed printers. Asymmetric modes such as 1440x720 remain intentionally hidden until MintPRINT can represent independent X/Y DPI.
+
+- **Large jobs tolerate slow printer back-pressure (driver 41.18).** The
+  document-body upload now allows up to three minutes without TCP progress,
+  while connection, control-message and final-response timeouts remain short.
+  This targets small-buffer printers such as the Canon TS8360 from issue #91,
+  which can pause network reads while processing a long PWG Raster job.
+  Failures now distinguish an upload stall as error `-19` and record the
+  document bytes sent/total in the debug log and retained status sidecar.
 
 ## 1.3.1
 

@@ -1,7 +1,7 @@
 #ifndef MINTPRINT_DPI_OPTIONS_H
 #define MINTPRINT_DPI_OPTIONS_H
 
-#define MP_DPI_MAX_OPTIONS 2
+#define MP_DPI_MAX_OPTIONS 8
 
 struct MPDpiOptions {
     int values[MP_DPI_MAX_OPTIONS];

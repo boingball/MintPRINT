@@ -289,6 +289,10 @@ int num_supported_print_modes = 0;
 #define MP_MAX_DPI_OPTIONS MP_DPI_MAX_OPTIONS
 int supported_dpi[MP_MAX_DPI_OPTIONS];
 int num_supported_dpi = 0;
+int supported_pwg_dpi[MP_MAX_DPI_OPTIONS];
+int num_supported_pwg_dpi = 0;
+int supported_urf_dpi[MP_MAX_DPI_OPTIONS];
+int num_supported_urf_dpi = 0;
 static struct MPDpiOptions mp_dpi_options = {
     { 300, 0 }, { 0, 0 }, 1, 0, 300
 };
@@ -402,34 +406,42 @@ void store_int_value(int dest[MAX_VALUES], int *count, int val) {
     dest[(*count)++] = val;
 }
 
-static void mp_add_supported_dpi(int dpi) {
+static BOOL mp_dpi_value_supported(int dpi) {
+    return dpi == 300 || dpi == 360 || dpi == 600 || dpi == 720;
+}
+
+static void mp_add_supported_dpi_to(int *dest, int *count, int dpi) {
     int i;
 
-    if (dpi != 300 && dpi != 600) return;
-    for (i = 0; i < num_supported_dpi; ++i) {
-        if (supported_dpi[i] == dpi) return;
+    if (!dest || !count || !mp_dpi_value_supported(dpi)) return;
+    for (i = 0; i < *count; ++i) {
+        if (dest[i] == dpi) return;
     }
-    if (num_supported_dpi < MP_MAX_DPI_OPTIONS)
-        supported_dpi[num_supported_dpi++] = dpi;
+    if (*count < MP_MAX_DPI_OPTIONS)
+        dest[(*count)++] = dpi;
 }
 
 static int mp_normalise_ipp_dpi(ULONG resolution, UBYTE units) {
     ULONG dpi = resolution;
 
     if (units == 4) {
-        /* IPP dpcm -> dpi. Tolerances below absorb the integer rounding
-         * used by printers for 118dpcm/236dpcm (roughly 300/600dpi). */
+        /* IPP dpcm -> dpi. Real printers commonly round the dpcm
+         * figure, so keep a small tolerance around known modes. */
         dpi = (resolution * 254UL + 50UL) / 100UL;
     } else if (units != 3) {
         return 0;
     }
 
     if (dpi >= 295UL && dpi <= 305UL) return 300;
+    if (dpi >= 355UL && dpi <= 365UL) return 360;
     if (dpi >= 595UL && dpi <= 605UL) return 600;
+    if (dpi >= 715UL && dpi <= 725UL) return 720;
     return 0;
 }
 
-static void mp_add_ipp_resolution(const UBYTE *raw, int value_len) {
+static void mp_add_ipp_resolution_to(const UBYTE *raw, int value_len,
+                                     int *dest, int *count,
+                                     const char *scope) {
     ULONG xres;
     ULONG yres;
     int xdpi;
@@ -444,11 +456,38 @@ static void mp_add_ipp_resolution(const UBYTE *raw, int value_len) {
     xdpi = mp_normalise_ipp_dpi(xres, raw[8]);
     ydpi = mp_normalise_ipp_dpi(yres, raw[8]);
 
-    /* The driver currently has one DPI setting for both axes, so do not
-     * advertise asymmetric printer resolutions it cannot represent. */
+    /* MintPRINT currently stores one capture DPI for both axes.
+     * Ignore asymmetric modes (for example Epson 1440x720) until
+     * the config and raster writers can represent X/Y separately. */
     if (xdpi && xdpi == ydpi) {
-        mp_add_supported_dpi(xdpi);
-        printf("Printer supports %d DPI\n", xdpi);
+        mp_add_supported_dpi_to(dest, count, xdpi);
+        printf("%s supports %d DPI\n", scope ? scope : "Printer", xdpi);
+    }
+}
+
+static void mp_add_urf_resolutions(const char *value) {
+    const char *p;
+
+    if (!value || value[0] != 'R' || value[1] != 'S') return;
+    p = value + 2;
+    while (*p) {
+        ULONG dpi = 0;
+        BOOL any = FALSE;
+
+        while (*p >= '0' && *p <= '9') {
+            dpi = dpi * 10UL + (ULONG)(*p - '0');
+            any = TRUE;
+            ++p;
+        }
+        if (any && dpi <= 32767UL &&
+            mp_dpi_value_supported((int)dpi)) {
+            mp_add_supported_dpi_to(supported_urf_dpi,
+                                    &num_supported_urf_dpi,
+                                    (int)dpi);
+            printf("Apple Raster supports %lu DPI\n", dpi);
+        }
+        if (*p != '-') break;
+        ++p;
     }
 }
 
@@ -1676,7 +1715,9 @@ static void apply_saved_option_state(struct Window *win) {
                               TAG_DONE);
     }
 
-    if (num_supported_dpi == 0) {
+    if (num_supported_dpi == 0 &&
+        num_supported_pwg_dpi == 0 &&
+        num_supported_urf_dpi == 0) {
         g = find_gadget_by_id(GAD_RESOLUTION);
         if (g)
             GT_SetGadgetAttrs(g, win, NULL,
@@ -3085,11 +3126,28 @@ void update_print_mode_dropdown(struct Window *win) {
 
 void update_dpi_dropdown(struct Window *win) {
     struct Gadget *g;
+    const int *reported = supported_dpi;
+    int reported_count = num_supported_dpi;
     int i;
     int count;
     BOOL has_compat = FALSE;
 
-    mp_dpi_build_options(supported_dpi, num_supported_dpi,
+    /* Generic printer-resolution-supported is not automatically a
+     * promise that a particular raster decoder accepts every mode.
+     * Prefer format-specific capabilities when the printer supplied
+     * them; fall back to the generic list for older/less-complete
+     * printers and legacy capability caches. */
+    if (strcmp(driver_engine_buffer, "pwg-raster") == 0 &&
+        num_supported_pwg_dpi > 0) {
+        reported = supported_pwg_dpi;
+        reported_count = num_supported_pwg_dpi;
+    } else if (strcmp(driver_engine_buffer, "urf") == 0 &&
+               num_supported_urf_dpi > 0) {
+        reported = supported_urf_dpi;
+        reported_count = num_supported_urf_dpi;
+    }
+
+    mp_dpi_build_options(reported, reported_count,
                          mp_dpi_engine_allows_compat(driver_engine_buffer),
                          driver_resolution,
                          driver_resolution_explicit ? 1 : 0,
@@ -3122,7 +3180,7 @@ void update_dpi_dropdown(struct Window *win) {
         GT_SetGadgetAttrs(g, win, NULL,
                           GTCY_Labels, (ULONG)resolution_labels,
                           GTCY_Active, (ULONG)mp_dpi_options.active,
-                          GA_Disabled, num_supported_dpi > 0 ? FALSE : TRUE,
+                          GA_Disabled, reported_count > 0 ? FALSE : TRUE,
                           TAG_DONE);
         RefreshGList(g, win, NULL, 1);
         GT_RefreshWindow(win, NULL);
@@ -3470,6 +3528,8 @@ static void mp_cache_clear_capabilities(void) {
     num_supported_print_modes = 0;
     num_supported_quality = 0;
     num_supported_dpi = 0;
+    num_supported_pwg_dpi = 0;
+    num_supported_urf_dpi = 0;
     num_media_tray_mappings = 0;
     has_media_ready = FALSE;
     jpeg_constraints_queried = FALSE;
@@ -3591,6 +3651,16 @@ static BOOL mp_cache_write_file(CONST_STRPTR filename,
 
     for (i = 0; i < num_supported_dpi; ++i) {
         snprintf(line, sizeof(line), "DPI=%d\n", supported_dpi[i]);
+        FPuts(fh, line);
+    }
+
+    for (i = 0; i < num_supported_pwg_dpi; ++i) {
+        snprintf(line, sizeof(line), "PWG_DPI=%d\n", supported_pwg_dpi[i]);
+        FPuts(fh, line);
+    }
+
+    for (i = 0; i < num_supported_urf_dpi; ++i) {
+        snprintf(line, sizeof(line), "URF_DPI=%d\n", supported_urf_dpi[i]);
         FPuts(fh, line);
     }
 
@@ -3766,8 +3836,18 @@ static BOOL mp_cache_load_file(CONST_STRPTR filename) {
                               mp_cap_cache_line + 8);
                 num_supported_quality++;
             }
+        } else if (strncmp(mp_cap_cache_line, "PWG_DPI=", 8) == 0) {
+            mp_add_supported_dpi_to(supported_pwg_dpi,
+                                    &num_supported_pwg_dpi,
+                                    atoi(mp_cap_cache_line + 8));
+        } else if (strncmp(mp_cap_cache_line, "URF_DPI=", 8) == 0) {
+            mp_add_supported_dpi_to(supported_urf_dpi,
+                                    &num_supported_urf_dpi,
+                                    atoi(mp_cap_cache_line + 8));
         } else if (strncmp(mp_cap_cache_line, "DPI=", 4) == 0) {
-            mp_add_supported_dpi(atoi(mp_cap_cache_line + 4));
+            mp_add_supported_dpi_to(supported_dpi,
+                                    &num_supported_dpi,
+                                    atoi(mp_cap_cache_line + 4));
         }
     }
 
@@ -6233,6 +6313,7 @@ static void mp_spool_error_reason(LONG error, LONG http_status,
         case -18: reason = "Connection timed out"; break;
         case -11:
         case -13: reason = "Sending job failed (connection dropped)"; break;
+        case -19: reason = "Sending job stalled (printer buffer full?)"; break;
         case -12: reason = "Error reading job file"; break;
         case -14: reason = "Printer sent an invalid response"; break;
         case -17: reason = "Printer accepted job but never responded"; break;
@@ -6603,6 +6684,7 @@ static BOOL mp_spool_retry_job(struct MPSpoolJobEntry *job, int unit_index)
     result.http_status = 0;
     result.ipp_status = 0xffff;
     result.document_bytes = 0;
+    result.document_bytes_sent = 0;
     rc = mp_ipp_print_document(&cfg, (CONST_STRPTR)job->job_path,
                                document_format, &result);
 
@@ -6618,8 +6700,12 @@ static BOOL mp_spool_retry_job(struct MPSpoolJobEntry *job, int unit_index)
         Write(sfh, buf, n);
         if (rc != 0) {
             n = snprintf(buf, sizeof(buf), "ERROR=%ld %ld %d\n",
-                        (long)result.error, (long)result.http_status,
-                        (int)result.ipp_status);
+                         (long)result.error, (long)result.http_status,
+                         (int)result.ipp_status);
+            Write(sfh, buf, n);
+            n = snprintf(buf, sizeof(buf), "BYTES=%lu %lu\n",
+                         (unsigned long)result.document_bytes_sent,
+                         (unsigned long)result.document_bytes);
             Write(sfh, buf, n);
         }
         Close(sfh);
@@ -8013,6 +8099,8 @@ int query_printer_attributes(const char *ip, int port, char *response, int maxle
     num_supported_print_modes = 0;
     num_supported_quality = 0;
     num_supported_dpi = 0;
+    num_supported_pwg_dpi = 0;
+    num_supported_urf_dpi = 0;
     num_media_tray_mappings = 0;
     has_media_ready = FALSE;
     jpeg_constraints_queried = TRUE;
@@ -8108,6 +8196,7 @@ int query_printer_attributes(const char *ip, int port, char *response, int maxle
             "print-scaling-supported", "print-quality-supported",
             "printer-resolution-default", "printer-resolution-supported",
             "pwg-raster-document-resolution-supported",
+            "urf-supported",
             "pwg-raster-document-sheet-back",
             "document-format-supported", "printer-make-and-model",
             "sides-supported", "operations-supported",
@@ -8686,11 +8775,23 @@ query_receive_pump_gui:
                                    pwg_sheet_back_value);
                         }
                     } else if ((strcmp(name, "printer-resolution-default") == 0 ||
-                                strcmp(name, "printer-resolution-supported") == 0 ||
-                                strcmp(name, "pwg-raster-document-resolution-supported") == 0) &&
-                               value_tag == 0x32 && value_len == 9) {
-                        mp_add_ipp_resolution((const UBYTE *)ipp_start + pos - value_len,
-                                              value_len);
+                            strcmp(name, "printer-resolution-supported") == 0) &&
+                           value_tag == 0x32 && value_len == 9) {
+                    mp_add_ipp_resolution_to(
+                        (const UBYTE *)ipp_start + pos - value_len,
+                        value_len, supported_dpi, &num_supported_dpi,
+                        "Printer");
+                } else if (strcmp(name,
+                                  "pwg-raster-document-resolution-supported") == 0 &&
+                           value_tag == 0x32 && value_len == 9) {
+                    mp_add_ipp_resolution_to(
+                        (const UBYTE *)ipp_start + pos - value_len,
+                        value_len, supported_pwg_dpi,
+                        &num_supported_pwg_dpi, "PWG Raster");
+                } else if (strcmp(name, "urf-supported") == 0 &&
+                           (value_tag == 0x44 || value_tag == 0x41 ||
+                            value_tag == 0x42)) {
+                    mp_add_urf_resolutions(value);
                     } else if (strcmp(name, "print-quality-supported") == 0 &&
                                value_tag == 0x23 && value_len == 4) {
                         /* print-quality-supported is an IPP enum (RFC 8011
