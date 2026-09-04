@@ -66,7 +66,7 @@ For a brand new printer, the quickest path is:
        in AmigaOS Printer Preferences and save there too.
     6. Click Test Print to confirm everything actually reaches paper.
 
-Only Unit0 is what the installed driver reads when it prints - see
+The installed driver reads the separate Active profile when it prints - see
 @{" Multiple printers (Units) " LINK "Units"} if you have more than one
 network printer.
 
@@ -293,14 +293,17 @@ Picking a different Unit reloads the entire window - IP/host, path,
 engine, media, cached capabilities, everything - from that Unit's own
 saved files.
 
-IMPORTANT: only Unit0 is what the installed MintPRINT driver actually
-reads when it prints. Unit1-7 are switchable saved profiles, not
-simultaneously active printers. To make a different Unit the one that
-actually prints, select it and click Activate: this copies that Unit's
-saved settings (and cached capabilities) over Unit0's, then switches
-the dropdown back to Unit0. Activating overwrites Unit0's previous
-settings, so save them to a spare empty Unit first if you want to keep
-them.
+The installed MintPRINT driver reads the separate live profile:
+
+    ENV:MintPRINT/Active
+    ENVARC:MintPRINT/Active
+
+Unit0 through Unit7 are independent saved profiles. To make a different
+Unit the one that actually prints, select it and click Activate: this
+writes that Unit's settings to the Active profile and records it as the
+active Unit. Unit0 and every other saved profile remain unchanged. Saving
+the active Unit also updates the Active profile. Older installations
+without Active fall back to their existing Unit0 configuration.
 
 @{" Back to Contents " LINK "Main"}
 @endnode
