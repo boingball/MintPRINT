@@ -2,7 +2,7 @@ Short:        IPP/AirPrint driver and setup tool
 Author:       Darren Banfi (boingball)
 Uploader:     boingball@gmail.com
 Type:         driver/print
-Version:      1.3.2
+Version:      1.3.3
 Requires:     68000+; AmigaOS 2.04+; TCP/IP stack providing bsdsocket.library
 Architecture: m68k-amigaos >= 2.04
 
@@ -148,8 +148,9 @@ After rebooting:
   7. Use Test Print to verify the complete printer.device -> MintPRINT ->
      IPP path.
 
-The active printer configuration is Unit0. Additional configurations can
-be stored in Unit1-Unit7 and copied to Unit0 when required.
+The active printer configuration is kept separately in ENV:MintPRINT/Active
+and ENVARC:MintPRINT/Active. Unit0 through Unit7 remain independent saved
+profiles; Activate changes the live profile without overwriting any Unit.
 
 AmigaOS 2.x/3.0/3.1 notes
 --------------------------
@@ -224,13 +225,14 @@ cross-project collaboration: sharing compatibility findings and recent fixes,
 allowing MintPRINT's implementation to be compared against AmiAirPrint, and
 helping identify gaps in classic application and printer compatibility.
 
-What's new in 1.3.2
+What's new in 1.3.3
 -------------------
 
   - Final driver revision 41.19.
   - Test Print uses the selected Unit1-Unit7 profile for that one job without
-    replacing the active Unit0 printer.
-  - Activating a saved unit accepts profiles stored in either ENV: or ENVARC:.
+    replacing the active printer.
+  - Activate now writes a separate live ENV:/ENVARC: profile, preserving
+    Unit0 through Unit7.
   - Query Printer selections for media/tray, colour, quality and scaling now
     save correctly, including on the AmigaOS 2.x-compatible event path.
   - View Spooler now shows the current RAM/T: job and retains a failed rendered
