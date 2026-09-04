@@ -6,8 +6,11 @@ MintPrint Settings (`src/MintPrintSettings.c`, formerly `IPP-Test16.c` /
 
 Startup behaviour:
 
-- Load `ENV:MintPRINT/Unit0` first (the Unit dropdown starts on Unit0).
-- Fall back to `ENVARC:MintPRINT/Unit0`.
+- Load the recorded active unit, defaulting to Unit0 for older installations.
+- Load that unit's saved profile from `ENV:MintPRINT/UnitN`, falling back to
+  `ENVARC:MintPRINT/UnitN`.
+- The driver reads the separate live profile from `ENV:MintPRINT/Active`,
+  falling back to `ENVARC:MintPRINT/Active`, with legacy Unit0 fallback.
 - Saved media, colour, quality and scaling values are shown before a query.
 - If no saved value exists, capability controls show `Not Detected` and are
   ghosted until Query Printer succeeds.
@@ -41,29 +44,31 @@ engine, media, cached capabilities, everything - from that unit's saved
 files, exactly like **File > Reload Driver Settings** does for the current
 one.
 
-**Only Unit0 is what `DEVS:Printers/MintPRINT` actually reads at print
-time** - the driver has no concept of "which unit" it was opened as, so
-Unit1+ are switchable *saved profiles*, not simultaneously-active printers.
-**Activate**, next to the Unit dropdown, is how a different printer becomes
-the one that actually prints: it copies the selected unit's saved
-`ENV:`/`ENVARC:` config (and cached capabilities, if any) over Unit0's, then
-switches the dropdown back to Unit0 so the window reflects what is now
-live. Unit0's own previous settings are overwritten by this - if they are
-worth keeping, save them to an empty unit slot first. Activate on Unit0
-itself is a no-op (it is already active); on a unit with nothing saved yet
-it just reports that there is nothing to copy.
+The **Unit** dropdown is the saved-profile selector. Unit0 through Unit7
+remain independent profiles and are never overwritten by activation.
+
+MintPrint Settings keeps the currently active printer in a separate live
+profile:
+
+    ENV:MintPRINT/Active
+    ENVARC:MintPRINT/Active
+
+**Activate** writes the selected Unit's current settings to that Active
+profile and records which Unit is active. It does not modify Unit0 or any
+other saved Unit profile. Saving the active Unit also updates Active so the
+driver stays in step.
 
 `ENGINE=jpeg`, `ENGINE=postscript`, `ENGINE=pwg-raster`, `ENGINE=urf`, and
 `ENGINE=pdf` are persisted by the preferences program and all five are real
 driver backends:
-`DEVS:Printers/MintPRINT` reads Unit0's `ENGINE=` and produces a JPEG, a
+`DEVS:Printers/MintPRINT` reads the Active profile's `ENGINE=` and produces a JPEG, a
 PostScript (`application/postscript`), PWG Raster (`image/pwg-raster`), Apple
 Raster (`image/urf`), or a PDF (`application/pdf`) document accordingly. See
 `docs/POSTSCRIPT_ENGINE.md`,
 `docs/PWG_RASTER.md`, and `docs/PDF_ENGINE.md` for how each encoder works and
 what has and hasn't been physically test-printed yet.
 
-The driver reloads Unit0 at the start of every graphics print. Replacing the
+The driver reloads the Active profile at the start of every graphics print. Replacing the
 printer driver binary itself still requires a reboot before testing it.
 
 ## Duplex
