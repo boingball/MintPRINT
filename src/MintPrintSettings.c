@@ -10300,22 +10300,26 @@ void process_window_events(struct Window *win) {
                                 custom_printf("Unit%d has no saved settings yet - nothing to activate.\n",
                                               current_unit_index);
                             } else {
-                                char src_config[64];
+                                int selected_unit = current_unit_index;
                                 char dst_env[64], dst_envarc[64];
                                 BOOL ok;
 
                                 unit_config_path(0, FALSE, dst_env, sizeof(dst_env));
                                 unit_config_path(0, TRUE, dst_envarc, sizeof(dst_envarc));
 
+                                /* Activate the settings currently loaded in the
+                                 * GUI directly. The previous implementation copied
+                                 * UnitN through a .new/.bak Rename() sequence;
+                                 * that is not reliable on all ENV:/ENVARC:
+                                 * handlers and hid the failing operation behind
+                                 * the generic "Could not copy" message. */
+                                capture_driver_settings(win);
+                                current_unit_index = 0;
                                 ok = ensure_config_dir((CONST_STRPTR)"ENV:MintPRINT") &&
                                      ensure_config_dir((CONST_STRPTR)"ENVARC:MintPRINT") &&
-                                     unit_config_source_path(current_unit_index,
-                                                             src_config,
-                                                             sizeof(src_config)) &&
-                                     mp_copy_file((CONST_STRPTR)src_config,
-                                                  (CONST_STRPTR)dst_env) &&
-                                     mp_copy_file((CONST_STRPTR)src_config,
-                                                  (CONST_STRPTR)dst_envarc);
+                                     write_driver_config_file((CONST_STRPTR)dst_env) &&
+                                     write_driver_config_file((CONST_STRPTR)dst_envarc);
+                                current_unit_index = selected_unit;
 
                                 if (ok) {
                                     char src_cache_env[64], src_cache_envarc[64];
