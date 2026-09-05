@@ -177,7 +177,7 @@ Anthropic Claude.
 
 Special thanks to **Andreas Stürmer**, author of
 [AmiAirPrint](https://github.com/Andiweli/AmiAirprint), for friendly
-cross-project collaboration: sharing compatibility findings and recent fixes,
+cross-project collaboration: sharing compatibility findings and pointers to relevant fixes,
 allowing MintPRINT's implementation to be compared against AmiAirPrint, and
 helping identify gaps in classic application and printer compatibility.
 
