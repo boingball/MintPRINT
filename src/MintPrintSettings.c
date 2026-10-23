@@ -203,7 +203,7 @@ static BOOL mp_copy_file(CONST_STRPTR src, CONST_STRPTR dst);
 
 // Define the USED macro for GCC
 #define USED __attribute__((used))
-#define MINTPRINT_SETTINGS_VERSION "1.3.3"
+#define MINTPRINT_SETTINGS_VERSION "1.3.4"
 #define MINTPRINT_DRIVER_DEST ((CONST_STRPTR)"DEVS:Printers/MintPRINT")
 
 /* MintPrint Settings now ships as a single drawer containing both bundled
@@ -229,7 +229,7 @@ static BOOL mp_read_driver_version(CONST_STRPTR path, struct MPDriverVersion *ou
 
 /* Visible both to AmigaOS's Version command and in the About requester. */
 static const char USED mintprint_version[] =
-    "$VER: MintPrintSettings " MINTPRINT_SETTINGS_VERSION " (04.09.2026)";
+    "$VER: MintPrintSettings " MINTPRINT_SETTINGS_VERSION " (23.10.2026)";
 
 // Simple extension check
 BOOL has_extension(const char *filename, const char *ext) {
@@ -7488,6 +7488,36 @@ static void mp_spool_win_process(void)
         mp_spool_win_close();
 }
 
+/* Set while a Query is in flight when the user asks to stop it: the main
+ * window's close gadget (which also sets mp_quit_requested, so
+ * process_window_events() exits as soon as the Query unwinds) or Ctrl-C.
+ * perform_query_flow() clears mp_query_cancelled at its start and end. */
+static BOOL mp_query_cancelled = FALSE;
+static BOOL mp_quit_requested = FALSE;
+
+/* Keeps the main window responsive during blocking network work. Every
+ * pending IntuiMessage is still replied to, as the plain drain loops this
+ * replaces did, but a close-gadget click is no longer silently thrown
+ * away: a real-hardware report had the startup printer-status refresh
+ * (which runs before process_window_events() starts) swallow every close
+ * click while it retried a switched-off printer, leaving no way to quit.
+ * Returns TRUE once the current Query should stop. */
+static BOOL mp_pump_gui_during_query(void) {
+    if (window) {
+        struct IntuiMessage *imsg;
+        while ((imsg = GT_GetIMsg(window->UserPort))) {
+            if (imsg->Class == IDCMP_CLOSEWINDOW) {
+                mp_quit_requested = TRUE;
+                mp_query_cancelled = TRUE;
+            }
+            GT_ReplyIMsg(imsg);
+        }
+    }
+    if (CheckSignal(SIGBREAKF_CTRL_C))
+        mp_query_cancelled = TRUE;
+    return (BOOL)(mp_query_cancelled || mp_quit_requested);
+}
+
 /* Bounded, GUI-responsive connect(): socket -> IoctlSocket(FIONBIO on) ->
  * connect() -> if EINPROGRESS, WaitSelect() on the write+exception sets in
  * short chunks (pumping GUI events between them) until connected, refused,
@@ -7507,7 +7537,8 @@ static void mp_spool_win_process(void)
  * mode being unavailable on this NDK/stack.
  *
  * Returns 0 on success, -1 on failure (errno set: from SO_ERROR when the
- * stack reported one, or ETIMEDOUT for this function's own timeout). The
+ * stack reported one, ETIMEDOUT for this function's own timeout, or EINTR
+ * when mp_pump_gui_during_query() reports a user cancel). The
  * socket is always left blocking again before returning, whatever the
  * outcome, so callers don't need to know this happened. */
 static int mp_connect_with_timeout(int sockfd, struct sockaddr_in *addr, int timeout_secs) {
@@ -7551,11 +7582,11 @@ static int mp_connect_with_timeout(int sockfd, struct sockaddr_in *addr, int tim
             struct timeval tv;
             long ready;
 
-            if (window) {
-                struct IntuiMessage *imsg;
-                while ((imsg = GT_GetIMsg(window->UserPort))) {
-                    GT_ReplyIMsg(imsg);
-                }
+            if (mp_pump_gui_during_query()) {
+                printf("connect: cancelled by user\n");
+                errno = EINTR;
+                outcome = -1;
+                break;
             }
 
             FD_ZERO(&wfds);
@@ -8452,17 +8483,14 @@ int query_printer_attributes(const char *ip, int port, char *response, int maxle
          * genuinely transient truncated response) so perform_query_flow()
          * can tell "this endpoint doesn't answer at all" apart from "that
          * attempt was flaky" and skip straight to the next port instead
-         * of repeating a now-deterministically-bounded connect failure. */
-        return -2;
+         * of repeating a now-deterministically-bounded connect failure.
+         * -3 = the user cancelled (close gadget or Ctrl-C), so no more
+         * attempts at all. */
+        return mp_query_cancelled ? -3 : -2;
     }
 
     // Process GUI events
-    if (window) {
-        struct IntuiMessage *imsg;
-        while ((imsg = GT_GetIMsg(window->UserPort))) {
-            GT_ReplyIMsg(imsg);
-        }
-    }
+    mp_pump_gui_during_query();
 
     // Send request
     printf("Sending request...\n");
@@ -8482,12 +8510,7 @@ int query_printer_attributes(const char *ip, int port, char *response, int maxle
     free(ipp_payload);
 
     // Process GUI events
-    if (window) {
-        struct IntuiMessage *imsg;
-        while ((imsg = GT_GetIMsg(window->UserPort))) {
-            GT_ReplyIMsg(imsg);
-        }
-    }
+    mp_pump_gui_during_query();
 
     // Receive response in bounded, GUI-responsive chunks. HTTP permits three
     // body framing modes here: Content-Length, Transfer-Encoding: chunked, or
@@ -8611,11 +8634,14 @@ int query_printer_attributes(const char *ip, int port, char *response, int maxle
 
 query_receive_pump_gui:
         // Process GUI events to keep the mouse responsive
-        if (window) {
-            struct IntuiMessage *imsg;
-            while ((imsg = GT_GetIMsg(window->UserPort))) {
-                GT_ReplyIMsg(imsg);
-            }
+        if (mp_pump_gui_during_query()) {
+            printf("Query cancelled while waiting for response\n");
+            snprintf(response, maxlen, "Query cancelled");
+            CloseSocket(sockfd);
+            free(name);
+            free(value);
+            operation_in_progress = FALSE;
+            return -3;
         }
     }
 
@@ -9038,12 +9064,9 @@ query_receive_pump_gui:
                 }
 
                 attributes_processed++;
-                if (window) {
-                    struct IntuiMessage *imsg;
-                    while ((imsg = GT_GetIMsg(window->UserPort))) {
-                        GT_ReplyIMsg(imsg);
-                    }
-                }
+                /* Parsing is local and short - note a close click here so
+                 * it isn't lost, but let the parse finish. */
+                mp_pump_gui_during_query();
             }
 
             if (pos == group_start_pos) {
@@ -9188,9 +9211,17 @@ static void perform_query_flow(struct Window *win, const char *ip_only, int port
      * always calls with port_hint 0, and manual entry without a ":port"
      * does too), try 631 first so we don't latch onto an 80 response that
      * "succeeds" but is missing capabilities like scaling. An explicit
-     * user-typed port is still tried first, ahead of the 631 fallback. */
+     * user-typed port is still tried first, ahead of the 631 fallback.
+     * A successful Query saves the endpoint as "ip:port", so a saved 631
+     * comes back here as port_hint 631 - that used to become {631, 631},
+     * retrying the same dead port twice over before giving up on a
+     * switched-off printer. A hint of 631 is now tried on its own. */
     int ports_to_try[2];
-    if (port_hint > 0) {
+    int num_ports = 2;
+    if (port_hint == 631) {
+        ports_to_try[0] = 631;
+        num_ports = 1;
+    } else if (port_hint > 0) {
         ports_to_try[0] = port_hint;
         ports_to_try[1] = 631;
     } else {
@@ -9200,12 +9231,14 @@ static void perform_query_flow(struct Window *win, const char *ip_only, int port
     int i, attempt;
     BOOL ok = FALSE;
 
+    mp_query_cancelled = FALSE;
+
     // A scan can fail an individual attempt for purely transient network
     // reasons (a slow/incomplete response - see query_printer_attributes).
     // Retry a few times per port before moving on, rather than treating one
     // flaky attempt as "the printer has no capabilities".
-    for (i = 0; i < 2 && !ok; i++) {
-        for (attempt = 0; attempt < 3 && !ok; attempt++) {
+    for (i = 0; i < num_ports && !ok && !mp_query_cancelled; i++) {
+        for (attempt = 0; attempt < 3 && !ok && !mp_query_cancelled; attempt++) {
             int qrc;
             printf("Trying %s:%d (attempt %d/3)...\n", ip_only, ports_to_try[i], attempt + 1);
             qrc = query_printer_attributes(ip_only, ports_to_try[i], response,
@@ -9233,6 +9266,8 @@ static void perform_query_flow(struct Window *win, const char *ip_only, int port
                 apply_job_defaults_to_gadgets(win);
                 mp_check_any_engine_supported(win);
                 ok = TRUE;
+            } else if (qrc == -3) {
+                break;
             } else {
                 printf("Query attempt %d/3 on %s:%d failed\n", attempt + 1, ip_only, ports_to_try[i]);
                 /* -2 = connect() itself couldn't be established (see
@@ -9262,7 +9297,17 @@ static void perform_query_flow(struct Window *win, const char *ip_only, int port
 
     if (!ok) {
         custom_printf("CLEAR");
-        custom_printf("Scan failed - please try Query again");
+        if (mp_query_cancelled)
+            custom_printf("Query cancelled");
+        else
+            custom_printf("Scan failed - please try Query again");
+        /* query_printer_attributes() emptied the capability lists before
+         * it tried to connect. When this endpoint has a cache (the usual
+         * case: a saved printer that is simply switched off) put those
+         * lists back, so they match the dropdowns still on screen. Ink
+         * levels are not cached, so they stay cleared. */
+        if (load_capability_cache_for_current_endpoint())
+            printf("Keeping cached printer capabilities\n");
         mp_clear_printer_icon();
         mp_load_printer_icon_cache(FALSE);
     } else {
@@ -9275,6 +9320,7 @@ static void perform_query_flow(struct Window *win, const char *ip_only, int port
     mp_draw_marker_strips();
     mp_draw_sides_hint();
     mp_draw_printer_icon();
+    mp_query_cancelled = FALSE;
 }
 
 /* Allocate the Query response only while a Query is running. Classic
@@ -10307,7 +10353,9 @@ void process_window_events(struct Window *win) {
     ULONG imsgClass;
     UWORD imsgCode;
     struct Gadget *gad;
-    BOOL terminated = FALSE;
+    /* A close click during the startup printer-status refresh (which runs
+     * before this loop) has already been seen by mp_pump_gui_during_query(). */
+    BOOL terminated = mp_quit_requested;
     char ip_only[64];
     int port = -1;
 
@@ -10781,6 +10829,9 @@ void process_window_events(struct Window *win) {
                     
             }
 
+            /* Closed while a Query started from this message was running. */
+            if (mp_quit_requested)
+                terminated = TRUE;
             imsg = GT_GetIMsg(win->UserPort);
         }
     }
