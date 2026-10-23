@@ -31,8 +31,11 @@ MintPrint Settings for setup, discovery and test printing.
 <img width="525" height="327" alt="image" src="https://github.com/user-attachments/assets/ba4cfd1f-8b0f-4aee-91b9-a6b221712ca5" />
 
 
-## What's new in 1.3.3
+## What's new in 1.3.4
 
+- **MintPrint Settings can always be closed:** if the saved printer is switched
+  off, the startup status refresh no longer ignores the close gadget, and it
+  gives up sooner.
 - **Final driver revision 41.19.**
 - **Selected-unit Test Print:** testing Unit1-Unit7 uses that profile for the
   one job without replacing the active printer.
