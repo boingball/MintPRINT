@@ -12,7 +12,27 @@ Keep the full version-by-version history here. The front page and Aminet
 readme should carry only a short summary of the latest version, with a link
 to this page; replace that summary when preparing the next release.
 
-[1.3.3](#133) | [1.3.2](#132) | [1.3.1](#131) | [1.3.0](#130) | [1.2.7](#127) | [1.2.6](#126) | [1.2.5](#125) | [1.2.4](#124) | [1.2.3](#123) | [1.2.2](#122) | [1.2.1](#121) | [1.2.0](#120) | [1.1.0](#110) | [1.0.3b](#103b) | [1.0.3](#103) | [1.0.2](#102) | [1.0.0](#100)
+[1.3.4](#134) | [1.3.3](#133) | [1.3.2](#132) | [1.3.1](#131) | [1.3.0](#130) | [1.2.7](#127) | [1.2.6](#126) | [1.2.5](#125) | [1.2.4](#124) | [1.2.3](#123) | [1.2.2](#122) | [1.2.1](#121) | [1.2.0](#120) | [1.1.0](#110) | [1.0.3b](#103b) | [1.0.3](#103) | [1.0.2](#102) | [1.0.0](#100)
+
+## 1.3.4
+
+MintPRINT 1.3.4 fixes MintPrint Settings becoming impossible to close while
+the saved printer is switched off.
+
+- **The window can always be closed during a Query.** On opening, MintPrint
+  Settings refreshes the saved printer's status before it starts handling
+  window events, and the network code discarded every pending window message
+  while it waited. With the printer off, close-gadget clicks were lost until
+  every retry had timed out. A close click now cancels the Query and quits;
+  Ctrl-C cancels the Query and leaves the window open.
+- **A saved port 631 is no longer retried twice.** A successful Query saves
+  the endpoint as `ip:631`, which the retry logic expanded to 631 and then
+  631 again. A switched-off printer now gives up after two attempts (about
+  16 seconds) instead of four.
+- **Cached capabilities survive a failed Query.** A Query empties the
+  capability lists before connecting; when the printer does not answer, the
+  lists are now reloaded from that endpoint's cache so they match the
+  dropdowns still on screen. Ink levels are not cached and stay cleared.
 
 ## 1.3.3
 
